@@ -132,6 +132,15 @@ menu "Global build settings"
 		  This removes all ipkg/opkg status data files from the target directory
 		  before building the root filesystem.
 
+	config CLEAN_APK
+		bool
+		prompt "Remove APK package management data from final images"
+		depends on USE_APK
+		help
+		  This removes the APK database, repositories and package file lists
+		  before building the root filesystem. Static conffile checksums are
+		  retained so sysupgrade can continue preserving modified settings.
+
 	config IPK_FILES_CHECKSUMS
 		bool
 		prompt "Record files checksums in package metadata"
