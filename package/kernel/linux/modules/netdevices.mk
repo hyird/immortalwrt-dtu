@@ -626,7 +626,7 @@ $(eval $(call KernelPackage,phy-vitesse))
 define KernelPackage/phy-aeonsemi-as21xxx
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=Aeonsemi AS21xxx 10G Ethernet PHY
-  DEPENDS:=+aeonsemi-as21xxx-firmware +kmod-libphy
+  DEPENDS:=+kmod-libphy
   KCONFIG:=CONFIG_AS21XXX_PHY
   FILES:= \
    $(LINUX_DIR)/drivers/net/phy/as21xxx.ko
@@ -643,7 +643,7 @@ $(eval $(call KernelPackage,phy-aeonsemi-as21xxx))
 define KernelPackage/phy-airoha-en8811h
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=Airoha EN8811H 2.5G Ethernet PHY
-  DEPENDS:=+airoha-en8811h-firmware +kmod-libphy
+  DEPENDS:=+kmod-libphy
   KCONFIG:=CONFIG_AIR_EN8811H_PHY
   FILES:= \
    $(LINUX_DIR)/drivers/net/phy/air_en8811h.ko
@@ -1360,7 +1360,7 @@ $(eval $(call KernelPackage,8139cp))
 define KernelPackage/r8169
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=RealTek RTL-8169 PCI Gigabit Ethernet Adapter kernel support
-  DEPENDS:=@PCI_SUPPORT +kmod-mii +r8169-firmware +kmod-phy-realtek +kmod-mdio-devres
+  DEPENDS:=@PCI_SUPPORT +kmod-mii +kmod-phy-realtek +kmod-mdio-devres
   KCONFIG:= \
     CONFIG_R8169 \
     CONFIG_R8169_LEDS=y
@@ -1397,7 +1397,7 @@ $(eval $(call KernelPackage,ne2k-pci))
 define KernelPackage/e100
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=Intel(R) PRO/100+ cards kernel support
-  DEPENDS:=@PCI_SUPPORT +kmod-mii +e100-firmware
+  DEPENDS:=@PCI_SUPPORT +kmod-mii
   KCONFIG:=CONFIG_E100
   FILES:=$(LINUX_DIR)/drivers/net/ethernet/intel/e100.ko
   AUTOLOAD:=$(call AutoProbe,e100)
@@ -1901,7 +1901,7 @@ $(eval $(call KernelPackage,ethoc))
 define KernelPackage/bnx2
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=BCM5706/5708/5709/5716 ethernet adapter driver
-  DEPENDS:=@PCI_SUPPORT +bnx2-firmware
+  DEPENDS:=@PCI_SUPPORT
   FILES:=$(LINUX_DIR)/drivers/net/ethernet/broadcom/bnx2.ko
   KCONFIG:=CONFIG_BNX2
   AUTOLOAD:=$(call AutoProbe,bnx2)
@@ -1917,7 +1917,7 @@ $(eval $(call KernelPackage,bnx2))
 define KernelPackage/bnx2x
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=QLogic 5771x/578xx 10/20-Gigabit ethernet adapter driver
-  DEPENDS:=@PCI_SUPPORT +bnx2x-firmware +LINUX_6_12:kmod-lib-crc32c +kmod-mdio +kmod-ptp +kmod-lib-zlib-inflate
+  DEPENDS:=@PCI_SUPPORT +LINUX_6_12:kmod-lib-crc32c +kmod-mdio +kmod-ptp +kmod-lib-zlib-inflate
   FILES:=$(LINUX_DIR)/drivers/net/ethernet/broadcom/bnx2x/bnx2x.ko
   KCONFIG:= \
 	CONFIG_BNX2X \

@@ -108,7 +108,7 @@ $(eval $(call KernelPackage,btmtk))
 define KernelPackage/ath3k
   SUBMENU:=$(BLUETOOTH_MENU)
   TITLE:=ATH3K Kernel Module support
-  DEPENDS:=+kmod-hci-uart +kmod-btusb +ar3k-firmware
+  DEPENDS:=+kmod-hci-uart +kmod-btusb
   KCONFIG:= \
 	CONFIG_BT_ATH3K \
 	CONFIG_BT_HCIUART_ATH3K=y
@@ -143,7 +143,7 @@ $(eval $(call KernelPackage,bluetooth-6lowpan))
 define KernelPackage/btmrvl
   SUBMENU:=$(BLUETOOTH_MENU)
   TITLE:=Marvell Bluetooth Kernel Module support
-  DEPENDS:=+kmod-mmc +kmod-bluetooth +mwifiex-sdio-firmware
+  DEPENDS:=+kmod-mmc +kmod-bluetooth
   KCONFIG:= \
 	CONFIG_BT_MRVL \
 	CONFIG_BT_MRVL_SDIO

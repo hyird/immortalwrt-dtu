@@ -569,7 +569,7 @@ define KernelPackage/drm-amdgpu
   SUBMENU:=$(VIDEO_MENU)
   TITLE:=AMDGPU DRM support
   DEPENDS:=@TARGET_x86||TARGET_loongarch64 @DISPLAY_SUPPORT +kmod-backlight +kmod-drm-ttm \
-	+kmod-drm-ttm-helper +kmod-drm-kms-helper +kmod-i2c-algo-bit +amdgpu-firmware \
+	+kmod-drm-ttm-helper +kmod-drm-kms-helper +kmod-i2c-algo-bit \
 	+kmod-drm-display-helper +kmod-drm-buddy +kmod-acpi-video \
 	+kmod-drm-exec +kmod-drm-suballoc-helper +kmod-drm +kmod-drm-panel-backlight-quirks
   KCONFIG:=CONFIG_DRM_AMDGPU \
@@ -601,7 +601,7 @@ define KernelPackage/drm-i915
   TITLE:=Intel i915 DRM support
   DEPENDS:=@(TARGET_x86_64||TARGET_x86_generic||TARGET_x86_legacy) \
 	@DISPLAY_SUPPORT +kmod-backlight +kmod-drm-ttm \
-	+kmod-drm-ttm-helper +kmod-drm-kms-helper +kmod-i2c-algo-bit +i915-firmware-dmc \
+	+kmod-drm-ttm-helper +kmod-drm-kms-helper +kmod-i2c-algo-bit \
 	+kmod-drm-display-helper +kmod-drm-buddy +kmod-acpi-video \
 	+kmod-drm-exec +kmod-drm-suballoc-helper
   KCONFIG:=CONFIG_DRM_I915 \
@@ -642,7 +642,7 @@ $(eval $(call KernelPackage,drm-i915))
 define KernelPackage/drm-ivpu
   SUBMENU:=$(VIDEO_MENU)
   TITLE:=Intel VPU DRM support
-  DEPENDS:=@TARGET_x86_64 +ivpu-firmware
+  DEPENDS:=@TARGET_x86_64
   KCONFIG:=CONFIG_DRM_ACCEL_IVPU
   FILES:=$(LINUX_DIR)/drivers/accel/ivpu/intel_vpu.ko
   AUTOLOAD:=$(call AutoProbe,intel_vpu)
@@ -772,7 +772,7 @@ define KernelPackage/drm-panthor
   SUBMENU:=$(VIDEO_MENU)
   TITLE:=DRM support for ARM Mali CSF-based GPUs
   DEPENDS:=@TARGET_rockchip +kmod-drm +kmod-drm-exec \
-	+kmod-drm-shmem-helper +panthor-firmware
+	+kmod-drm-shmem-helper
   KCONFIG:= \
 	CONFIG_DRM_GPUVM \
 	CONFIG_DRM_PANTHOR
@@ -867,7 +867,7 @@ define KernelPackage/drm-radeon
   SUBMENU:=$(VIDEO_MENU)
   TITLE:=Radeon DRM support
   DEPENDS:=@TARGET_x86 @DISPLAY_SUPPORT +kmod-backlight +kmod-drm-kms-helper \
-	+kmod-drm-ttm +kmod-drm-ttm-helper +kmod-i2c-algo-bit +radeon-firmware \
+	+kmod-drm-ttm +kmod-drm-ttm-helper +kmod-i2c-algo-bit \
 	+kmod-drm-display-helper +kmod-acpi-video +kmod-drm-suballoc-helper \
 	+kmod-fb-io-fops +kmod-drm-exec
   KCONFIG:=CONFIG_DRM_RADEON
