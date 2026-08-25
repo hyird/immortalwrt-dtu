@@ -3,13 +3,12 @@
 #
 
 SUBTARGET:=mt76x8
-BOARDNAME:=MT76x8 based boards
+BOARDNAME:=Tastek TAS-682F MT7628AN DTU
 FEATURES+=usb ramdisk small_flash
 CPU_TYPE:=24kc
 
-DEFAULT_PACKAGES += kmod-mt7603 wpad-basic-openssl swconfig
+DEFAULT_PACKAGES += swconfig
 
 define Target/Description
-	Build firmware images for Ralink MT76x8 based boards.
+	Build firmware images for the Tastek TAS-682F MT7628AN DTU.
 endef
-

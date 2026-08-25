@@ -6,14 +6,14 @@ include $(TOPDIR)/rules.mk
 
 ARCH:=mipsel
 BOARD:=ramips
-BOARDNAME:=MediaTek Ralink MIPS
-SUBTARGETS:=mt7620 mt7621 mt76x8 rt288x rt305x rt3883
+BOARDNAME:=Tastek TAS-682F
+SUBTARGETS:=mt76x8
 FEATURES:=squashfs gpio
 
 KERNEL_PATCHVER:=6.18
 
 define Target/Description
-	Build firmware images for Ralink RT288x/RT3xxx based boards.
+	Build firmware images for the Tastek TAS-682F MT7628AN DTU.
 endef
 
 include $(INCLUDE_DIR)/target.mk

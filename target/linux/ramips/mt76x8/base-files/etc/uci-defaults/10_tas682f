@@ -1,0 +1,6 @@
+#!/bin/sh
+
+[ "$(board_name)" = "tastek,it692" ] || exit 0
+
+/etc/init.d/tas682_4g enable
+exit 0
