@@ -7,6 +7,8 @@
 /.config.old
 /.toolchain_build_ver
 /bin
+/artifacts
+/*.bin
 /build_dir
 /staging_dir
 /tmp
