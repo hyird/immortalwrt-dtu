@@ -1,0 +1,58 @@
+#!/bin/sh
+
+PRIMARY_TARGET="223.5.5.5"
+SECONDARY_TARGET="223.6.6.6"
+OFFLINE_TIMEOUT=300
+CHECK_INTERVAL=30
+PING_TIMEOUT=15
+
+uptime_seconds() {
+	local uptime
+
+	read -r uptime _ </proc/uptime || return 1
+	uptime="${uptime%%.*}"
+	case "${uptime}" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	printf '%s\n' "${uptime}"
+}
+
+until last_online="$(uptime_seconds)"; do
+	sleep "${CHECK_INTERVAL}"
+done
+
+while :; do
+	if ! cycle_started="$(uptime_seconds)"; then
+		sleep "${CHECK_INTERVAL}"
+		continue
+	fi
+
+	ping -c 1 -W "${PING_TIMEOUT}" "${PRIMARY_TARGET}" >/dev/null 2>&1 &
+	primary_pid=$!
+	ping -c 1 -W "${PING_TIMEOUT}" "${SECONDARY_TARGET}" >/dev/null 2>&1 &
+	secondary_pid=$!
+
+	primary_online=0
+	secondary_online=0
+	wait "${primary_pid}" && primary_online=1
+	wait "${secondary_pid}" && secondary_online=1
+
+	if ! now="$(uptime_seconds)"; then
+		sleep "${CHECK_INTERVAL}"
+		continue
+	fi
+	if [ "${primary_online}" -eq 1 ] || [ "${secondary_online}" -eq 1 ]; then
+		last_online="${now}"
+	elif [ $((now - last_online)) -ge "${OFFLINE_TIMEOUT}" ]; then
+		logger -t network-watchdog \
+			"${PRIMARY_TARGET} and ${SECONDARY_TARGET} unreachable for ${OFFLINE_TIMEOUT}s, rebooting"
+		sync
+		reboot
+		sleep 60
+	fi
+
+	cycle_elapsed=$((now - cycle_started))
+	if [ "${cycle_elapsed}" -lt "${CHECK_INTERVAL}" ]; then
+		sleep $((CHECK_INTERVAL - cycle_elapsed))
+	fi
+done

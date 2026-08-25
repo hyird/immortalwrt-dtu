@@ -168,6 +168,8 @@ endif
 
 define Package/base-files/install
 	$(CP) ./files/* $(1)/
+	chmod 0755 $(1)/etc/init.d/network-watchdog \
+		$(1)/usr/sbin/network-watchdog
 	$(Package/base-files/install-key)
 	$(Package/base-files/nand-support)
 	$(Package/base-files/legacy-sdcard-support)
