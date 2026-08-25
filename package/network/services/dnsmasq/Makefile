@@ -64,9 +64,8 @@ endef
 
 define Package/dnsmasq-full
 $(call Package/dnsmasq/Default)
-  TITLE += (with DNSSEC, DHCPv6, Auth DNS, IPset, Nftset, Conntrack, NO_ID enabled by default)
+  TITLE += (with DNSSEC, DHCPv6, Auth DNS, Nftset, Conntrack, NO_ID enabled by default)
   DEPENDS+=+PACKAGE_dnsmasq_full_dnssec:libnettle \
-	+PACKAGE_dnsmasq_full_ipset:kmod-ipt-ipset \
 	+PACKAGE_dnsmasq_full_conntrack:libnetfilter-conntrack \
 	+PACKAGE_dnsmasq_full_nftset:nftables-json
   VARIANT:=full
@@ -111,9 +110,6 @@ define Package/dnsmasq-full/config
 	config PACKAGE_dnsmasq_full_auth
 		bool "Build with the facility to act as an authoritative DNS server."
 		default y
-	config PACKAGE_dnsmasq_full_ipset
-		bool "Build with IPset support."
-		default n
 	config PACKAGE_dnsmasq_full_nftset
 		bool "Build with Nftset support."
 		default y
