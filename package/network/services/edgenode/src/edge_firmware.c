@@ -18,6 +18,7 @@
 
 #define FIRMWARE_IMAGE "/tmp/edgenode/firmware.bin"
 #define FIRMWARE_LOCK "/tmp/edgenode/firmware.lock"
+#define FIRMWARE_CA_CERT "/etc/edgenode/firmware-ca.pem"
 #define OVERLAY_BINARY "/overlay/upper/usr/sbin/edgenode"
 #define OVERLAY_BINARY_BACKUP "/tmp/edgenode/edgenode-overlay-backup"
 #define FIRMWARE_STATUS_MAGIC 0x45444745U
@@ -221,6 +222,10 @@ static void firmware_child(const uint8_t platform_id[16],
     if (downloader == 0) {
         (void)setpgid(0, 0);
         edge_process_close_inherited_fds(-1);
+        if (access(FIRMWARE_CA_CERT, R_OK) == 0)
+            execlp("uclient-fetch", "uclient-fetch", "--ca-certificate",
+                   FIRMWARE_CA_CERT, "-O", FIRMWARE_IMAGE, request->download_url,
+                   (char *)NULL);
         execlp("uclient-fetch", "uclient-fetch", "-O", FIRMWARE_IMAGE,
                request->download_url, (char *)NULL);
         _exit(127);

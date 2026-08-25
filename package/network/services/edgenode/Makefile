@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.20
-PKG_RELEASE:=2
+PKG_VERSION:=0.3.21
+PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
 PKG_SOURCE:=nanopb-$(NANOPB_VERSION).tar.gz
@@ -85,6 +85,8 @@ define Package/edgenode/install
 	$(INSTALL_BIN) $(CURDIR)/files/edgenode.init $(1)/etc/init.d/edgenode
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/edgenode.config $(1)/etc/config/edgenode
+	$(INSTALL_DIR) $(1)/etc/edgenode
+	$(INSTALL_DATA) $(CURDIR)/files/firmware-ca.pem $(1)/etc/edgenode/firmware-ca.pem
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) $(CURDIR)/files/95-edgenode-platform $(1)/etc/uci-defaults/95-edgenode-platform
 	$(INSTALL_DIR) $(1)/usr/share/edgenode

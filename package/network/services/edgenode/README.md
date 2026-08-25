@@ -9,8 +9,10 @@ Implemented foundations:
 - the node registers independently with up to four platforms using its 15-digit IMEI;
 - an HTTPS platform base address is upgraded internally to a binary WSS
   session carrying one nanopb `Envelope` per message;
-- WSS and firmware HTTPS validate both the certificate chain and hostname against
-  OpenWrt's `ca-bundle`; TLS initialization and verification failures fail closed;
+- WSS validates both the certificate chain and hostname against OpenWrt's `ca-bundle`;
+  firmware HTTPS uses the package's explicit E46 trust anchor to work around an
+  older deployed CA-bundle parsing limitation; TLS initialization and verification
+  failures fail closed;
 - every platform has isolated registration, config, reconnect, heartbeat, and outbox state;
   failed connections retry forever; a 30-second application handshake deadline, an
   enrolled-session watchdog, and a 60-second outbox ACK deadline break half-open sessions;
@@ -37,6 +39,14 @@ Implemented foundations:
 The active-config-to-physical-endpoint binding is kept separate from the wire/session
 layer. The current code provides the tested protocol codecs and scheduler that binding
 uses; actual target hardware is still required before declaring a target deployable.
+
+## Firmware download trust
+
+`files/firmware-ca.pem` contains the Sectigo Public Server Authentication Root E46
+anchor used solely for firmware HTTPS. Its SHA-256 fingerprint is
+`C9:0F:26:F0:FB:1B:40:18:B2:22:27:51:9B:5C:A2:B5:3E:2C:A5:B3:BE:5C:F1:8E:FE:1B:EF:47:38:0C:53:83`.
+Update this file with the server certificate chain when the firmware host's issuing CA
+changes.
 
 ## Runtime observability
 
