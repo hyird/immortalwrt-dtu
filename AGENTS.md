@@ -3,6 +3,10 @@
 ## Scope
 
 - This repository is the authoritative firmware source for TAS-682F.
+- Maintain EdgeNode directly under `package/network/services/edgenode` and its
+  LuCI application under `package/luci-app-edgenode`.
+- Track the official ImmortalWrt `packages` and `luci` master feeds directly;
+  do not add private feed forks or duplicate EdgeNode packages in a feed.
 - Preserve compatibility with the deployed EdgeNode protocol unless a protocol
   migration and server compatibility path are implemented and tested together.
 - Use `configs/tas-682f.config` as the release seed configuration.
@@ -15,9 +19,12 @@
   `openwrtbuild` user.
 - Require a clean working tree and use `git pull --ff-only` before a release
   build. Do not copy uncommitted source files into the release checkout.
-- Update and install the configured feeds before compiling. Run `make clean`,
-  copy `configs/tas-682f.config` to `.config`, run `make defconfig`, and perform a
-  full firmware build; a package-only compile is not a release build.
+- Update the configured feeds, then install only `libev`, `libuwsc` and
+  `luci-light` with their dependencies. Do not use `feeds install -a`; this
+  single-device tree intentionally omits dependencies of unused feed packages.
+- Run `make clean`, copy `configs/tas-682f.config` to `.config`, run
+  `make defconfig`, and perform a full firmware build; a package-only compile is
+  not a release build.
 
 ## Release verification
 

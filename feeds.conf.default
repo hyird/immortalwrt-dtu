@@ -1,2 +1,2 @@
-src-git packages https://github.com/hyird/immortalwrt-packages.git
-src-git luci https://github.com/hyird/immortalwrt-luci.git
+src-git packages https://github.com/immortalwrt/packages.git
+src-git luci https://github.com/immortalwrt/luci.git

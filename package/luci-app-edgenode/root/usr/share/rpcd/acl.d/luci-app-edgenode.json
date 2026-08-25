@@ -1,0 +1,11 @@
+{
+	"luci-app-edgenode": {
+		"description": "Grant access to the EdgeNode configuration",
+		"read": {
+			"uci": [ "edgenode" ]
+		},
+		"write": {
+			"uci": [ "edgenode" ]
+		}
+	}
+}

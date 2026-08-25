@@ -1,0 +1,14 @@
+{
+	"admin/services/edgenode": {
+		"title": "边缘节点",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "edgenode"
+		},
+		"depends": {
+			"acl": [ "luci-app-edgenode" ],
+			"uci": { "edgenode": true }
+		}
+	}
+}
