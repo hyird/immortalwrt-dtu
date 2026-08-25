@@ -10,8 +10,7 @@ Implemented foundations:
 - an HTTPS platform base address is upgraded internally to a binary WSS
   session carrying one nanopb `Envelope` per message;
 - WSS validates both the certificate chain and hostname against OpenWrt's `ca-bundle`;
-  firmware HTTPS uses the package's explicit E46 trust anchor to work around an
-  older deployed CA-bundle parsing limitation; TLS initialization and verification
+  firmware HTTPS uses that same system trust store; TLS initialization and verification
   failures fail closed;
 - every platform has isolated registration, config, reconnect, heartbeat, and outbox state;
   failed connections retry forever; a 30-second application handshake deadline, an
@@ -42,11 +41,10 @@ uses; actual target hardware is still required before declaring a target deploya
 
 ## Firmware download trust
 
-`files/firmware-ca.pem` contains the Sectigo Public Server Authentication Root E46
-anchor used solely for firmware HTTPS. Its SHA-256 fingerprint is
-`C9:0F:26:F0:FB:1B:40:18:B2:22:27:51:9B:5C:A2:B5:3E:2C:A5:B3:BE:5C:F1:8E:FE:1B:EF:47:38:0C:53:83`.
-Update this file with the server certificate chain when the firmware host's issuing CA
-changes.
+Firmware downloads use the standard `ca-bundle` store. The mbedTLS ustream backend
+retains valid certificates when a concatenated bundle contains an unrelated certificate
+that the local TLS build cannot parse; a store with no usable certificates still fails
+closed. No server-specific trust anchor or global downloader wrapper is required.
 
 ## Runtime observability
 

@@ -1,0 +1,19 @@
+--- a/ustream-mbedtls.c
++++ b/ustream-mbedtls.c
+@@ -265,7 +265,15 @@ __hidden int __ustream_ssl_add_ca_crt_file(struct ustream_ssl_ctx *ctx, const c
+ 	int ret;
+ 
+ 	ret = mbedtls_x509_crt_parse_file(&ctx->ca_cert, file);
+-	if (ret)
++	/*
++	 * A concatenated system trust store may contain a certificate which this
++	 * mbedTLS build cannot parse. mbedTLS returns the number of rejected
++	 * certificates in that case, but leaves every valid certificate linked in
++	 * ctx->ca_cert. Do not discard that valid trust chain just because an
++	 * unrelated certificate was rejected. Fatal parser errors, or a file from
++	 * which no certificate was loaded, still fail closed.
++	 */
++	if (ret < 0 || (ret > 0 && !ctx->ca_cert.version))
+ 		return -1;
+ 
+ 	mbedtls_ssl_conf_ca_chain(&ctx->conf, &ctx->ca_cert, NULL);
