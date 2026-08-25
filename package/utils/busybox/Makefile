@@ -14,7 +14,6 @@ PKG_SOURCE_URL:=https://www.busybox.net/downloads \
 		https://sources.buildroot.net/$(PKG_NAME)
 PKG_HASH:=34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2
 
-PKG_BUILD_DEPENDS:=BUSYBOX_CONFIG_PAM:libpam
 PKG_BUILD_PARALLEL:=1
 PKG_BUILD_FLAGS:=lto
 ifeq ($(CONFIG_SOFT_FLOAT),)
@@ -48,7 +47,7 @@ define Package/busybox/Default
   MAINTAINER:=Felix Fietkau <nbd@nbd.name>
   TITLE:=Core utilities for embedded Linux
   URL:=https://busybox.net/
-  DEPENDS:= +USE_GLIBC:libcrypt-compat +BUSYBOX_CONFIG_PAM:libpam +BUSYBOX_CONFIG_NTPD:jsonfilter +(USE_GLIBC&&BUSYBOX_CONFIG_FEATURE_MOUNT_NFS)||(USE_GLIBC&&BUSYBOX_CONFIG_FEATURE_INETD_RPC):libtirpc
+  DEPENDS:=+USE_GLIBC:libcrypt-compat +BUSYBOX_CONFIG_NTPD:jsonfilter
   USERID:=ntp=123:ntp=123
 endef
 
