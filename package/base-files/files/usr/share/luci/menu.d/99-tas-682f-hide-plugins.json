@@ -1,0 +1,7 @@
+{
+	"admin/system/plugins": {
+		"depends": {
+			"acl": [ "tas-682f-hidden-page" ]
+		}
+	}
+}
