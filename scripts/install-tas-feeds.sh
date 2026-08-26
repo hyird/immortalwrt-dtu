@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -eu
+
+cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+# The feeds helper scans the current package tree before installing a feed
+# source.  Seed the three sources referenced by the in-tree TAS packages so
+# that the scan can resolve their virtual packages without warnings.
+rm -rf package/feeds
+mkdir -p package/feeds/packages package/feeds/luci
+ln -s ../../../feeds/packages/libs/libev package/feeds/packages/libev
+ln -s ../../../feeds/packages/libs/libuwsc package/feeds/packages/libuwsc
+ln -s ../../../feeds/luci/modules/luci-base package/feeds/luci/luci-base
+
+./scripts/feeds install -p packages -f libev
+./scripts/feeds install -p packages -f libuwsc
+./scripts/feeds install -p luci -f luci-light

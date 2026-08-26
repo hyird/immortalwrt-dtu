@@ -19,9 +19,11 @@
   `openwrtbuild` user.
 - Require a clean working tree and use `git pull --ff-only` before a release
   build. Do not copy uncommitted source files into the release checkout.
-- Update the configured feeds, then install only `libev`, `libuwsc` and
-  `luci-light` with their dependencies. Do not use `feeds install -a`; this
-  single-device tree intentionally omits dependencies of unused feed packages.
+- Update the configured feeds, then run `scripts/install-tas-feeds.sh`. This
+  installs only `libev`, `libuwsc` and `luci-light` with their dependencies;
+  the helper pre-seeds the three source packages needed to keep the feeds scan
+  warning-free. Do not use `feeds install -a`; this single-device tree
+  intentionally omits dependencies of unused feed packages.
 - Run `make clean`, copy `configs/tas-682f.config` to `.config`, run
   `make defconfig`, and perform a full firmware build; a package-only compile is
   not a release build.
