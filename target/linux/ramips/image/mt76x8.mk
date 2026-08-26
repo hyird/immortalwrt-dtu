@@ -12,6 +12,7 @@ define Device/tastek_it692
   DEVICE_PACKAGES := -apk-openssl -apk-mbedtls -opkg \
 	kmod-usb2 kmod-usb-ohci \
 	kmod-usb-net-rndis kmod-usb-serial-option
-  SUPPORTED_DEVICES += tastek,it692 tas-682
+  # tastek,it692 is supplied by the image framework from DEVICE_NAME.
+  SUPPORTED_DEVICES += tas-682
 endef
 TARGET_DEVICES += tastek_it692
