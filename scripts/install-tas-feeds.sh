@@ -12,6 +12,10 @@ mkdir -p package/feeds/packages package/feeds/luci
 ln -s ../../../feeds/packages/libs/libev package/feeds/packages/libev
 ln -s ../../../feeds/packages/libs/libuwsc package/feeds/packages/libuwsc
 ln -s ../../../feeds/luci/modules/luci-base package/feeds/luci/luci-base
+ln -s ../../../feeds/luci/libs/rpcd-mod-luci package/feeds/luci/rpcd-mod-luci
+ln -s ../../../feeds/packages/net/cgi-io package/feeds/packages/cgi-io
+ln -s ../../../feeds/luci/contrib/package/ucode-mod-html package/feeds/luci/ucode-mod-html
+ln -s ../../../feeds/luci/contrib/package/lucihttp package/feeds/luci/lucihttp
 
 ./scripts/feeds install -p packages -f libev
 ./scripts/feeds install -p packages -f libuwsc
