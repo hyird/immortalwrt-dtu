@@ -1,0 +1,11 @@
+{
+	"luci-app-4ginfo": {
+		"description": "Grant access to EdgeNode 4G modem information",
+		"read": {
+			"uci": [ "edgenode" ],
+			"file": {
+				"/tmp/edgenode/modem.status": [ "read" ]
+			}
+		}
+	}
+}

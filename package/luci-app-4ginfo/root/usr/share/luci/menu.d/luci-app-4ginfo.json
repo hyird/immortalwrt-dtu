@@ -1,0 +1,14 @@
+{
+	"admin/services/4ginfo": {
+		"title": "4G 模块信息",
+		"order": 61,
+		"action": {
+			"type": "view",
+			"path": "4ginfo"
+		},
+		"depends": {
+			"acl": [ "luci-app-4ginfo" ],
+			"uci": { "edgenode": true }
+		}
+	}
+}
