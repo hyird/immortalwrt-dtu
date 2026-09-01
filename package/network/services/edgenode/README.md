@@ -29,8 +29,10 @@ Implemented foundations:
   stale input, observes the RTU quiet interval, and then performs that task. TCP Server
   endpoints sharing a listen port use one listener. Lower numeric platform priority is
   scheduled first, while every platform task remains active;
-- Modbus TCP/RTU and S7 request/response codecs implement reads and writes. A successful
-  command requires readback equality;
+- Modbus TCP/RTU and S7 request/response codecs implement reads and writes. Every completed
+  write readback is reported immediately; a verified command then reports at the configured
+  fast-read interval for the configured window before returning to the regular interval.
+  A successful command requires readback equality;
 - an unresponsive S7 PLC closes the TCP socket and repeats TCP, COTP, and S7 Setup
   Communication on the next one-second cycle.
 - network and serial capabilities are reported automatically; the built-in PTY bridge

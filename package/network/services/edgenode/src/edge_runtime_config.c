@@ -74,6 +74,10 @@ static bool valid_device(const edge_runtime_config *config,
                          const iot_edge_v1_DeviceConfig *value) {
     if (value->device_id.size != 16U || value->endpoint_id.size != 16U ||
         value->device_code[0] == '\0' || value->report_interval_sec == 0U ||
+        value->command_fast_read_duration_sec > 3600U ||
+        value->command_fast_read_interval_sec > 3600U ||
+        (value->command_fast_read_duration_sec != 0U &&
+         value->command_fast_read_interval_sec == 0U) ||
         (value->io_interval_ms != 0U && value->io_interval_ms != 1000U) ||
         (value->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
          value->protocol != iot_edge_v1_Protocol_PROTOCOL_S7))

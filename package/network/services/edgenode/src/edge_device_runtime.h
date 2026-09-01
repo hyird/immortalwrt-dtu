@@ -33,6 +33,8 @@ typedef struct {
     char element_id[65];
     uint8_t value[EDGE_DEVICE_VALUE_MAX];
     size_t value_size;
+    uint32_t fast_read_duration_sec;
+    uint32_t fast_read_interval_sec;
 } edge_write_command;
 
 typedef struct {
@@ -63,6 +65,9 @@ typedef struct {
     uint32_t report_interval_sec;
     uint64_t next_io_at_ms;
     uint64_t next_report_at_ms;
+    uint64_t fast_report_until_ms;
+    uint64_t next_fast_report_at_ms;
+    uint32_t fast_report_interval_sec;
     bool connected;
     bool handshaken;
     bool has_sample;

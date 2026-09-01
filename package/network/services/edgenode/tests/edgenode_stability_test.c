@@ -321,7 +321,7 @@ static void stress_device_runtime(uint64_t cycle) {
                                  (int64_t)(cycle * 4000U + tick * 1000U));
     require_true(state.connects == 1U && state.reads == 4U &&
                      state.writes == 1U && state.completions == 1U &&
-                     state.reports == 1U,
+                     state.reports == 2U,
                  "device lifecycle counters changed");
     edge_device_runtime_close(&runtime);
     require_true(state.disconnects == 1U, "device runtime did not disconnect");

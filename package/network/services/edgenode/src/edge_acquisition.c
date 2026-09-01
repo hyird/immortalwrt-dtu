@@ -1856,6 +1856,19 @@ static bool build_write_command(edge_acquisition *acquisition,
     edge_write_command command = {0};
     memcpy(command.command_id, request->command_id.bytes, 16U);
     copy_text(command.element_id, sizeof(command.element_id), value->element_id);
+    command.fast_read_duration_sec = request->fast_read_duration_sec != 0U
+                                         ? request->fast_read_duration_sec
+                                         : device->config->command_fast_read_duration_sec;
+    command.fast_read_interval_sec = request->fast_read_interval_sec != 0U
+                                         ? request->fast_read_interval_sec
+                                         : device->config->command_fast_read_interval_sec;
+    if (command.fast_read_duration_sec > 3600U ||
+        command.fast_read_interval_sec > 3600U) {
+        set_error(error, error_size, "command fast-read policy is invalid");
+        return false;
+    }
+    if (command.fast_read_duration_sec != 0U && command.fast_read_interval_sec == 0U)
+        command.fast_read_interval_sec = 1U;
     if (!encode_scalar(point->item, value->expected.value.string_value,
                        command.value, sizeof(command.value), &command.value_size)) {
         set_error(error, error_size, "command value cannot be encoded for the configured type");

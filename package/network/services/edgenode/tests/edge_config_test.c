@@ -67,6 +67,8 @@ static void test_valid_snapshot(void) {
     values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
     values[1].item.device.io_interval_ms = 1000U;
     values[1].item.device.report_interval_sec = 5U;
+    values[1].item.device.command_fast_read_duration_sec = 60U;
+    values[1].item.device.command_fast_read_interval_sec = 5U;
     values[1].item.device.modbus_slave_id = 1U;
     copy_text(values[1].item.device.modbus_mode, sizeof(values[1].item.device.modbus_mode),
               "TCP");

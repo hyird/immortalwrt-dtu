@@ -12,6 +12,26 @@ static uint64_t advance_deadline(uint64_t current, uint64_t period, uint64_t now
     return current + steps * period;
 }
 
+static uint64_t deadline_after_seconds(uint64_t now, uint32_t seconds) {
+    const uint64_t delay = (uint64_t)seconds * 1000U;
+    return delay > UINT64_MAX - now ? UINT64_MAX : now + delay;
+}
+
+static void configure_fast_reporting(edge_device_runtime *runtime,
+                                     const edge_write_command *command,
+                                     uint64_t now_ms) {
+    runtime->fast_report_until_ms = 0U;
+    runtime->next_fast_report_at_ms = 0U;
+    runtime->fast_report_interval_sec = 0U;
+    if (command->fast_read_duration_sec == 0U || command->fast_read_interval_sec == 0U)
+        return;
+    runtime->fast_report_until_ms =
+        deadline_after_seconds(now_ms, command->fast_read_duration_sec);
+    runtime->next_fast_report_at_ms =
+        deadline_after_seconds(now_ms, command->fast_read_interval_sec);
+    runtime->fast_report_interval_sec = command->fast_read_interval_sec;
+}
+
 static void close_connection(edge_device_runtime *runtime) {
     if ((runtime->connected || runtime->handshaken) && runtime->driver.disconnect != NULL)
         runtime->driver.disconnect(runtime->driver_context);
@@ -114,6 +134,9 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
     if (runtime == NULL)
         return;
 
+    bool reported_after_write = false;
+    edge_device_sample write_actual = {0};
+
     if (schedule_ms >= runtime->next_io_at_ms) {
         runtime->next_io_at_ms = advance_deadline(runtime->next_io_at_ms,
                                                   EDGE_DTU_IO_PERIOD_MS, schedule_ms);
@@ -126,11 +149,17 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
             } else {
                 result = runtime->driver.write_readback(runtime->driver_context, command, &actual);
                 if (result == EDGE_IO_OK) {
+                    const bool verified = same_value(command, &actual);
+                    actual.sampled_at_ms = observed_at_ms;
+                    write_actual = actual;
+                    if (verified) {
+                        configure_fast_reporting(runtime, command, schedule_ms);
+                    }
                     complete_write(runtime,
-                                   same_value(command, &actual)
-                                       ? EDGE_COMMAND_SUCCEEDED
-                                       : EDGE_COMMAND_READBACK_MISMATCH,
+                                   verified ? EDGE_COMMAND_SUCCEEDED
+                                            : EDGE_COMMAND_READBACK_MISMATCH,
                                    &actual);
+                    reported_after_write = true;
                 } else if (result == EDGE_IO_NO_RESPONSE) {
                     complete_write(runtime, EDGE_COMMAND_TIMED_OUT, NULL);
                     handle_no_response(runtime);
@@ -160,16 +189,44 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         } else if (result == EDGE_IO_OFFLINE) {
             handle_offline(runtime);
         }
+
+        if (reported_after_write) {
+            const edge_device_sample *sample = &write_actual;
+            if (runtime->has_sample && runtime->latest.sampled_at_ms == observed_at_ms)
+                sample = &runtime->latest;
+            runtime->driver.report(runtime->driver_context, runtime->platform_id,
+                                   runtime->device_id, sample);
+        }
     }
 
     const uint64_t report_period = (uint64_t)runtime->report_interval_sec * 1000U;
+    bool report_due = false;
+    const bool fast_window_active =
+        runtime->fast_report_until_ms != 0U && schedule_ms <= runtime->fast_report_until_ms;
+    if (runtime->fast_report_until_ms != 0U &&
+        runtime->next_fast_report_at_ms <= runtime->fast_report_until_ms &&
+        schedule_ms >= runtime->next_fast_report_at_ms) {
+        report_due = true;
+        runtime->next_fast_report_at_ms =
+            advance_deadline(runtime->next_fast_report_at_ms,
+                             (uint64_t)runtime->fast_report_interval_sec * 1000U,
+                             schedule_ms);
+    }
+    if (runtime->fast_report_until_ms != 0U &&
+        schedule_ms >= runtime->fast_report_until_ms) {
+        runtime->fast_report_until_ms = 0U;
+        runtime->next_fast_report_at_ms = 0U;
+        runtime->fast_report_interval_sec = 0U;
+    }
     if (schedule_ms >= runtime->next_report_at_ms) {
         runtime->next_report_at_ms = advance_deadline(runtime->next_report_at_ms,
                                                       report_period, schedule_ms);
-        if (runtime->has_sample)
-            runtime->driver.report(runtime->driver_context, runtime->platform_id,
-                                   runtime->device_id, &runtime->latest);
+        if (!fast_window_active)
+            report_due = true;
     }
+    if (report_due && !reported_after_write && runtime->has_sample)
+        runtime->driver.report(runtime->driver_context, runtime->platform_id,
+                               runtime->device_id, &runtime->latest);
 }
 
 void edge_device_runtime_close(edge_device_runtime *runtime) {
