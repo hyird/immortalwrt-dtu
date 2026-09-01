@@ -128,6 +128,15 @@ if(UNIX)
     target_include_directories(edge_process_test PRIVATE "${EDGENODE_ROOT}/src")
     add_test(NAME edge_process COMMAND edge_process_test)
 
+    add_executable(edge_log_test
+        edge_log_test.c
+        "${EDGENODE_ROOT}/src/log.c"
+        "${EDGENODE_ROOT}/src/edge_protocol.c")
+    target_compile_definitions(edge_log_test PRIVATE EDGENODE_LOG_TEST=1)
+    target_include_directories(edge_log_test PRIVATE "${EDGENODE_ROOT}/src")
+    target_link_libraries(edge_log_test PRIVATE edgenode_nanopb)
+    add_test(NAME edge_log COMMAND edge_log_test)
+
     add_executable(edge_acquisition_test
         edge_acquisition_test.c
         "${EDGENODE_ROOT}/src/edge_acquisition.c"
