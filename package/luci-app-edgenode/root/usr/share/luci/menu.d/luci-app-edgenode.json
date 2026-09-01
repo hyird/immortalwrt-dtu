@@ -10,5 +10,17 @@
 			"acl": [ "luci-app-edgenode" ],
 			"uci": { "edgenode": true }
 		}
+	},
+	"admin/services/edgenode-modem": {
+		"title": "4G 模块信息",
+		"order": 61,
+		"action": {
+			"type": "view",
+			"path": "edgenode-modem"
+		},
+		"depends": {
+			"acl": [ "luci-app-edgenode" ],
+			"uci": { "edgenode": true }
+		}
 	}
 }
