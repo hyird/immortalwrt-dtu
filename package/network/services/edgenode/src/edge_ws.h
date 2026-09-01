@@ -27,8 +27,6 @@ typedef struct {
     struct ev_timer network_timer;
     struct ev_timer reload_timer;
     struct ev_timer terminal_timer;
-    struct ev_timer acquisition_timer;
-    struct ev_io acquisition_io;
     edge_ws_app *app;
     const edge_platform_config *config;
     char transport_url[EDGE_URL_MAX + 32U];
@@ -49,7 +47,6 @@ typedef struct {
     char modem_result_apn[101];
     edge_spool spool;
     edge_runtime_config runtime_config;
-    edge_acquisition *acquisition;
     uint64_t sequence;
     uint64_t terminal_output_sequence;
     uint64_t terminal_output_acked_sequence;
@@ -73,6 +70,9 @@ typedef struct {
 struct edge_ws_app {
     struct ev_loop *loop;
     const edge_app_config *config;
+    struct ev_timer acquisition_timer;
+    struct ev_io acquisition_io;
+    edge_acquisition *acquisition;
     edge_ws_session sessions[EDGE_MAX_PLATFORMS];
     iot_edge_v1_Envelope envelope;
     uint8_t wire[EDGENODE_MAX_WS_MESSAGE];

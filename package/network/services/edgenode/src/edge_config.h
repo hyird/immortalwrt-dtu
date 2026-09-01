@@ -14,7 +14,6 @@ typedef struct {
     /* HTTP or HTTPS platform base address without a path. */
     char url[EDGE_URL_MAX + 1U];
     bool enabled;
-    bool network_owner;
     uint16_t priority;
     uint16_t reconnect_interval_sec;
     uint32_t outbox_max_bytes;

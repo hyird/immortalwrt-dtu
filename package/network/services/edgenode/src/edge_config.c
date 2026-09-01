@@ -223,7 +223,6 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
         platform->enabled = true;
         platform->bootstrap =
             memcmp(platform->id, bootstrap_id, sizeof(bootstrap_id)) == 0;
-        platform->network_owner = platform->bootstrap;
         platform->priority = (uint16_t)number_option(context, section, "priority", 100U, 0U, 65535U);
         platform->reconnect_interval_sec = (uint16_t)number_option(
             context, section, "reconnect_interval_sec", 5U, 1U, 3600U);

@@ -80,6 +80,7 @@ return view.extend({
 		};
 
 		o = s.option(form.Value, 'priority', '优先级');
+		o.description = '数值越小优先级越高；共享资源按此顺序调度。';
 		o.datatype = 'range(0,65535)';
 		o.default = '100';
 		o.rmempty = false;

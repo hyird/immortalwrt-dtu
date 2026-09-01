@@ -27,7 +27,7 @@
 #include "edge_url.h"
 #include "log.h"
 
-#define EDGE_SOFTWARE_VERSION "0.3.23"
+#define EDGE_SOFTWARE_VERSION "0.3.24"
 #define EDGE_OUTBOX_WINDOW 16U
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
@@ -96,22 +96,32 @@ static edge_ws_session *session_from_terminal(struct ev_timer *timer) {
     return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, terminal_timer));
 }
 
-static edge_ws_session *session_from_acquisition(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, acquisition_timer));
+static edge_ws_app *app_from_acquisition(struct ev_timer *timer) {
+    return (edge_ws_app *)((uint8_t *)timer - offsetof(edge_ws_app, acquisition_timer));
 }
 
-static edge_ws_session *session_from_acquisition_io(struct ev_io *watcher) {
-    return (edge_ws_session *)((uint8_t *)watcher - offsetof(edge_ws_session, acquisition_io));
+static edge_ws_app *app_from_acquisition_io(struct ev_io *watcher) {
+    return (edge_ws_app *)((uint8_t *)watcher - offsetof(edge_ws_app, acquisition_io));
 }
 
-static void sync_acquisition_io(edge_ws_session *session) {
-    const int fd = edge_acquisition_event_fd(session->acquisition);
-    if (ev_is_active(&session->acquisition_io) && session->acquisition_io.fd == fd)
+static edge_ws_session *session_for_platform(edge_ws_app *app,
+                                             const uint8_t platform_id[16]) {
+    if (app == NULL || platform_id == NULL)
+        return NULL;
+    for (size_t index = 0U; index < app->config->platform_count; ++index)
+        if (memcmp(app->sessions[index].config->id, platform_id, 16U) == 0)
+            return &app->sessions[index];
+    return NULL;
+}
+
+static void sync_acquisition_io(edge_ws_app *app) {
+    const int fd = edge_acquisition_event_fd(app->acquisition);
+    if (ev_is_active(&app->acquisition_io) && app->acquisition_io.fd == fd)
         return;
-    ev_io_stop(session->app->loop, &session->acquisition_io);
+    ev_io_stop(app->loop, &app->acquisition_io);
     if (fd >= 0) {
-        ev_io_set(&session->acquisition_io, fd, EV_READ);
-        ev_io_start(session->app->loop, &session->acquisition_io);
+        ev_io_set(&app->acquisition_io, fd, EV_READ);
+        ev_io_start(app->loop, &app->acquisition_io);
     }
 }
 
@@ -180,9 +190,11 @@ static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
 }
 
 static bool acquisition_telemetry(void *context,
+                                  const uint8_t platform_id[16],
                                   const iot_edge_v1_TelemetryRecord *record) {
-    edge_ws_session *session = context;
-    if (record == NULL || record->record_id.size != 16U)
+    edge_ws_app *app = context;
+    edge_ws_session *session = session_for_platform(app, platform_id);
+    if (session == NULL || record == NULL || record->record_id.size != 16U)
         return false;
     uint8_t record_id[16];
     memcpy(record_id, record->record_id.bytes, sizeof(record_id));
@@ -196,9 +208,11 @@ static bool acquisition_telemetry(void *context,
 }
 
 static bool acquisition_command_result(void *context,
+                                       const uint8_t platform_id[16],
                                        const iot_edge_v1_CommandResult *result) {
-    edge_ws_session *session = context;
-    if (result == NULL || result->command_id.size != 16U)
+    edge_ws_app *app = context;
+    edge_ws_session *session = session_for_platform(app, platform_id);
+    if (session == NULL || result == NULL || result->command_id.size != 16U)
         return false;
     uint8_t command_id[16];
     memcpy(command_id, result->command_id.bytes, sizeof(command_id));
@@ -260,9 +274,9 @@ static bool send_hello(edge_ws_session *session) {
     hello->supported_protocol_versions[0] = EDGENODE_PROTOCOL_VERSION;
     hello->supports_tcp = true;
     hello->supports_serial = true;
-    hello->supports_network_config = session->config->network_owner;
+    hello->supports_network_config = true;
     hello->supports_terminal = edge_capability_has_terminal();
-    hello->supports_firmware_update = session->config->bootstrap;
+    hello->supports_firmware_update = true;
     hello->supports_device_config = true;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -368,7 +382,9 @@ static bool send_device_status(edge_ws_session *session) {
     if (!init_envelope(session, output))
         return false;
     output->which_payload = iot_edge_v1_Envelope_device_status_report_tag;
-    edge_acquisition_status(session->acquisition, &output->payload.device_status_report);
+    edge_acquisition_status_for_platform(session->app->acquisition,
+                                         session->config->id,
+                                         &output->payload.device_status_report);
     if (output->payload.device_status_report.devices_count == 0U)
         return true;
     return send_envelope(session, output);
@@ -519,6 +535,23 @@ static void send_config_result(edge_ws_session *session, uint64_t revision,
     send_envelope(session, out);
 }
 
+static size_t build_acquisition_sources(
+    edge_ws_app *app, const edge_ws_session *replacement_session,
+    const edge_runtime_config *replacement_config,
+    edge_acquisition_source sources[EDGE_MAX_PLATFORMS]) {
+    const size_t count = app->config->platform_count;
+    for (size_t index = 0U; index < count; ++index) {
+        edge_ws_session *session = &app->sessions[index];
+        sources[index].platform_id = session->config->id;
+        sources[index].priority = session->config->priority;
+        sources[index].bootstrap = session->config->bootstrap;
+        sources[index].config = session == replacement_session
+                                    ? replacement_config
+                                    : &session->runtime_config;
+    }
+    return count;
+}
+
 static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
     if (envelope->which_payload == iot_edge_v1_Envelope_config_begin_tag) {
         iot_edge_v1_ConfigBegin *begin = &envelope->payload.config_begin;
@@ -552,28 +585,33 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                            "config_commit_invalid", apply_error);
         return;
     }
+    edge_acquisition_source sources[EDGE_MAX_PLATFORMS];
+    const size_t source_count = build_acquisition_sources(
+        session->app, session, &candidate, sources);
     candidate_acquisition = edge_acquisition_create(acquisition_telemetry,
-                                                     acquisition_command_result, session);
+                                                     acquisition_command_result,
+                                                     session->app);
     if (candidate_acquisition == NULL ||
-        !edge_acquisition_apply(candidate_acquisition, &candidate, monotonic_ms(),
-                                apply_error, sizeof(apply_error))) {
+        !edge_acquisition_apply_multi(candidate_acquisition, sources, source_count,
+                                      monotonic_ms(), apply_error,
+                                      sizeof(apply_error))) {
         edge_acquisition_destroy(candidate_acquisition);
         edge_runtime_config_free(&candidate);
         send_config_result(session, commit->revision, commit->sha256.bytes, false,
                            "config_runtime_invalid", apply_error);
         return;
     }
-    ev_io_stop(session->app->loop, &session->acquisition_io);
-    edge_acquisition_stop(session->acquisition);
+    ev_io_stop(session->app->loop, &session->app->acquisition_io);
+    edge_acquisition_stop(session->app->acquisition);
     if (!edge_acquisition_start(candidate_acquisition,
                                 apply_error, sizeof(apply_error))) {
         char restart_error[128] = {0};
-        if (!edge_acquisition_start(session->acquisition, restart_error,
+        if (!edge_acquisition_start(session->app->acquisition, restart_error,
                                     sizeof(restart_error)))
             edge_log_write("error", "acquisition",
                            "previous acquisition worker could not restart",
                            restart_error);
-        sync_acquisition_io(session);
+        sync_acquisition_io(session->app);
         edge_acquisition_destroy(candidate_acquisition);
         edge_runtime_config_free(&candidate);
         send_config_result(session, commit->revision, commit->sha256.bytes, false,
@@ -584,25 +622,26 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                                   commit->sha256.bytes)) {
         edge_acquisition_destroy(candidate_acquisition);
         char restart_error[128] = {0};
-        if (!edge_acquisition_start(session->acquisition, restart_error,
+        if (!edge_acquisition_start(session->app->acquisition, restart_error,
                                     sizeof(restart_error)))
             edge_log_write("error", "acquisition",
                            "previous acquisition worker could not restart",
                            restart_error);
-        sync_acquisition_io(session);
+        sync_acquisition_io(session->app);
         edge_runtime_config_free(&candidate);
         send_config_result(session, commit->revision, commit->sha256.bytes, false,
                            "config_commit_invalid", "configuration tmpfs commit failed");
         return;
     }
-    edge_acquisition_destroy(session->acquisition);
+    edge_acquisition_destroy(session->app->acquisition);
     edge_runtime_config_free(&session->runtime_config);
-    session->acquisition = candidate_acquisition;
+    session->app->acquisition = candidate_acquisition;
     session->runtime_config = candidate;
     session->active_revision = commit->revision;
-    sync_acquisition_io(session);
+    sync_acquisition_io(session->app);
     send_config_result(session, commit->revision, commit->sha256.bytes, true, NULL, NULL);
-    send_device_status(session);
+    for (size_t index = 0U; index < session->app->config->platform_count; ++index)
+        send_device_status(&session->app->sessions[index]);
 }
 
 static void handle_device_command(edge_ws_session *session,
@@ -614,7 +653,9 @@ static void handle_device_command(edge_ws_session *session,
     if (request->device_id.size == 16U)
         memcpy(device_id, request->device_id.bytes, sizeof(device_id));
     char error[257] = {0};
-    if (edge_acquisition_command(session->acquisition, request, error, sizeof(error)))
+    if (edge_acquisition_command_for_platform(session->app->acquisition,
+                                              session->config->id, request,
+                                              error, sizeof(error)))
         return;
     iot_edge_v1_CommandResult result = iot_edge_v1_CommandResult_init_zero;
     edge_protocol_set_bytes(&result.command_id, sizeof(result.command_id.bytes),
@@ -625,7 +666,7 @@ static void handle_device_command(edge_ws_session *session,
     result.completed_at_ms = now_ms();
     safe_copy(result.message, sizeof(result.message),
               error[0] != '\0' ? error : "edge command rejected");
-    (void)acquisition_command_result(session, &result);
+    (void)acquisition_command_result(session->app, session->config->id, &result);
 }
 
 static void send_pong(edge_ws_session *session, const iot_edge_v1_Envelope *input) {
@@ -677,6 +718,45 @@ static void send_network_result(edge_ws_session *session,
     safe_copy(output->payload.network_config_result.message,
               sizeof(output->payload.network_config_result.message), message);
     send_envelope(session, output);
+}
+
+static void broadcast_network_result(edge_ws_app *app,
+                                     const uint8_t request_id[16], bool success,
+                                     bool rolled_back, const char *message) {
+    for (size_t index = 0U; index < app->config->platform_count; ++index) {
+        edge_ws_session *session = &app->sessions[index];
+        if (session->websocket_open && session->enrolled)
+            send_network_result(session, request_id, success, rolled_back, message);
+    }
+}
+
+static void broadcast_network_state(edge_ws_app *app) {
+    for (size_t index = 0U; index < app->config->platform_count; ++index) {
+        edge_ws_session *session = &app->sessions[index];
+        if (session->websocket_open && session->enrolled)
+            send_capability_report(session);
+    }
+}
+
+static void confirm_network_for_session(edge_ws_session *session) {
+    uint8_t request_id[16];
+    if (!edge_network_confirm(session->config->id, request_id))
+        return;
+    broadcast_network_result(session->app, request_id, true, false,
+                             "network configuration confirmed");
+    broadcast_network_state(session->app);
+}
+
+static void report_network_rollback(edge_ws_app *app) {
+    uint8_t owner_platform_id[16];
+    uint8_t request_id[16];
+    if (!edge_network_take_rollback(owner_platform_id, request_id))
+        return;
+    (void)owner_platform_id;
+    broadcast_network_result(
+        app, request_id, false, true,
+        "network configuration rolled back after reconnect timeout");
+    broadcast_network_state(app);
 }
 
 static bool send_modem_result(edge_ws_session *session, const uint8_t request_id[16],
@@ -743,11 +823,16 @@ static void handle_network_config(edge_ws_session *session,
     if (request->request_id.size == 16U)
         memcpy(request_id, request->request_id.bytes, sizeof(request_id));
     char message[257] = {0};
-    bool success =
-        edge_network_prepare(request, session->app->config->wan_interface,
-                             message, sizeof(message));
+    bool success = false;
+    if (edge_firmware_active())
+        safe_copy(message, sizeof(message),
+                  "firmware update is in progress");
+    else
+        success = edge_network_prepare(request, session->app->config->wan_interface,
+                                       message, sizeof(message));
     if (success &&
-        !edge_network_activate(request->rollback_timeout_sec, request_id)) {
+        !edge_network_activate(request->rollback_timeout_sec,
+                               session->config->id, request_id)) {
         success = false;
         safe_copy(message, sizeof(message),
                   "could not activate network rollback watchdog");
@@ -755,7 +840,10 @@ static void handle_network_config(edge_ws_session *session,
     if (success)
         safe_copy(message, sizeof(message),
                   "network configuration saved locally and is being applied");
-    send_network_result(session, request_id, success, false, message);
+    if (success)
+        broadcast_network_result(session->app, request_id, true, false, message);
+    else
+        send_network_result(session, request_id, false, false, message);
     if (success) {
         ev_timer_stop(session->app->loop, &session->network_timer);
         ev_timer_set(&session->network_timer, 2.0, 0.0);
@@ -766,20 +854,25 @@ static void handle_network_config(edge_ws_session *session,
 static void handle_firmware_update(edge_ws_session *session,
                                    const iot_edge_v1_FirmwareUpdateRequest *request) {
     uint8_t request_id[16] = {0};
+    const uint64_t total_bytes = request->size_bytes;
     if (request->request_id.size == 16U)
         memcpy(request_id, request->request_id.bytes, sizeof(request_id));
     char message[257] = {0};
-    const bool accepted = edge_firmware_start(session->config->id, request,
-                                               message, sizeof(message));
+    const bool accepted =
+        !edge_network_pending() &&
+        edge_firmware_start(session->config->id, request, message, sizeof(message));
+    if (!accepted && edge_network_pending())
+        safe_copy(message, sizeof(message),
+                  "network configuration is waiting for confirmation");
     send_firmware_result(
         session, request_id,
         accepted ? iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_ACCEPTED
                  : iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED,
-        accepted ? "firmware update accepted" : message, 0U, request->size_bytes, 0U);
+        accepted ? "firmware update accepted" : message, 0U, total_bytes, 0U);
     if (accepted) {
         memcpy(session->firmware_request_id, request_id,
                sizeof(session->firmware_request_id));
-        session->firmware_total_bytes = request->size_bytes;
+        session->firmware_total_bytes = total_bytes;
         session->firmware_operation_active = true;
         ev_timer_stop(session->app->loop, &session->firmware_timer);
         ev_timer_set(&session->firmware_timer, 0.25, 0.5);
@@ -995,8 +1088,6 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         session->enrolled = true;
         syslog(LOG_INFO, "platform %s enrollment approved on existing WebSocket",
                session->config->name);
-        if (session->config->network_owner)
-            edge_network_confirm();
         const unsigned heartbeat = ack->heartbeat_interval_sec != 0U
                                        ? ack->heartbeat_interval_sec
                                        : session->app->config->heartbeat_interval_sec;
@@ -1008,22 +1099,23 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         ev_timer_start(session->app->loop, &session->heartbeat_timer);
         send_capability_report(session);
         send_device_status(session);
-        if (session->config->network_owner) {
-            uint8_t rolled_back_request_id[16];
-            if (edge_network_take_rollback(rolled_back_request_id))
-                send_network_result(session, rolled_back_request_id, false, true,
-                                    "network configuration rolled back after reconnect timeout");
-        }
+        confirm_network_for_session(session);
+        report_network_rollback(session->app);
         send_outbox_window(session);
         send_pending_modem_result(session);
         break;
     }
-    case iot_edge_v1_Envelope_heartbeat_ack_tag:
-        if (session->enrolled && envelope->payload.heartbeat_ack.request_capability_report)
+    case iot_edge_v1_Envelope_heartbeat_ack_tag: {
+        const bool request_capability =
+            envelope->payload.heartbeat_ack.request_capability_report;
+        const bool request_device_status =
+            envelope->payload.heartbeat_ack.request_device_status;
+        if (session->enrolled && request_capability)
             send_capability_report(session);
-        if (session->enrolled && envelope->payload.heartbeat_ack.request_device_status)
+        if (session->enrolled && request_device_status)
             send_device_status(session);
         break;
+    }
     case iot_edge_v1_Envelope_config_begin_tag:
     case iot_edge_v1_Envelope_config_item_tag:
     case iot_edge_v1_Envelope_config_commit_tag:
@@ -1065,16 +1157,15 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         if (session->network_probe_nonce != 0U &&
             envelope->payload.pong.nonce == session->network_probe_nonce) {
             session->network_probe_nonce = 0U;
-            edge_network_confirm();
-            send_capability_report(session);
+            confirm_network_for_session(session);
         }
         break;
     case iot_edge_v1_Envelope_network_config_request_tag:
-        if (session->enrolled && session->config->network_owner)
+        if (session->enrolled)
             handle_network_config(session, &envelope->payload.network_config_request);
         break;
     case iot_edge_v1_Envelope_firmware_update_request_tag:
-        if (session->enrolled && session->config->bootstrap)
+        if (session->enrolled)
             handle_firmware_update(session, &envelope->payload.firmware_update_request);
         break;
     case iot_edge_v1_Envelope_modem_control_request_tag:
@@ -1204,6 +1295,7 @@ static void heartbeat_timer(struct ev_loop *loop, struct ev_timer *timer, int ev
     heartbeat->outbox_bytes = session->spool.outbox.bytes;
     send_envelope(session, envelope);
     send_outbox_window(session);
+    report_network_rollback(session->app);
 }
 
 static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
@@ -1409,17 +1501,17 @@ static void terminal_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
 static void acquisition_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
     (void)loop;
     (void)events;
-    edge_ws_session *session = session_from_acquisition(timer);
-    edge_acquisition_tick(session->acquisition, monotonic_ms());
-    sync_acquisition_io(session);
+    edge_ws_app *app = app_from_acquisition(timer);
+    edge_acquisition_tick(app->acquisition, monotonic_ms());
+    sync_acquisition_io(app);
 }
 
 static void acquisition_io(struct ev_loop *loop, struct ev_io *watcher, int events) {
     (void)loop;
     (void)events;
-    edge_ws_session *session = session_from_acquisition_io(watcher);
-    edge_acquisition_tick(session->acquisition, monotonic_ms());
-    sync_acquisition_io(session);
+    edge_ws_app *app = app_from_acquisition_io(watcher);
+    edge_acquisition_tick(app->acquisition, monotonic_ms());
+    sync_acquisition_io(app);
 }
 
 static void start_connection(edge_ws_session *session) {
@@ -1516,7 +1608,6 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         if (!edge_spool_init(&session->spool, session->config->id,
                              session->config->outbox_max_bytes)) {
             for (size_t cleanup = 0; cleanup <= index; ++cleanup) {
-                edge_acquisition_destroy(app->sessions[cleanup].acquisition);
                 edge_runtime_config_free(&app->sessions[cleanup].runtime_config);
                 edge_spool_free(&app->sessions[cleanup].spool);
             }
@@ -1531,37 +1622,17 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
                 syslog(LOG_ERR, "platform %s active config rejected: %s",
                        session->config->name, error);
                 for (size_t cleanup = 0; cleanup <= index; ++cleanup) {
-                    edge_acquisition_destroy(app->sessions[cleanup].acquisition);
                     edge_runtime_config_free(&app->sessions[cleanup].runtime_config);
                     edge_spool_free(&app->sessions[cleanup].spool);
                 }
                 return false;
             }
         }
-        session->acquisition = edge_acquisition_create(
-            acquisition_telemetry, acquisition_command_result, session);
-        char acquisition_error[256] = {0};
-        if (session->acquisition == NULL ||
-            !edge_acquisition_apply(session->acquisition, &session->runtime_config,
-                                    monotonic_ms(), acquisition_error,
-                                    sizeof(acquisition_error)) ||
-            !edge_acquisition_start(session->acquisition, acquisition_error,
-                                    sizeof(acquisition_error))) {
-            syslog(LOG_ERR, "platform %s acquisition config rejected: %s",
-                   session->config->name, acquisition_error);
-            for (size_t cleanup = 0; cleanup <= index; ++cleanup) {
-                edge_acquisition_destroy(app->sessions[cleanup].acquisition);
-                edge_runtime_config_free(&app->sessions[cleanup].runtime_config);
-                edge_spool_free(&app->sessions[cleanup].spool);
-            }
-            return false;
-        }
         ev_timer_init(&session->reconnect_timer, reconnect_timer, 0.0, 0.0);
         if (!edge_retry_init(&session->retry,
                              (uint32_t)session->config->reconnect_interval_sec * 1000U,
                              EDGE_CONNECT_TIMEOUT_SEC * 1000U)) {
             for (size_t cleanup = 0; cleanup <= index; ++cleanup) {
-                edge_acquisition_destroy(app->sessions[cleanup].acquisition);
                 edge_runtime_config_free(&app->sessions[cleanup].runtime_config);
                 edge_spool_free(&app->sessions[cleanup].spool);
             }
@@ -1576,8 +1647,28 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         ev_timer_init(&session->network_timer, network_timer, 0.0, 0.0);
         ev_timer_init(&session->reload_timer, reload_timer, 0.0, 0.0);
         ev_timer_init(&session->terminal_timer, terminal_timer, 0.0, 0.0);
-        ev_timer_init(&session->acquisition_timer, acquisition_timer, 0.0, 0.0);
-        ev_io_init(&session->acquisition_io, acquisition_io, 0, EV_READ);
+    }
+    ev_timer_init(&app->acquisition_timer, acquisition_timer, 0.0, 0.0);
+    ev_io_init(&app->acquisition_io, acquisition_io, 0, EV_READ);
+    edge_acquisition_source sources[EDGE_MAX_PLATFORMS];
+    const size_t source_count = build_acquisition_sources(app, NULL, NULL, sources);
+    app->acquisition = edge_acquisition_create(
+        acquisition_telemetry, acquisition_command_result, app);
+    char acquisition_error[256] = {0};
+    if (app->acquisition == NULL ||
+        !edge_acquisition_apply_multi(app->acquisition, sources, source_count,
+                                      monotonic_ms(), acquisition_error,
+                                      sizeof(acquisition_error)) ||
+        !edge_acquisition_start(app->acquisition, acquisition_error,
+                                sizeof(acquisition_error))) {
+        syslog(LOG_ERR, "shared acquisition config rejected: %s", acquisition_error);
+        edge_acquisition_destroy(app->acquisition);
+        app->acquisition = NULL;
+        for (size_t cleanup = 0U; cleanup < config->platform_count; ++cleanup) {
+            edge_runtime_config_free(&app->sessions[cleanup].runtime_config);
+            edge_spool_free(&app->sessions[cleanup].spool);
+        }
+        return false;
     }
     return true;
 }
@@ -1585,17 +1676,15 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
 void edge_ws_app_start(edge_ws_app *app) {
     if (app == NULL)
         return;
+    ev_timer_set(&app->acquisition_timer, 0.0, 1.0);
+    ev_timer_start(app->loop, &app->acquisition_timer);
+    sync_acquisition_io(app);
     for (size_t index = 0; index < app->config->platform_count; ++index) {
-        if (app->sessions[index].config->bootstrap &&
-            (edge_firmware_active() ||
-             edge_firmware_has_status(app->sessions[index].config->id))) {
+        if (edge_firmware_has_status(app->sessions[index].config->id)) {
             app->sessions[index].firmware_operation_active = true;
             ev_timer_set(&app->sessions[index].firmware_timer, 0.25, 0.5);
             ev_timer_start(app->loop, &app->sessions[index].firmware_timer);
         }
-        ev_timer_set(&app->sessions[index].acquisition_timer, 0.0, 1.0);
-        ev_timer_start(app->loop, &app->sessions[index].acquisition_timer);
-        sync_acquisition_io(&app->sessions[index]);
         start_connection(&app->sessions[index]);
     }
 }
@@ -1603,6 +1692,10 @@ void edge_ws_app_start(edge_ws_app *app) {
 void edge_ws_app_stop(edge_ws_app *app) {
     if (app == NULL)
         return;
+    ev_timer_stop(app->loop, &app->acquisition_timer);
+    ev_io_stop(app->loop, &app->acquisition_io);
+    edge_acquisition_destroy(app->acquisition);
+    app->acquisition = NULL;
     for (size_t index = 0; index < app->config->platform_count; ++index) {
         edge_ws_session *session = &app->sessions[index];
         ev_timer_stop(app->loop, &session->reconnect_timer);
@@ -1613,10 +1706,8 @@ void edge_ws_app_stop(edge_ws_app *app) {
         ev_timer_stop(app->loop, &session->network_timer);
         ev_timer_stop(app->loop, &session->reload_timer);
         ev_timer_stop(app->loop, &session->terminal_timer);
-        ev_timer_stop(app->loop, &session->acquisition_timer);
         ev_io_stop(app->loop, &session->modem_io);
         ev_child_stop(app->loop, &session->modem_child);
-        ev_io_stop(app->loop, &session->acquisition_io);
         if (session->terminal_open) {
             edge_terminal_close(session->terminal_id);
             session->terminal_open = false;
@@ -1652,8 +1743,6 @@ void edge_ws_app_stop(edge_ws_app *app) {
         if (session->client_active)
             session->client.free(&session->client);
         edge_spool_free(&session->spool);
-        edge_acquisition_destroy(session->acquisition);
-        session->acquisition = NULL;
         edge_runtime_config_free(&session->runtime_config);
         session->client_active = false;
         session->websocket_open = false;

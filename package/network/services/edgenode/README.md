@@ -20,21 +20,30 @@ Implemented foundations:
   `/tmp/edgenode/<platform_id>/`; process restarts recover them, device reboots do not;
 - before every tmpfs write, the daemon preserves 15% free space by rolling the oldest
   outbox message across all platforms; active and staging config are never rolled;
-- supervised acquisition workers read every second, process queued writes in that same
-  cadence, and report independently at the configured interval; IPC is consumed by
-  `ev_io` readiness events so device I/O never blocks the WSS event loop;
+- one supervised application-level acquisition worker reads every second, processes
+  queued writes in that same cadence, and reports each platform independently at its
+  configured interval; IPC is consumed by `ev_io` readiness events so device I/O never
+  blocks the WebSocket event loop;
+- platforms may share a physical serial channel and use different baud/parity settings;
+  the worker drains the prior request, applies the next task's serial settings, clears
+  stale input, observes the RTU quiet interval, and then performs that task. TCP Server
+  endpoints sharing a listen port use one listener. Lower numeric platform priority is
+  scheduled first, while every platform task remains active;
 - Modbus TCP/RTU and S7 request/response codecs implement reads and writes. A successful
   command requires readback equality;
 - an unresponsive S7 PLC closes the TCP socket and repeats TCP, COTP, and S7 Setup
   Communication on the next one-second cycle.
 - network and serial capabilities are reported automatically; the built-in PTY bridge
   exposes an authenticated remote terminal without a separate terminal daemon;
-- bootstrap-authorized commands can create, update, or delete UCI logical interfaces
+- commands from any enrolled platform can create, update, or delete UCI logical interfaces
   backed by one physical device or a bridge, using DHCP or static IPv4. The configured
   4G/WAN interface and its descendants are excluded, and an unconfirmed network change
-  restores the previous UCI network configuration automatically;
-- the same commands can manage additional HTTP or HTTPS platforms, download verified
-  firmware, and invoke `sysupgrade`.
+  restores the previous UCI network configuration automatically. Only the initiating
+  platform can confirm its transaction, while apply, confirmation, and rollback results
+  are broadcast to every enrolled platform;
+- any enrolled platform can download verified firmware and invoke `sysupgrade`; network
+  and firmware mutations are serialized. Bootstrap-only modem and terminal privileges
+  remain unchanged.
 
 The active-config-to-physical-endpoint binding is kept separate from the wire/session
 layer. The current code provides the tested protocol codecs and scheduler that binding
@@ -93,8 +102,9 @@ uci commit edgenode
 Install `luci-app-edgenode` from the companion LuCI feed to add, edit, enable, disable,
 order, or remove platform sections in **Services → Edge Node**. LuCI generates the
 internal connection ID and never asks the user to enter it. The default ID
-`00000000-0000-7000-8000-000000000001` remains the privileged network/firmware owner,
-but its URL is fully editable.
+`00000000-0000-7000-8000-000000000001` remains the bootstrap platform for modem and
+terminal privileges, but network management and firmware upgrade are available to every
+enrolled platform.
 
 New nodes enter the platform's manual approval flow by IMEI. Approval upgrades that
 connection to an enrolled session. A connection that never receives approval is

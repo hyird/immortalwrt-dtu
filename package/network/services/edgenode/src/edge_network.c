@@ -20,11 +20,20 @@
 #define NETWORK_CONFIRMED "/tmp/edgenode/network.confirmed"
 #define NETWORK_ROLLED_BACK "/tmp/edgenode/network.rolled-back"
 
+typedef struct {
+    uint8_t platform_id[16];
+    uint8_t request_id[16];
+} edge_network_marker;
+
 static void restore_network(void);
 
 static void set_error(char *output, size_t capacity, const char *message) {
     if (output != NULL && capacity != 0U)
         snprintf(output, capacity, "%s", message != NULL ? message : "network error");
+}
+
+bool edge_network_pending(void) {
+    return access(NETWORK_PENDING, F_OK) == 0;
 }
 
 static bool parse_ipv4(const char *text, uint32_t *value) {
@@ -436,7 +445,7 @@ static bool apply_interface(const iot_edge_v1_NetworkInterfaceConfig *config) {
 bool edge_network_prepare(const iot_edge_v1_NetworkConfigRequest *request,
                           const char *protected_device_name, char *error,
                           size_t error_size) {
-    if (access(NETWORK_PENDING, F_OK) == 0) {
+    if (edge_network_pending()) {
         set_error(error, error_size, "another network change is waiting for confirmation");
         return false;
     }
@@ -471,22 +480,37 @@ static void restore_network(void) {
     (void)edge_process_run(reload, -1, -1);
 }
 
-static bool write_marker(const char *path, const uint8_t request_id[16]) {
+static bool write_marker(const char *path, const edge_network_marker *marker) {
     const int output = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (output < 0)
         return false;
-    const bool written = write(output, request_id, 16U) == 16;
+    const bool written = write(output, marker, sizeof(*marker)) ==
+                         (ssize_t)sizeof(*marker);
     close(output);
     return written;
 }
 
+static bool read_marker(const char *path, edge_network_marker *marker) {
+    const int input = open(path, O_RDONLY);
+    if (input < 0)
+        return false;
+    const bool read_ok = read(input, marker, sizeof(*marker)) ==
+                         (ssize_t)sizeof(*marker);
+    close(input);
+    return read_ok;
+}
+
 bool edge_network_activate(uint32_t rollback_timeout_sec,
+                           const uint8_t platform_id[16],
                            const uint8_t request_id[16]) {
     if (rollback_timeout_sec < 30U || rollback_timeout_sec > 300U ||
-        request_id == NULL)
+        platform_id == NULL || request_id == NULL)
         return false;
+    edge_network_marker marker;
+    memcpy(marker.platform_id, platform_id, sizeof(marker.platform_id));
+    memcpy(marker.request_id, request_id, sizeof(marker.request_id));
     unlink(NETWORK_CONFIRMED);
-    if (!write_marker(NETWORK_PENDING, request_id)) {
+    if (!write_marker(NETWORK_PENDING, &marker)) {
         restore_network();
         unlink(NETWORK_BACKUP);
         return false;
@@ -515,7 +539,7 @@ bool edge_network_activate(uint32_t rollback_timeout_sec,
             restore_network();
             unlink(NETWORK_PENDING);
             unlink(NETWORK_BACKUP);
-            (void)write_marker(NETWORK_ROLLED_BACK, request_id);
+            (void)write_marker(NETWORK_ROLLED_BACK, &marker);
         } else {
             unlink(NETWORK_PENDING);
             unlink(NETWORK_BACKUP);
@@ -526,24 +550,32 @@ bool edge_network_activate(uint32_t rollback_timeout_sec,
     return true;
 }
 
-void edge_network_confirm(void) {
-    if (access(NETWORK_PENDING, F_OK) != 0)
-        return;
+bool edge_network_confirm(const uint8_t platform_id[16],
+                          uint8_t request_id[16]) {
+    if (platform_id == NULL || request_id == NULL)
+        return false;
+    edge_network_marker pending;
+    if (!read_marker(NETWORK_PENDING, &pending) ||
+        memcmp(pending.platform_id, platform_id, 16U) != 0)
+        return false;
     const int marker =
         open(NETWORK_CONFIRMED, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (marker >= 0)
-        close(marker);
+    if (marker < 0)
+        return false;
+    close(marker);
+    memcpy(request_id, pending.request_id, 16U);
+    return true;
 }
 
-bool edge_network_take_rollback(uint8_t request_id[16]) {
-    if (request_id == NULL)
+bool edge_network_take_rollback(uint8_t platform_id[16],
+                                uint8_t request_id[16]) {
+    if (platform_id == NULL || request_id == NULL)
         return false;
-    const int input = open(NETWORK_ROLLED_BACK, O_RDONLY);
-    if (input < 0)
+    edge_network_marker marker;
+    if (!read_marker(NETWORK_ROLLED_BACK, &marker))
         return false;
-    const bool read_ok = read(input, request_id, 16U) == 16;
-    close(input);
-    if (read_ok)
-        unlink(NETWORK_ROLLED_BACK);
-    return read_ok;
+    memcpy(platform_id, marker.platform_id, 16U);
+    memcpy(request_id, marker.request_id, 16U);
+    unlink(NETWORK_ROLLED_BACK);
+    return true;
 }

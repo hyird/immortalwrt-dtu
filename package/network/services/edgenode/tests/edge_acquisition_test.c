@@ -23,14 +23,18 @@ static void copy_text(char *output, size_t capacity, const char *input) {
     snprintf(output, capacity, "%s", input);
 }
 
-static bool telemetry(void *context, const iot_edge_v1_TelemetryRecord *record) {
+static bool telemetry(void *context, const uint8_t platform_id[16],
+                      const iot_edge_v1_TelemetryRecord *record) {
     (void)context;
+    (void)platform_id;
     (void)record;
     return true;
 }
 
-static bool command(void *context, const iot_edge_v1_CommandResult *result) {
+static bool command(void *context, const uint8_t platform_id[16],
+                    const iot_edge_v1_CommandResult *result) {
     (void)context;
+    (void)platform_id;
     (void)result;
     return true;
 }
@@ -107,6 +111,62 @@ static void wait_for_status(edge_acquisition *acquisition) {
     assert(strcmp(report.devices[0].state, "reconnecting") == 0);
 }
 
+static void make_serial_config(iot_edge_v1_ConfigItem values[3], uint32_t baud_rate) {
+    (void)make_config(values);
+    iot_edge_v1_EndpointConfig *endpoint = &values[0].item.endpoint;
+    endpoint->transport = iot_edge_v1_Transport_TRANSPORT_SERIAL;
+    endpoint->mode = iot_edge_v1_LinkMode_LINK_MODE_SERIAL;
+    endpoint->has_serial = true;
+    copy_text(endpoint->serial.channel, sizeof(endpoint->serial.channel), "/dev/ttyS1");
+    endpoint->serial.baud_rate = baud_rate;
+    endpoint->serial.data_bits = 8U;
+    endpoint->serial.stop_bits = 1U;
+    copy_text(endpoint->serial.parity, sizeof(endpoint->serial.parity), "none");
+    copy_text(values[1].item.device.modbus_mode,
+              sizeof(values[1].item.device.modbus_mode), "RTU");
+}
+
+static void verify_shared_resources(void) {
+    iot_edge_v1_ConfigItem items[4][3];
+    edge_runtime_config configs[4];
+    configs[0] = make_config(items[0]);
+    configs[1] = make_config(items[1]);
+    items[0][0].item.endpoint.mode = iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER;
+    items[1][0].item.endpoint.mode = iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER;
+    items[0][0].item.endpoint.port = 35000U;
+    items[1][0].item.endpoint.port = 35000U;
+    copy_text(items[0][0].item.endpoint.ip, sizeof(items[0][0].item.endpoint.ip),
+              "0.0.0.0");
+    copy_text(items[1][0].item.endpoint.ip, sizeof(items[1][0].item.endpoint.ip),
+              "127.0.0.1");
+    make_serial_config(items[2], 9600U);
+    make_serial_config(items[3], 115200U);
+    configs[2] = (edge_runtime_config){
+        .revision = 1U, .items = items[2], .item_count = 3U,
+        .endpoint_count = 1U, .device_count = 1U};
+    configs[3] = (edge_runtime_config){
+        .revision = 1U, .items = items[3], .item_count = 3U,
+        .endpoint_count = 1U, .device_count = 1U};
+    uint8_t platform_ids[4][16] = {{1U}, {2U}, {3U}, {4U}};
+    edge_acquisition_source sources[4];
+    for (size_t index = 0U; index < 4U; ++index) {
+        sources[index] = (edge_acquisition_source){
+            .platform_id = platform_ids[index],
+            .priority = (uint16_t)(100U - index),
+            .bootstrap = index == 0U,
+            .config = &configs[index],
+        };
+    }
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry, command, NULL);
+    assert(acquisition != NULL);
+    char error[256] = {0};
+    assert(edge_acquisition_apply_multi(acquisition, sources, 4U, monotonic_ms(),
+                                        error, sizeof(error)));
+    assert(edge_acquisition_device_count(acquisition) == 4U);
+    assert(edge_acquisition_resource_count(acquisition) == 2U);
+    edge_acquisition_destroy(acquisition);
+}
+
 int main(void) {
     iot_edge_v1_ConfigItem values[3];
     edge_runtime_config config = make_config(values);
@@ -122,5 +182,6 @@ int main(void) {
     assert(edge_acquisition_start(acquisition, error, sizeof(error)));
     wait_for_status(acquisition);
     edge_acquisition_destroy(acquisition);
+    verify_shared_resources();
     return 0;
 }

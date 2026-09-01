@@ -12,6 +12,14 @@
 - Preserve both HTTP/WS and HTTPS/WSS platform connectivity. An HTTP platform
   must also accept HTTP firmware download URLs; keep HTTPS certificate-policy
   changes separate unless they are explicitly requested and tested.
+- Keep each platform's session, configuration, and outbox isolated, while one
+  application-level acquisition scheduler serializes shared physical I/O.
+  Serial settings are selected per task, and TCP Server listeners are shared
+  by port; lower numeric platform priority is scheduled first.
+- Every enrolled platform may request network changes and firmware upgrades.
+  Bind network confirmation to the initiating platform, broadcast network
+  apply/confirm/rollback state to every enrolled platform, and keep global
+  network/firmware mutations serialized.
 - Use `configs/tas-682f.config` as the release seed configuration.
 
 ## Build environment
@@ -30,9 +38,12 @@
   the helper pre-seeds the three source packages needed to keep the feeds scan
   warning-free. Do not use `feeds install -a`; this single-device tree
   intentionally omits dependencies of unused feed packages.
-- Run `make clean`, copy `configs/tas-682f.config` to `.config`, run
-  `make defconfig`, and perform a full firmware build; a package-only compile is
-  not a release build.
+- Copy `configs/tas-682f.config` to `.config`, run `make defconfig`, and perform
+  a full firmware image build; a package-only compile is not a release build.
+  Do not run global `make clean` for routine source-only updates when the build
+  checkout has a verified clean baseline. Use it only when the toolchain,
+  target, seed configuration, or dependency baseline changed, or when stale
+  outputs are suspected.
 
 ## Release verification
 
