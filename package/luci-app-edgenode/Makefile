@@ -33,8 +33,6 @@ define Package/luci-app-edgenode/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/edgenode.js \
 		$(1)/www/luci-static/resources/view/edgenode.js
-	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/edgenode-modem.js \
-		$(1)/www/luci-static/resources/view/edgenode-modem.js
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
 	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-edgenode.json \
 		$(1)/usr/share/luci/menu.d/luci-app-edgenode.json
