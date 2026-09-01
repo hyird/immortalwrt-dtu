@@ -27,7 +27,7 @@
 #include "edge_url.h"
 #include "log.h"
 
-#define EDGE_SOFTWARE_VERSION "0.3.24"
+#define EDGE_SOFTWARE_VERSION "0.3.25"
 #define EDGE_OUTBOX_WINDOW 16U
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
@@ -1040,6 +1040,11 @@ static void handle_terminal_open(edge_ws_session *session,
     uint8_t terminal_id[16] = {0};
     if (request->terminal_id.size == 16U)
         memcpy(terminal_id, request->terminal_id.bytes, sizeof(terminal_id));
+    if (session->terminal_open) {
+        send_terminal_close(session, terminal_id, -1,
+                            "another terminal is active on this platform");
+        return;
+    }
     char error[129] = {0};
     if (!edge_terminal_open(request, error, sizeof(error))) {
         send_terminal_close(session, terminal_id, -1, error);
@@ -1181,8 +1186,7 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
             handle_log_level_request(session, envelope);
         break;
     case iot_edge_v1_Envelope_terminal_open_tag:
-        if (session->enrolled && session->config->bootstrap &&
-            edge_capability_has_terminal())
+        if (session->enrolled && edge_capability_has_terminal())
             handle_terminal_open(session, &envelope->payload.terminal_open);
         break;
     case iot_edge_v1_Envelope_terminal_data_tag:
@@ -1454,7 +1458,7 @@ static void terminal_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
 
     uint64_t input_acked_sequence = 0U;
     const edge_terminal_input_result input_result =
-        edge_terminal_flush(&input_acked_sequence);
+        edge_terminal_flush(session->terminal_id, &input_acked_sequence);
     if (input_result == EDGE_TERMINAL_INPUT_ERROR) {
         fail_terminal(session, "terminal input write failed");
         return;
@@ -1473,11 +1477,10 @@ static void terminal_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
         return;
     }
 
-    uint8_t terminal_id[16] = {0};
     bool closed = false;
     int32_t exit_code = 0;
     const ssize_t size =
-        edge_terminal_read(terminal_id, session->terminal_output,
+        edge_terminal_read(session->terminal_id, session->terminal_output,
                            sizeof(session->terminal_output), &closed, &exit_code);
     if (size > 0) {
         if (session->terminal_output_sequence == UINT64_MAX) {
@@ -1493,7 +1496,7 @@ static void terminal_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     if (closed) {
         ev_timer_stop(session->app->loop, &session->terminal_timer);
         session->terminal_open = false;
-        send_terminal_close(session, terminal_id, exit_code, "terminal closed");
+        send_terminal_close(session, session->terminal_id, exit_code, "terminal closed");
         reset_terminal_flow(session);
     }
 }

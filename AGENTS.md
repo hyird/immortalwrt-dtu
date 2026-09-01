@@ -16,6 +16,10 @@
   application-level acquisition scheduler serializes shared physical I/O.
   Serial settings are selected per task, and TCP Server listeners are shared
   by port; lower numeric platform priority is scheduled first.
+- Allow every enrolled platform to open its own terminal session. Keep PTYs,
+  terminal identities, sequencing, acknowledgements, and flow-control state
+  isolated per platform connection, with concurrent sessions bounded by
+  `EDGE_MAX_PLATFORMS`.
 - Every enrolled platform may request network changes and firmware upgrades.
   Bind network confirmation to the initiating platform, broadcast network
   apply/confirm/rollback state to every enrolled platform, and keep global

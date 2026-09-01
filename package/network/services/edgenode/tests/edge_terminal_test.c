@@ -94,13 +94,27 @@ int main(void) {
     const int flags = fcntl(pipes[1], F_GETFL, 0);
     require(flags >= 0 && fcntl(pipes[1], F_SETFL, flags | O_NONBLOCK) == 0,
             "cannot make test pipe nonblocking");
+    int other_pipes[2];
+    require(pipe(other_pipes) == 0, "cannot create second test pipe");
+    const int other_flags = fcntl(other_pipes[1], F_GETFL, 0);
+    require(other_flags >= 0 &&
+                fcntl(other_pipes[1], F_SETFL, other_flags | O_NONBLOCK) == 0,
+            "cannot make second test pipe nonblocking");
 
     const uint8_t terminal_id[16] = {
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
     };
+    const uint8_t other_terminal_id[16] = {
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    };
     require(edge_terminal_test_attach(pipes[1], terminal_id),
             "cannot attach test terminal");
+    require(edge_terminal_test_attach(other_pipes[1], other_terminal_id),
+            "cannot attach concurrent test terminal");
+    require(!edge_terminal_test_attach(other_pipes[1], other_terminal_id),
+            "duplicate concurrent terminal id was accepted");
 
     const size_t filled = fill_pipe(pipes[1]);
     iot_edge_v1_TerminalData first = request(terminal_id, 1U, "first");
@@ -109,8 +123,15 @@ int main(void) {
                 acked == 0U,
             "backpressured input was acknowledged before reaching the PTY");
 
+    iot_edge_v1_TerminalData other = request(other_terminal_id, 1U, "other");
+    require(edge_terminal_write(&other, &acked) == EDGE_TERMINAL_INPUT_ACKED &&
+                acked == 1U,
+            "concurrent terminal input was blocked by another terminal");
+    read_exact(other_pipes[0], "other");
+
     drain_exact(pipes[0], filled);
-    require(edge_terminal_flush(&acked) == EDGE_TERMINAL_INPUT_ACKED && acked == 1U,
+    require(edge_terminal_flush(terminal_id, &acked) == EDGE_TERMINAL_INPUT_ACKED &&
+                acked == 1U,
             "flushed input did not acknowledge its sequence");
     read_exact(pipes[0], "first");
 
@@ -128,7 +149,9 @@ int main(void) {
     read_exact(pipes[0], "second");
 
     edge_terminal_close(terminal_id);
+    edge_terminal_close(other_terminal_id);
     close(pipes[0]);
+    close(other_pipes[0]);
     puts("edge terminal tests passed");
     return 0;
 }
