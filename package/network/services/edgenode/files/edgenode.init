@@ -4,6 +4,16 @@ USE_PROCD=1
 START=95
 STOP=10
 
+# A restart may be invoked from a PTY hosted by the main EdgeNode process.
+# Stopping that process closes the PTY and sends SIGHUP to this shell, so keep
+# the init command alive until the new procd instances have been registered.
+restart() {
+	trap '' HUP TERM
+	stop "$@"
+	start "$@"
+	trap - HUP TERM
+}
+
 initialize_model() {
 	local configured detected
 

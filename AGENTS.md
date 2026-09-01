@@ -27,7 +27,9 @@
 - Keep the independent network watchdog responsible for restoring the
   EdgeNode main process when it is absent. A restart issued from EdgeNode's own
   web terminal can lose its start phase when stopping the process tears down
-  the terminal, so service recovery must not depend on that terminal session.
+  the terminal, so the init restart path must survive PTY hangup and service
+  recovery must not depend on that terminal session. Keep procd respawn enabled
+  for both the main and modem-monitor instances.
 - Use `configs/tas-682f.config` as the release seed configuration.
 
 ## Build environment
