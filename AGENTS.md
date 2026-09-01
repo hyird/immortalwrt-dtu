@@ -18,10 +18,13 @@
 
 - The designated build machine is `10.10.0.101`.
 - The only release checkout is `/home/openwrtbuild/immortalwrt-dtu`.
+- Make source changes in a local development checkout, then commit and push
+  them to `origin` before starting a build.
+- Treat the release checkout as pull-and-build only: never edit source files
+  there or copy uncommitted files into it. Update it only with
+  `git pull --ff-only` from a clean working tree.
 - Run Git, feed, configuration, and build commands as the unprivileged
   `openwrtbuild` user.
-- Require a clean working tree and use `git pull --ff-only` before a release
-  build. Do not copy uncommitted source files into the release checkout.
 - Update the configured feeds, then run `scripts/install-tas-feeds.sh`. This
   installs only `libev`, `libuwsc`, `openssh-sftp-server` and `luci-light` with their dependencies;
   the helper pre-seeds the three source packages needed to keep the feeds scan
