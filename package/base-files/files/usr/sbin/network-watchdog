@@ -6,6 +6,25 @@ OFFLINE_TIMEOUT=300
 CHECK_INTERVAL=30
 PING_TIMEOUT=15
 
+edgenode_main_running() {
+	local command pid
+
+	for pid in $(pidof edgenode 2>/dev/null); do
+		[ -r "/proc/${pid}/cmdline" ] || continue
+		command="$(tr '\000' '\n' <"/proc/${pid}/cmdline")"
+		[ "${command}" = '/usr/sbin/edgenode' ] && return 0
+	done
+
+	return 1
+}
+
+ensure_edgenode_running() {
+	edgenode_main_running && return 0
+
+	logger -t network-watchdog 'edgenode main process is not running; starting service'
+	/etc/init.d/edgenode start >/dev/null 2>&1
+}
+
 uptime_seconds() {
 	local uptime
 
@@ -22,6 +41,8 @@ until last_online="$(uptime_seconds)"; do
 done
 
 while :; do
+	ensure_edgenode_running
+
 	if ! cycle_started="$(uptime_seconds)"; then
 		sleep "${CHECK_INTERVAL}"
 		continue

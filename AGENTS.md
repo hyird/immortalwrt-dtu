@@ -24,6 +24,10 @@
   Bind network confirmation to the initiating platform, broadcast network
   apply/confirm/rollback state to every enrolled platform, and keep global
   network/firmware mutations serialized.
+- Keep the independent network watchdog responsible for restoring the
+  EdgeNode main process when it is absent. A restart issued from EdgeNode's own
+  web terminal can lose its start phase when stopping the process tears down
+  the terminal, so service recovery must not depend on that terminal session.
 - Use `configs/tas-682f.config` as the release seed configuration.
 
 ## Build environment
