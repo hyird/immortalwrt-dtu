@@ -1191,10 +1191,17 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         break;
     case iot_edge_v1_Envelope_terminal_data_tag:
         if (session->terminal_open) {
+            const iot_edge_v1_TerminalData *data =
+                &envelope->payload.terminal_data;
+            if (data->terminal_id.size != 16U ||
+                memcmp(data->terminal_id.bytes, session->terminal_id,
+                       sizeof(session->terminal_id)) != 0) {
+                fail_terminal(session, "terminal input identity mismatch");
+                break;
+            }
             uint64_t acked_sequence = 0U;
             const edge_terminal_input_result result =
-                edge_terminal_write(&envelope->payload.terminal_data,
-                                    &acked_sequence);
+                edge_terminal_write(data, &acked_sequence);
             if (result == EDGE_TERMINAL_INPUT_ACKED)
                 stage_terminal_input_ack(session, acked_sequence);
             else if (result == EDGE_TERMINAL_INPUT_ERROR)
@@ -1223,9 +1230,16 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         }
         break;
     case iot_edge_v1_Envelope_terminal_resize_tag:
-        if (session->terminal_open &&
-            !edge_terminal_resize(&envelope->payload.terminal_resize))
-            fail_terminal(session, "terminal resize failed");
+        if (session->terminal_open) {
+            const iot_edge_v1_TerminalResize *resize =
+                &envelope->payload.terminal_resize;
+            if (resize->terminal_id.size != 16U ||
+                memcmp(resize->terminal_id.bytes, session->terminal_id,
+                       sizeof(session->terminal_id)) != 0)
+                fail_terminal(session, "terminal resize identity mismatch");
+            else if (!edge_terminal_resize(resize))
+                fail_terminal(session, "terminal resize failed");
+        }
         break;
     case iot_edge_v1_Envelope_terminal_close_tag:
         if (session->terminal_open) {
