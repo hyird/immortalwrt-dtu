@@ -7,8 +7,9 @@ sole source location for the OpenWrt node implementation and its node-side tests
 Implemented foundations:
 
 - the node registers independently with up to four platforms using its 15-digit IMEI;
-- an HTTPS platform base address is upgraded internally to a binary WSS
-  session carrying one nanopb `Envelope` per message;
+- an HTTP or HTTPS platform base address is upgraded internally to a binary WS or WSS
+  session carrying one nanopb `Envelope` per message; HTTP/WS is unencrypted and intended
+  only for trusted or temporary networks;
 - WSS validates both the certificate chain and hostname against OpenWrt's `ca-bundle`;
   firmware HTTPS uses that same system trust store; TLS initialization and verification
   failures fail closed;
@@ -32,7 +33,7 @@ Implemented foundations:
   backed by one physical device or a bridge, using DHCP or static IPv4. The configured
   4G/WAN interface and its descendants are excluded, and an unconfirmed network change
   restores the previous UCI network configuration automatically;
-- the same commands can manage additional HTTPS platforms, download verified
+- the same commands can manage additional HTTP or HTTPS platforms, download verified
   firmware, and invoke `sysupgrade`.
 
 The active-config-to-physical-endpoint binding is kept separate from the wire/session
@@ -41,10 +42,11 @@ uses; actual target hardware is still required before declaring a target deploya
 
 ## Firmware download trust
 
-Firmware downloads use the standard `ca-bundle` store. The mbedTLS ustream backend
-retains valid certificates when a concatenated bundle contains an unrelated certificate
-that the local TLS build cannot parse; a store with no usable certificates still fails
-closed. No server-specific trust anchor or global downloader wrapper is required.
+Firmware downloads accept HTTP and HTTPS URLs. HTTPS uses the standard `ca-bundle`
+store. The mbedTLS ustream backend retains valid certificates when a concatenated bundle
+contains an unrelated certificate that the local TLS build cannot parse; a store with no
+usable certificates still fails closed. HTTP downloads are unencrypted, but the requested
+size, SHA-256 digest, and `sysupgrade -T` image validation remain mandatory.
 
 ## Runtime observability
 
@@ -64,8 +66,10 @@ The node separates operational events from continuously changing state:
 Platform addresses are not compiled into the daemon. Every connection comes from a
 `config platform` UCI section. A fresh install creates the default platform
 `https://i.a-z.xin`; it can be edited in LuCI or with UCI, and up to four platforms can
-be enabled at the same time. The daemon derives the internal upgrade path
-`/edge/v1/connect` for each base address.
+be enabled at the same time. The daemon maps `http://` to `ws://`, maps `https://` to
+`wss://`, and derives the internal upgrade path `/edge/v1/connect` for each base address.
+Do not append that path to the configured URL. HTTP/WS sends credentials and telemetry
+without transport encryption.
 
 The default IMEI and model are empty: the init service reads IMEI from the modem and
 model from `/tmp/sysinfo/model` before starting the platform client. To override either

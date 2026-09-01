@@ -11,7 +11,7 @@
 typedef struct {
     uint8_t id[16];
     char name[49];
-    /* User-visible platform base address. Production connections require HTTPS. */
+    /* HTTP or HTTPS platform base address without a path. */
     char url[EDGE_URL_MAX + 1U];
     bool enabled;
     bool network_owner;

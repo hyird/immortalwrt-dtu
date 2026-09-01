@@ -14,6 +14,7 @@
 
 #include "edge_firmware_policy.h"
 #include "edge_process.h"
+#include "edge_url.h"
 #include "edge_sha256.h"
 
 #define FIRMWARE_IMAGE "/tmp/edgenode/firmware.bin"
@@ -54,30 +55,6 @@ static void wait_for_sysupgrade_handoff(void) {
         while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {
         }
     }
-}
-
-static bool valid_download_url(const char *url) {
-    if (url == NULL || strncmp(url, "https://", 8U) != 0)
-        return false;
-    const unsigned char *host = (const unsigned char *)url + 8U;
-    if (*host == '\0' || *host == '/')
-        return false;
-    bool in_host = true;
-    size_t host_length = 0U;
-    for (const unsigned char *cursor = host; *cursor != '\0'; ++cursor) {
-        if (*cursor <= 0x20U || *cursor == 0x7fU || *cursor == '\\')
-            return false;
-        if (in_host && *cursor == '@')
-            return false;
-        if (*cursor == '/' || *cursor == '?' || *cursor == '#') {
-            if (in_host && host_length == 0U)
-                return false;
-            in_host = false;
-        } else if (in_host) {
-            ++host_length;
-        }
-    }
-    return host_length != 0U;
 }
 
 static void status_path(const uint8_t platform_id[16], char output[96]) {
@@ -347,7 +324,7 @@ bool edge_firmware_start(const uint8_t platform_id[16],
     if (platform_id == NULL || request == NULL || request->request_id.size != 16U ||
         request->sha256.size != 32U || request->size_bytes == 0U ||
         request->size_bytes > 128U * 1024U * 1024U ||
-        !valid_download_url(request->download_url)) {
+        !edge_url_valid_http_resource(request->download_url)) {
         set_error(error, error_size, "firmware request is invalid");
         return false;
     }

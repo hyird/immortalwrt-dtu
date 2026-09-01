@@ -24,9 +24,10 @@
 #include "edge_process.h"
 #include "edge_sha256.h"
 #include "edge_terminal.h"
+#include "edge_url.h"
 #include "log.h"
 
-#define EDGE_SOFTWARE_VERSION "0.3.20"
+#define EDGE_SOFTWARE_VERSION "0.3.23"
 #define EDGE_OUTBOX_WINDOW 16U
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
@@ -1421,22 +1422,11 @@ static void acquisition_io(struct ev_loop *loop, struct ev_io *watcher, int even
     sync_acquisition_io(session);
 }
 
-static bool make_transport_url(const char *base, char *output, size_t capacity) {
-    if (strncmp(base, "https://", 8U) != 0)
-        return false;
-    const char *host = base + 8U;
-    size_t host_size = strlen(host);
-    while (host_size != 0U && host[host_size - 1U] == '/')
-        --host_size;
-    const int size = snprintf(output, capacity, "wss://%.*s/edge/v1/connect",
-                              (int)host_size, host);
-    return host_size != 0U && size > 0 && (size_t)size < capacity;
-}
-
 static void start_connection(edge_ws_session *session) {
     edge_retry_attempt_started(&session->retry, monotonic_ms());
-    if (!make_transport_url(session->config->url, session->transport_url,
-                            sizeof(session->transport_url))) {
+    if (!edge_url_make_platform_transport(session->config->url,
+                                          session->transport_url,
+                                          sizeof(session->transport_url))) {
         syslog(LOG_WARNING, "platform %s has an invalid WebSocket base URL",
                session->config->name);
         schedule_reconnect(session);

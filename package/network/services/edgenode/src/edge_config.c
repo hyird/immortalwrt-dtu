@@ -8,6 +8,7 @@
 #include <uci.h>
 
 #include "edge_protocol.h"
+#include "edge_url.h"
 
 static void set_error(char *error, size_t size, const char *message) {
     if (error != NULL && size != 0U)
@@ -116,25 +117,7 @@ static bool duplicate_platform(const edge_app_config *config, const uint8_t id[1
 }
 
 bool edge_config_valid_platform_url(const char *value) {
-    if (value == NULL)
-        return false;
-    if (strncmp(value, "https://", 8U) != 0)
-        return false;
-    const char *host = value + 8U;
-    if (host[0] == '\0' || host[0] == '/')
-        return false;
-    bool trailing_slashes = false;
-    for (const unsigned char *cursor = (const unsigned char *)host;
-         *cursor != '\0'; ++cursor) {
-        if (*cursor == '/') {
-            trailing_slashes = true;
-            continue;
-        }
-        if (trailing_slashes || *cursor <= 0x20U || *cursor == 0x7fU ||
-            *cursor == '@' || *cursor == '?' || *cursor == '#' || *cursor == '\\')
-            return false;
-    }
-    return true;
+    return edge_url_valid_platform_base(value);
 }
 
 bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
@@ -230,7 +213,7 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
         }
         if (!edge_config_valid_platform_url(platform->url)) {
             set_error(error, error_size,
-                      "platform url must be an https base URL without a path");
+                      "platform url must be an http or https base URL without a path");
             goto fail;
         }
         snprintf(platform->name, sizeof(platform->name), "%s", section->e.name);

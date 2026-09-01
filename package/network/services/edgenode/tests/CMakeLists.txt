@@ -50,6 +50,12 @@ target_include_directories(edge_config_test PRIVATE "${EDGENODE_ROOT}/src")
 target_link_libraries(edge_config_test PRIVATE edgenode_nanopb)
 add_test(NAME edge_config COMMAND edge_config_test)
 
+add_executable(edge_url_test
+    edge_url_test.c
+    "${EDGENODE_ROOT}/src/edge_url.c")
+target_include_directories(edge_url_test PRIVATE "${EDGENODE_ROOT}/src")
+add_test(NAME edge_url COMMAND edge_url_test)
+
 add_executable(edge_runtime_test
     edge_runtime_test.c
     "${EDGENODE_ROOT}/src/edge_device_runtime.c"

@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.22
+PKG_VERSION:=0.3.23
 PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
@@ -53,6 +53,7 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/edge/generated/edge.pb.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_protocol.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_retry.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_url.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_config.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_memory.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_outbox.c \

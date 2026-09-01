@@ -9,6 +9,9 @@
   do not add private feed forks or duplicate EdgeNode packages in a feed.
 - Preserve compatibility with the deployed EdgeNode protocol unless a protocol
   migration and server compatibility path are implemented and tested together.
+- Preserve both HTTP/WS and HTTPS/WSS platform connectivity. An HTTP platform
+  must also accept HTTP firmware download URLs; keep HTTPS certificate-policy
+  changes separate unless they are explicitly requested and tested.
 - Use `configs/tas-682f.config` as the release seed configuration.
 
 ## Build environment
