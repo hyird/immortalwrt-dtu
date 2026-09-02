@@ -239,7 +239,22 @@ static void collect_logical_networks(iot_edge_v1_CapabilityReport *report,
             safe_copy(runtime_name, sizeof(runtime_name), devices[0]);
             safe_copy(network->device, sizeof(network->device), devices[0]);
         }
-        copy_runtime(network, find_interface(report, runtime_name));
+        const iot_edge_v1_InterfaceCapability *runtime =
+            find_interface(report, runtime_name);
+        copy_runtime(network, runtime);
+        if (runtime != NULL && runtime->bridge) {
+            network->bridge = true;
+            network->bridge_ports_count = 0U;
+            for (pb_size_t index = 0U;
+                 index < runtime->bridge_ports_count &&
+                 index < sizeof(network->bridge_ports) / sizeof(network->bridge_ports[0]);
+                 ++index) {
+                safe_copy(network->bridge_ports[network->bridge_ports_count],
+                          sizeof(network->bridge_ports[network->bridge_ports_count]),
+                          runtime->bridge_ports[index]);
+                ++network->bridge_ports_count;
+            }
+        }
         if (network->ipv4[0] == '\0' && mode == iot_edge_v1_NetworkAddressMode_NETWORK_ADDRESS_STATIC) {
             const char *ip = uci_lookup_option_string(context, section, "ipaddr");
             const char *netmask = uci_lookup_option_string(context, section, "netmask");
