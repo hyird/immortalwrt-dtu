@@ -70,6 +70,7 @@ typedef struct {
     uint32_t fast_report_interval_sec;
     bool connected;
     bool handshaken;
+    bool initial_report_pending;
     bool has_sample;
     edge_device_sample latest;
     edge_write_command writes[EDGE_DEVICE_WRITE_QUEUE];

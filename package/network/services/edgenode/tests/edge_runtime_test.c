@@ -220,8 +220,8 @@ static void test_fixed_io_and_reporting(void) {
 
     edge_device_runtime_tick(&runtime, 0U, 1000000);
     edge_device_runtime_tick(&runtime, 500U, 1000500);
-    require_true(fake.reads == 1U && fake.reports == 0U,
-                 "DTU read ran outside the fixed one-second cadence");
+    require_true(fake.reads == 1U && fake.reports == 1U,
+                 "first successful DTU read was not reported immediately");
 
     edge_write_command command = {.value = {0x55U}, .value_size = 1U};
     command.command_id[0] = 3U;
@@ -232,11 +232,11 @@ static void test_fixed_io_and_reporting(void) {
     require_true(fake.reads == 3U && fake.writes == 1U && fake.completions == 1U &&
                      fake.last_command_result == EDGE_COMMAND_SUCCEEDED,
                  "one-second read/write loop did not run or verify readback");
-    require_true(fake.reports == 1U,
+    require_true(fake.reports == 2U,
                  "successful write did not report its verified readback immediately");
 
     edge_device_runtime_tick(&runtime, 3000U, 1003000);
-    require_true(fake.reads == 4U && fake.reports == 2U &&
+    require_true(fake.reads == 4U && fake.reports == 3U &&
                      memcmp(fake.last_platform, platform_id, 16U) == 0,
                  "runtime did not report on the independent platform interval");
 
@@ -275,6 +275,39 @@ static void test_fixed_io_and_reporting(void) {
                  "Modbus runtime did not close during explicit shutdown");
 }
 
+static void test_initial_report_waits_for_first_success(void) {
+    uint8_t platform_id[16] = {6U};
+    uint8_t device_id[16] = {7U};
+    fake_device fake = {.next_read_result = EDGE_IO_OFFLINE};
+    edge_device_driver driver = {.connect = fake_connect,
+                                 .handshake = fake_handshake,
+                                 .read = fake_read,
+                                 .write_readback = fake_write,
+                                 .disconnect = fake_disconnect,
+                                 .report = fake_report,
+                                 .command_complete = fake_complete};
+    edge_device_runtime runtime;
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+                                          platform_id, device_id,
+                                          EDGE_DTU_IO_PERIOD_MS, 3U, 0U,
+                                          &driver, &fake),
+                 "initial-report runtime initialization failed");
+
+    edge_device_runtime_tick(&runtime, 0U, 3000000);
+    require_true(fake.reports == 0U && runtime.initial_report_pending,
+                 "failed first read produced telemetry or cleared its pending report");
+    edge_device_runtime_tick(&runtime, 1000U, 3001000);
+    require_true(fake.reports == 1U && !runtime.initial_report_pending,
+                 "first successful retry was not reported immediately");
+    edge_device_runtime_tick(&runtime, 3000U, 3003000);
+    require_true(fake.reports == 1U,
+                 "regular report interval was not restarted after the first sample");
+    edge_device_runtime_tick(&runtime, 4000U, 3004000);
+    require_true(fake.reports == 2U,
+                 "regular reporting did not resume after the first sample");
+    edge_device_runtime_close(&runtime);
+}
+
 static void test_fast_reporting_after_write(void) {
     uint8_t platform_id[16] = {4U};
     uint8_t device_id[16] = {5U};
@@ -303,23 +336,23 @@ static void test_fast_reporting_after_write(void) {
     require_true(edge_device_runtime_enqueue_write(&runtime, &command),
                  "fast-report write command enqueue failed");
     edge_device_runtime_tick(&runtime, 1000U, 2001000);
-    require_true(fake.reports == 1U,
+    require_true(fake.reports == 2U,
                  "verified write did not trigger immediate telemetry");
 
     edge_device_runtime_tick(&runtime, 5000U, 2005000);
     edge_device_runtime_tick(&runtime, 9000U, 2009000);
-    require_true(fake.reports == 3U,
+    require_true(fake.reports == 4U,
                  "fast-report window did not use the command interval");
 
     edge_device_runtime_tick(&runtime, 10000U, 2010000);
-    require_true(fake.reports == 3U,
+    require_true(fake.reports == 4U,
                  "regular reporting interrupted an active fast-report window");
     edge_device_runtime_tick(&runtime, 13000U, 2013000);
-    require_true(fake.reports == 4U && runtime.fast_report_until_ms == 0U,
+    require_true(fake.reports == 5U && runtime.fast_report_until_ms == 0U,
                  "fast-report window did not include its final sample or expire");
 
     edge_device_runtime_tick(&runtime, 20000U, 2020000);
-    require_true(fake.reports == 5U,
+    require_true(fake.reports == 6U,
                  "regular reporting did not resume after the fast-report window");
     edge_device_runtime_close(&runtime);
 }
@@ -328,6 +361,7 @@ int main(void) {
     test_modbus();
     test_s7();
     test_fixed_io_and_reporting();
+    test_initial_report_waits_for_first_success();
     test_fast_reporting_after_write();
     puts("edge runtime tests passed");
     return 0;

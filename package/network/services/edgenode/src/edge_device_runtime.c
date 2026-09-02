@@ -63,6 +63,7 @@ bool edge_device_runtime_init(edge_device_runtime *runtime,
     runtime->report_interval_sec = report_interval_sec;
     runtime->next_io_at_ms = now_ms;
     runtime->next_report_at_ms = now_ms + (uint64_t)report_interval_sec * 1000U;
+    runtime->initial_report_pending = true;
     runtime->driver = *driver;
     runtime->driver_context = driver_context;
     return true;
@@ -197,6 +198,18 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
             runtime->driver.report(runtime->driver_context, runtime->platform_id,
                                    runtime->device_id, sample);
         }
+    }
+
+    /* A newly applied configuration must become observable as soon as the
+     * device produces its first valid sample. Keep the configured interval
+     * for all later reports, and keep this pending across failed reads. */
+    if (runtime->initial_report_pending && runtime->has_sample) {
+        if (!reported_after_write)
+            runtime->driver.report(runtime->driver_context, runtime->platform_id,
+                                   runtime->device_id, &runtime->latest);
+        runtime->initial_report_pending = false;
+        runtime->next_report_at_ms =
+            deadline_after_seconds(schedule_ms, runtime->report_interval_sec);
     }
 
     const uint64_t report_period = (uint64_t)runtime->report_interval_sec * 1000U;

@@ -21,8 +21,9 @@ Implemented foundations:
   outbox message across all platforms; active and staging config are never rolled;
 - one supervised application-level acquisition worker reads every second, processes
   queued writes in that same cadence, and reports each platform independently at its
-  configured interval; IPC is consumed by `ev_io` readiness events so device I/O never
-  blocks the WebSocket event loop;
+  configured interval; the first successful read after a configuration becomes active
+  is reported immediately before that interval begins. IPC is consumed by `ev_io`
+  readiness events so device I/O never blocks the WebSocket event loop;
 - platforms may share a physical serial channel and use different baud/parity settings;
   the worker drains the prior request, applies the next task's serial settings, clears
   stale input, observes the RTU quiet interval, and then performs that task. TCP Server
