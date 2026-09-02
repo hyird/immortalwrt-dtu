@@ -27,6 +27,7 @@
 #include "edge_status.h"
 #include "edge_terminal.h"
 #include "edge_url.h"
+#include "edge_vpn.h"
 #include "log.h"
 
 #define EDGE_SOFTWARE_VERSION "0.3.33"
@@ -404,6 +405,7 @@ static bool send_capability_report(edge_ws_session *session) {
     safe_copy(report->network_stack, sizeof(report->network_stack), "netifd");
     report->ttyd_available = edge_capability_has_terminal();
     (void)edge_capability_collect_network(report, session->app->config->wan_interface);
+    report->has_vpn = edge_vpn_collect_capability(&report->vpn);
     if (session->app->config->serial_port[0] != '\0') {
         report->serial_ports_count = 1U;
         iot_edge_v1_SerialCapability *serial = &report->serial_ports[0];
@@ -843,6 +845,45 @@ static void send_network_result(edge_ws_session *session,
     safe_copy(output->payload.network_config_result.message,
               sizeof(output->payload.network_config_result.message), message);
     send_envelope(session, output);
+}
+
+static void send_vpn_result(edge_ws_session *session,
+                            const iot_edge_v1_VpnConfigRequest *request,
+                            bool applied, const char *error_message) {
+    iot_edge_v1_Envelope *output = &session->app->envelope;
+    if (!init_envelope(session, output))
+        return;
+    output->which_payload = iot_edge_v1_Envelope_vpn_config_result_tag;
+    iot_edge_v1_VpnConfigResult *result = &output->payload.vpn_config_result;
+    uint8_t request_id[16] = {0};
+    if (request != NULL && request->request_id.size == sizeof(request_id))
+        memcpy(request_id, request->request_id.bytes, sizeof(request_id));
+    edge_protocol_set_bytes(&result->request_id, sizeof(result->request_id.bytes),
+                            request_id, sizeof(request_id));
+    result->config_version = request != NULL ? request->config_version : 0U;
+    result->applied = applied;
+    if (!applied) {
+        safe_copy(result->error_code, sizeof(result->error_code),
+                  error_message != NULL && strstr(error_message, "stale") != NULL
+                      ? "stale_config"
+                      : "apply_failed");
+        safe_copy(result->error_message, sizeof(result->error_message),
+                  error_message != NULL ? error_message : "VPN configuration failed");
+    }
+    if (!send_envelope(session, output))
+        edge_log_write("warn", "vpn", "VPN configuration result send failed", "");
+}
+
+static void handle_vpn_config(edge_ws_session *session,
+                              const iot_edge_v1_VpnConfigRequest *request) {
+    char error[257] = {0};
+    const bool applied = edge_vpn_apply(request, error, sizeof(error));
+    send_vpn_result(session, request, applied, applied ? "" : error);
+    char detail[320];
+    snprintf(detail, sizeof(detail), "version=%" PRIu64 " applied=%u message=%s",
+             request != NULL ? request->config_version : 0U, applied ? 1U : 0U,
+             applied ? "" : error);
+    edge_log_write(applied ? "info" : "warn", "vpn", "VPN configuration", detail);
 }
 
 static void broadcast_network_result(edge_ws_app *app,
@@ -1317,6 +1358,10 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
     case iot_edge_v1_Envelope_network_config_request_tag:
         if (session->enrolled)
             handle_network_config(session, &envelope->payload.network_config_request);
+        break;
+    case iot_edge_v1_Envelope_vpn_config_request_tag:
+        if (session->enrolled)
+            handle_vpn_config(session, &envelope->payload.vpn_config_request);
         break;
     case iot_edge_v1_Envelope_firmware_update_request_tag:
         if (session->enrolled)

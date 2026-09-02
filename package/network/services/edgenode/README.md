@@ -46,6 +46,11 @@ Implemented foundations:
 - any enrolled platform can stream verified firmware through its authenticated WS/WSS
   session and invoke `sysupgrade`; network and firmware mutations are serialized.
   Bootstrap-only modem and terminal privileges remain unchanged.
+- the node advertises kernel WireGuard capability and keeps its private key in
+  `/etc/edgenode/vpn.key`; an enrolled platform can apply a versioned Edge VPN
+  configuration over the existing authenticated WS/WSS control channel. The data
+  plane stays in the kernel, while nftables provides the declared LAN DNAT and
+  MASQUERADE rules.
 
 The active-config-to-physical-endpoint binding is kept separate from the wire/session
 layer. The current code provides the tested protocol codecs and scheduler that binding
@@ -59,6 +64,20 @@ the current offset after reconnects, and never receives or opens a direct firmwa
 The requested size, SHA-256 digest, and `sysupgrade -T` image validation remain mandatory.
 The platform keeps its tokenized direct-download route for deployed legacy firmware;
 only new builds advertising WS firmware streaming use this transfer path.
+
+## Edge VPN
+
+The VPN control messages are additive protobuf fields, so older platforms and nodes
+continue to use the existing payloads. A capable node creates `wg-iot` with
+`ip link`, configures the kernel WireGuard UAPI, assigns its `/32` overlay address,
+and installs one nftables table named `edgenode_vpn`. Only enabled, equal-prefix
+private-LAN mappings are accepted; no `0.0.0.0/0` route or inner packet is sent over
+the WebSocket. The device private key is generated from `/dev/urandom`, stored with
+mode `0600`, and never included in protobuf or logs.
+
+The package depends on `kmod-wireguard` and `nftables-nojson`. It does not install
+`wireguard-go`, `wg-quick`, a VPN daemon, or a separate LuCI VPN page; VPN controls
+remain on the Edge Node page in the platform UI.
 
 ## Runtime observability
 

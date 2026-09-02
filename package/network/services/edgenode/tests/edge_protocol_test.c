@@ -356,6 +356,54 @@ static void test_firmware_chunk_round_trip(void) {
             "firmware WS chunk changed during round trip");
 }
 
+static void test_vpn_config_round_trip(void) {
+    iot_edge_v1_Envelope envelope = iot_edge_v1_Envelope_init_zero;
+    const uint8_t platform_id[16] = {4U};
+    const uint8_t random[10] = {5U};
+    const uint8_t request_id[16] = {6U};
+    require(edge_protocol_init_envelope(&envelope, platform_id, NULL, 0U, 8U,
+                                        1, random),
+            "VPN envelope setup failed");
+    envelope.which_payload = iot_edge_v1_Envelope_vpn_config_request_tag;
+    iot_edge_v1_VpnConfigRequest *request = &envelope.payload.vpn_config_request;
+    require(edge_protocol_set_bytes(&request->request_id,
+                                    sizeof(request->request_id.bytes), request_id,
+                                    sizeof(request_id)),
+            "VPN request id setup failed");
+    request->config_version = 9U;
+    strcpy(request->hub_public_key,
+           "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+    strcpy(request->hub_endpoint, "vpn.example.com");
+    request->hub_listen_port = 51820U;
+    strcpy(request->edge_address, "100.96.0.20/32");
+    request->routes_count = 1U;
+    strcpy(request->routes[0].route_id, "route-1");
+    strcpy(request->routes[0].virtual_cidr, "172.31.10.0/24");
+    strcpy(request->routes[0].target_cidr, "192.168.10.0/24");
+    strcpy(request->routes[0].mode, "nat");
+    strcpy(request->routes[0].nat_mode, "masquerade");
+    request->routes[0].enabled = true;
+    request->enabled = true;
+
+    uint8_t encoded[EDGENODE_MAX_WS_MESSAGE];
+    size_t encoded_size = 0U;
+    const char *error = NULL;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error),
+            error != NULL ? error : "VPN request encode failed");
+    iot_edge_v1_Envelope decoded;
+    require(edge_protocol_decode(encoded, encoded_size, &decoded, &error) &&
+                decoded.which_payload == iot_edge_v1_Envelope_vpn_config_request_tag,
+            error != NULL ? error : "VPN request decode failed");
+    const iot_edge_v1_VpnConfigRequest *round_trip = &decoded.payload.vpn_config_request;
+    require(round_trip->request_id.size == 16U && round_trip->config_version == 9U &&
+                strcmp(round_trip->hub_endpoint, "vpn.example.com") == 0 &&
+                round_trip->routes_count == 1U &&
+                strcmp(round_trip->routes[0].virtual_cidr, "172.31.10.0/24") == 0 &&
+                strcmp(round_trip->routes[0].nat_mode, "masquerade") == 0 &&
+                round_trip->enabled,
+            "VPN request changed during round trip");
+}
+
 int main(void) {
     test_imei();
     test_hello_round_trip();
@@ -368,6 +416,7 @@ int main(void) {
     test_cpp_protobuf_wire_contract();
     test_cpp_protobuf_config_digest_contract();
     test_firmware_chunk_round_trip();
+    test_vpn_config_round_trip();
     test_reject_text_or_oversized_input();
     puts("edge protocol tests passed");
     return 0;

@@ -221,6 +221,13 @@ typedef struct _iot_edge_v1_SerialCapability {
     bool rs485;
 } iot_edge_v1_SerialCapability;
 
+typedef struct _iot_edge_v1_VpnCapabilities {
+    bool supports_vpn;
+    char wireguard_version[33];
+    char agent_version[33];
+    char public_key[65];
+} iot_edge_v1_VpnCapabilities;
+
 typedef struct _iot_edge_v1_CapabilityReport {
     pb_size_t interfaces_count;
     iot_edge_v1_InterfaceCapability interfaces[16];
@@ -230,6 +237,8 @@ typedef struct _iot_edge_v1_CapabilityReport {
     bool ttyd_available;
     pb_size_t networks_count;
     iot_edge_v1_NetworkCapability networks[8];
+    bool has_vpn;
+    iot_edge_v1_VpnCapabilities vpn;
 } iot_edge_v1_CapabilityReport;
 
 typedef struct _iot_edge_v1_Heartbeat {
@@ -612,6 +621,37 @@ typedef struct _iot_edge_v1_NetworkConfigResult {
     char message[257];
 } iot_edge_v1_NetworkConfigResult;
 
+typedef struct _iot_edge_v1_VpnRoute {
+    char route_id[37];
+    char virtual_cidr[19];
+    char target_cidr[19];
+    char mode[9];
+    char nat_mode[17];
+    bool enabled;
+} iot_edge_v1_VpnRoute;
+
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_VpnConfigRequest_request_id_t;
+typedef struct _iot_edge_v1_VpnConfigRequest {
+    iot_edge_v1_VpnConfigRequest_request_id_t request_id;
+    uint64_t config_version;
+    char hub_public_key[65];
+    char hub_endpoint[256];
+    uint32_t hub_listen_port;
+    char edge_address[19];
+    pb_size_t routes_count;
+    iot_edge_v1_VpnRoute routes[16];
+    bool enabled;
+} iot_edge_v1_VpnConfigRequest;
+
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_VpnConfigResult_request_id_t;
+typedef struct _iot_edge_v1_VpnConfigResult {
+    iot_edge_v1_VpnConfigResult_request_id_t request_id;
+    uint64_t config_version;
+    bool applied;
+    char error_code[49];
+    char error_message[257];
+} iot_edge_v1_VpnConfigResult;
+
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_FirmwareUpdateRequest_request_id_t;
 typedef PB_BYTES_ARRAY_T(32) iot_edge_v1_FirmwareUpdateRequest_sha256_t;
 typedef struct _iot_edge_v1_FirmwareUpdateRequest {
@@ -848,6 +888,8 @@ typedef struct _iot_edge_v1_Envelope {
         iot_edge_v1_FirmwareChunk firmware_chunk;
         iot_edge_v1_Ping ping;
         iot_edge_v1_Pong pong;
+        iot_edge_v1_VpnConfigRequest vpn_config_request;
+        iot_edge_v1_VpnConfigResult vpn_config_result;
         iot_edge_v1_Error error;
     } payload;
 } iot_edge_v1_Envelope;
@@ -928,6 +970,7 @@ extern "C" {
 
 
 
+
 #define iot_edge_v1_Heartbeat_sim_state_ENUMTYPE iot_edge_v1_ModemSimState
 
 
@@ -974,6 +1017,9 @@ extern "C" {
 
 
 
+
+
+
 #define iot_edge_v1_FirmwareUpdateResult_state_ENUMTYPE iot_edge_v1_FirmwareUpdateState
 
 
@@ -1012,7 +1058,8 @@ extern "C" {
 #define iot_edge_v1_InterfaceCapability_init_default {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
 #define iot_edge_v1_NetworkCapability_init_default {"", _iot_edge_v1_NetworkAddressMode_MIN, "", 0, 0, 0, {"", "", "", "", "", "", "", ""}, "", 0, ""}
 #define iot_edge_v1_SerialCapability_init_default {"", "", 0, 0}
-#define iot_edge_v1_CapabilityReport_init_default {0, {iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default}, 0, {iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default}}
+#define iot_edge_v1_VpnCapabilities_init_default {0, "", "", ""}
+#define iot_edge_v1_CapabilityReport_init_default {0, {iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default}, 0, {iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default}, false, iot_edge_v1_VpnCapabilities_init_default}
 #define iot_edge_v1_Heartbeat_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, ""}
 #define iot_edge_v1_HeartbeatAck_init_default    {0, 0, 0}
 #define iot_edge_v1_DeviceStatus_init_default    {{0, {0}}, "", "", 0, 0, {"", "", "", "", "", "", "", ""}, 0}
@@ -1046,6 +1093,9 @@ extern "C" {
 #define iot_edge_v1_NetworkInterfaceConfig_init_default {"", _iot_edge_v1_NetworkAddressMode_MIN, "", 0, "", 0, 0, {"", "", "", "", "", "", "", ""}, 0, _iot_edge_v1_NetworkConfigOperation_MIN, "", "", ""}
 #define iot_edge_v1_NetworkConfigRequest_init_default {{0, {0}}, 0, {iot_edge_v1_NetworkInterfaceConfig_init_default, iot_edge_v1_NetworkInterfaceConfig_init_default, iot_edge_v1_NetworkInterfaceConfig_init_default, iot_edge_v1_NetworkInterfaceConfig_init_default, iot_edge_v1_NetworkInterfaceConfig_init_default, iot_edge_v1_NetworkInterfaceConfig_init_default, iot_edge_v1_NetworkInterfaceConfig_init_default, iot_edge_v1_NetworkInterfaceConfig_init_default}, 0}
 #define iot_edge_v1_NetworkConfigResult_init_default {{0, {0}}, 0, 0, ""}
+#define iot_edge_v1_VpnRoute_init_default        {"", "", "", "", "", 0}
+#define iot_edge_v1_VpnConfigRequest_init_default {{0, {0}}, 0, "", "", 0, "", 0, {iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default, iot_edge_v1_VpnRoute_init_default}, 0}
+#define iot_edge_v1_VpnConfigResult_init_default {{0, {0}}, 0, 0, "", ""}
 #define iot_edge_v1_FirmwareUpdateRequest_init_default {{0, {0}}, "", {0, {0}}, 0, "", 0}
 #define iot_edge_v1_FirmwareUpdateResult_init_default {{0, {0}}, _iot_edge_v1_FirmwareUpdateState_MIN, "", 0, 0, 0}
 #define iot_edge_v1_FirmwareChunkRequest_init_default {{0, {0}}, 0}
@@ -1076,7 +1126,8 @@ extern "C" {
 #define iot_edge_v1_InterfaceCapability_init_zero {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
 #define iot_edge_v1_NetworkCapability_init_zero  {"", _iot_edge_v1_NetworkAddressMode_MIN, "", 0, 0, 0, {"", "", "", "", "", "", "", ""}, "", 0, ""}
 #define iot_edge_v1_SerialCapability_init_zero   {"", "", 0, 0}
-#define iot_edge_v1_CapabilityReport_init_zero   {0, {iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero}, 0, {iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero}}
+#define iot_edge_v1_VpnCapabilities_init_zero    {0, "", "", ""}
+#define iot_edge_v1_CapabilityReport_init_zero   {0, {iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero}, 0, {iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero}, false, iot_edge_v1_VpnCapabilities_init_zero}
 #define iot_edge_v1_Heartbeat_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, ""}
 #define iot_edge_v1_HeartbeatAck_init_zero       {0, 0, 0}
 #define iot_edge_v1_DeviceStatus_init_zero       {{0, {0}}, "", "", 0, 0, {"", "", "", "", "", "", "", ""}, 0}
@@ -1110,6 +1161,9 @@ extern "C" {
 #define iot_edge_v1_NetworkInterfaceConfig_init_zero {"", _iot_edge_v1_NetworkAddressMode_MIN, "", 0, "", 0, 0, {"", "", "", "", "", "", "", ""}, 0, _iot_edge_v1_NetworkConfigOperation_MIN, "", "", ""}
 #define iot_edge_v1_NetworkConfigRequest_init_zero {{0, {0}}, 0, {iot_edge_v1_NetworkInterfaceConfig_init_zero, iot_edge_v1_NetworkInterfaceConfig_init_zero, iot_edge_v1_NetworkInterfaceConfig_init_zero, iot_edge_v1_NetworkInterfaceConfig_init_zero, iot_edge_v1_NetworkInterfaceConfig_init_zero, iot_edge_v1_NetworkInterfaceConfig_init_zero, iot_edge_v1_NetworkInterfaceConfig_init_zero, iot_edge_v1_NetworkInterfaceConfig_init_zero}, 0}
 #define iot_edge_v1_NetworkConfigResult_init_zero {{0, {0}}, 0, 0, ""}
+#define iot_edge_v1_VpnRoute_init_zero           {"", "", "", "", "", 0}
+#define iot_edge_v1_VpnConfigRequest_init_zero   {{0, {0}}, 0, "", "", 0, "", 0, {iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero, iot_edge_v1_VpnRoute_init_zero}, 0}
+#define iot_edge_v1_VpnConfigResult_init_zero    {{0, {0}}, 0, 0, "", ""}
 #define iot_edge_v1_FirmwareUpdateRequest_init_zero {{0, {0}}, "", {0, {0}}, 0, "", 0}
 #define iot_edge_v1_FirmwareUpdateResult_init_zero {{0, {0}}, _iot_edge_v1_FirmwareUpdateState_MIN, "", 0, 0, 0}
 #define iot_edge_v1_FirmwareChunkRequest_init_zero {{0, {0}}, 0}
@@ -1198,11 +1252,16 @@ extern "C" {
 #define iot_edge_v1_SerialCapability_display_name_tag 2
 #define iot_edge_v1_SerialCapability_available_tag 3
 #define iot_edge_v1_SerialCapability_rs485_tag   4
+#define iot_edge_v1_VpnCapabilities_supports_vpn_tag 1
+#define iot_edge_v1_VpnCapabilities_wireguard_version_tag 2
+#define iot_edge_v1_VpnCapabilities_agent_version_tag 3
+#define iot_edge_v1_VpnCapabilities_public_key_tag 4
 #define iot_edge_v1_CapabilityReport_interfaces_tag 1
 #define iot_edge_v1_CapabilityReport_serial_ports_tag 2
 #define iot_edge_v1_CapabilityReport_network_stack_tag 3
 #define iot_edge_v1_CapabilityReport_ttyd_available_tag 4
 #define iot_edge_v1_CapabilityReport_networks_tag 5
+#define iot_edge_v1_CapabilityReport_vpn_tag     6
 #define iot_edge_v1_Heartbeat_uptime_sec_tag     1
 #define iot_edge_v1_Heartbeat_active_config_version_tag 2
 #define iot_edge_v1_Heartbeat_managed_endpoint_count_tag 3
@@ -1424,6 +1483,25 @@ extern "C" {
 #define iot_edge_v1_NetworkConfigResult_success_tag 2
 #define iot_edge_v1_NetworkConfigResult_rolled_back_tag 3
 #define iot_edge_v1_NetworkConfigResult_message_tag 4
+#define iot_edge_v1_VpnRoute_route_id_tag        1
+#define iot_edge_v1_VpnRoute_virtual_cidr_tag    2
+#define iot_edge_v1_VpnRoute_target_cidr_tag     3
+#define iot_edge_v1_VpnRoute_mode_tag            4
+#define iot_edge_v1_VpnRoute_nat_mode_tag        5
+#define iot_edge_v1_VpnRoute_enabled_tag         6
+#define iot_edge_v1_VpnConfigRequest_request_id_tag 1
+#define iot_edge_v1_VpnConfigRequest_config_version_tag 2
+#define iot_edge_v1_VpnConfigRequest_hub_public_key_tag 3
+#define iot_edge_v1_VpnConfigRequest_hub_endpoint_tag 4
+#define iot_edge_v1_VpnConfigRequest_hub_listen_port_tag 5
+#define iot_edge_v1_VpnConfigRequest_edge_address_tag 6
+#define iot_edge_v1_VpnConfigRequest_routes_tag  7
+#define iot_edge_v1_VpnConfigRequest_enabled_tag 8
+#define iot_edge_v1_VpnConfigResult_request_id_tag 1
+#define iot_edge_v1_VpnConfigResult_config_version_tag 2
+#define iot_edge_v1_VpnConfigResult_applied_tag  3
+#define iot_edge_v1_VpnConfigResult_error_code_tag 4
+#define iot_edge_v1_VpnConfigResult_error_message_tag 5
 #define iot_edge_v1_FirmwareUpdateRequest_request_id_tag 1
 #define iot_edge_v1_FirmwareUpdateRequest_download_url_tag 2
 #define iot_edge_v1_FirmwareUpdateRequest_sha256_tag 3
@@ -1562,6 +1640,8 @@ extern "C" {
 #define iot_edge_v1_Envelope_firmware_chunk_tag  79
 #define iot_edge_v1_Envelope_ping_tag            80
 #define iot_edge_v1_Envelope_pong_tag            81
+#define iot_edge_v1_Envelope_vpn_config_request_tag 84
+#define iot_edge_v1_Envelope_vpn_config_result_tag 85
 #define iot_edge_v1_Envelope_error_tag           90
 
 /* Struct field encoding specification for nanopb */
@@ -1657,17 +1737,27 @@ X(a, STATIC,   SINGULAR, BOOL,     rs485,             4)
 #define iot_edge_v1_SerialCapability_CALLBACK NULL
 #define iot_edge_v1_SerialCapability_DEFAULT NULL
 
+#define iot_edge_v1_VpnCapabilities_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_vpn,      1) \
+X(a, STATIC,   SINGULAR, STRING,   wireguard_version,   2) \
+X(a, STATIC,   SINGULAR, STRING,   agent_version,     3) \
+X(a, STATIC,   SINGULAR, STRING,   public_key,        4)
+#define iot_edge_v1_VpnCapabilities_CALLBACK NULL
+#define iot_edge_v1_VpnCapabilities_DEFAULT NULL
+
 #define iot_edge_v1_CapabilityReport_FIELDLIST(X, a) \
 X(a, STATIC,   REPEATED, MESSAGE,  interfaces,        1) \
 X(a, STATIC,   REPEATED, MESSAGE,  serial_ports,      2) \
 X(a, STATIC,   SINGULAR, STRING,   network_stack,     3) \
 X(a, STATIC,   SINGULAR, BOOL,     ttyd_available,    4) \
-X(a, STATIC,   REPEATED, MESSAGE,  networks,          5)
+X(a, STATIC,   REPEATED, MESSAGE,  networks,          5) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  vpn,               6)
 #define iot_edge_v1_CapabilityReport_CALLBACK NULL
 #define iot_edge_v1_CapabilityReport_DEFAULT NULL
 #define iot_edge_v1_CapabilityReport_interfaces_MSGTYPE iot_edge_v1_InterfaceCapability
 #define iot_edge_v1_CapabilityReport_serial_ports_MSGTYPE iot_edge_v1_SerialCapability
 #define iot_edge_v1_CapabilityReport_networks_MSGTYPE iot_edge_v1_NetworkCapability
+#define iot_edge_v1_CapabilityReport_vpn_MSGTYPE iot_edge_v1_VpnCapabilities
 
 #define iot_edge_v1_Heartbeat_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT64,   uptime_sec,        1) \
@@ -2038,6 +2128,38 @@ X(a, STATIC,   SINGULAR, STRING,   message,           4)
 #define iot_edge_v1_NetworkConfigResult_CALLBACK NULL
 #define iot_edge_v1_NetworkConfigResult_DEFAULT NULL
 
+#define iot_edge_v1_VpnRoute_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, STRING,   route_id,          1) \
+X(a, STATIC,   SINGULAR, STRING,   virtual_cidr,      2) \
+X(a, STATIC,   SINGULAR, STRING,   target_cidr,       3) \
+X(a, STATIC,   SINGULAR, STRING,   mode,              4) \
+X(a, STATIC,   SINGULAR, STRING,   nat_mode,          5) \
+X(a, STATIC,   SINGULAR, BOOL,     enabled,           6)
+#define iot_edge_v1_VpnRoute_CALLBACK NULL
+#define iot_edge_v1_VpnRoute_DEFAULT NULL
+
+#define iot_edge_v1_VpnConfigRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
+X(a, STATIC,   SINGULAR, UINT64,   config_version,    2) \
+X(a, STATIC,   SINGULAR, STRING,   hub_public_key,    3) \
+X(a, STATIC,   SINGULAR, STRING,   hub_endpoint,      4) \
+X(a, STATIC,   SINGULAR, UINT32,   hub_listen_port,   5) \
+X(a, STATIC,   SINGULAR, STRING,   edge_address,      6) \
+X(a, STATIC,   REPEATED, MESSAGE,  routes,            7) \
+X(a, STATIC,   SINGULAR, BOOL,     enabled,           8)
+#define iot_edge_v1_VpnConfigRequest_CALLBACK NULL
+#define iot_edge_v1_VpnConfigRequest_DEFAULT NULL
+#define iot_edge_v1_VpnConfigRequest_routes_MSGTYPE iot_edge_v1_VpnRoute
+
+#define iot_edge_v1_VpnConfigResult_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
+X(a, STATIC,   SINGULAR, UINT64,   config_version,    2) \
+X(a, STATIC,   SINGULAR, BOOL,     applied,           3) \
+X(a, STATIC,   SINGULAR, STRING,   error_code,        4) \
+X(a, STATIC,   SINGULAR, STRING,   error_message,     5)
+#define iot_edge_v1_VpnConfigResult_CALLBACK NULL
+#define iot_edge_v1_VpnConfigResult_DEFAULT NULL
+
 #define iot_edge_v1_FirmwareUpdateRequest_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
 X(a, STATIC,   SINGULAR, STRING,   download_url,      2) \
@@ -2266,6 +2388,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,firmware_chunk_request,payload.firmw
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,firmware_chunk,payload.firmware_chunk),  79) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,ping,payload.ping),  80) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,pong,payload.pong),  81) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,vpn_config_request,payload.vpn_config_request),  84) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,vpn_config_result,payload.vpn_config_result),  85) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,error,payload.error),  90)
 #define iot_edge_v1_Envelope_CALLBACK NULL
 #define iot_edge_v1_Envelope_DEFAULT NULL
@@ -2313,6 +2437,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,error,payload.error),  90)
 #define iot_edge_v1_Envelope_payload_firmware_chunk_MSGTYPE iot_edge_v1_FirmwareChunk
 #define iot_edge_v1_Envelope_payload_ping_MSGTYPE iot_edge_v1_Ping
 #define iot_edge_v1_Envelope_payload_pong_MSGTYPE iot_edge_v1_Pong
+#define iot_edge_v1_Envelope_payload_vpn_config_request_MSGTYPE iot_edge_v1_VpnConfigRequest
+#define iot_edge_v1_Envelope_payload_vpn_config_result_MSGTYPE iot_edge_v1_VpnConfigResult
 #define iot_edge_v1_Envelope_payload_error_MSGTYPE iot_edge_v1_Error
 
 extern const pb_msgdesc_t iot_edge_v1_Empty_msg;
@@ -2322,6 +2448,7 @@ extern const pb_msgdesc_t iot_edge_v1_EnrollmentStatus_msg;
 extern const pb_msgdesc_t iot_edge_v1_InterfaceCapability_msg;
 extern const pb_msgdesc_t iot_edge_v1_NetworkCapability_msg;
 extern const pb_msgdesc_t iot_edge_v1_SerialCapability_msg;
+extern const pb_msgdesc_t iot_edge_v1_VpnCapabilities_msg;
 extern const pb_msgdesc_t iot_edge_v1_CapabilityReport_msg;
 extern const pb_msgdesc_t iot_edge_v1_Heartbeat_msg;
 extern const pb_msgdesc_t iot_edge_v1_HeartbeatAck_msg;
@@ -2356,6 +2483,9 @@ extern const pb_msgdesc_t iot_edge_v1_CommandResultAck_msg;
 extern const pb_msgdesc_t iot_edge_v1_NetworkInterfaceConfig_msg;
 extern const pb_msgdesc_t iot_edge_v1_NetworkConfigRequest_msg;
 extern const pb_msgdesc_t iot_edge_v1_NetworkConfigResult_msg;
+extern const pb_msgdesc_t iot_edge_v1_VpnRoute_msg;
+extern const pb_msgdesc_t iot_edge_v1_VpnConfigRequest_msg;
+extern const pb_msgdesc_t iot_edge_v1_VpnConfigResult_msg;
 extern const pb_msgdesc_t iot_edge_v1_FirmwareUpdateRequest_msg;
 extern const pb_msgdesc_t iot_edge_v1_FirmwareUpdateResult_msg;
 extern const pb_msgdesc_t iot_edge_v1_FirmwareChunkRequest_msg;
@@ -2388,6 +2518,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_InterfaceCapability_fields &iot_edge_v1_InterfaceCapability_msg
 #define iot_edge_v1_NetworkCapability_fields &iot_edge_v1_NetworkCapability_msg
 #define iot_edge_v1_SerialCapability_fields &iot_edge_v1_SerialCapability_msg
+#define iot_edge_v1_VpnCapabilities_fields &iot_edge_v1_VpnCapabilities_msg
 #define iot_edge_v1_CapabilityReport_fields &iot_edge_v1_CapabilityReport_msg
 #define iot_edge_v1_Heartbeat_fields &iot_edge_v1_Heartbeat_msg
 #define iot_edge_v1_HeartbeatAck_fields &iot_edge_v1_HeartbeatAck_msg
@@ -2422,6 +2553,9 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_NetworkInterfaceConfig_fields &iot_edge_v1_NetworkInterfaceConfig_msg
 #define iot_edge_v1_NetworkConfigRequest_fields &iot_edge_v1_NetworkConfigRequest_msg
 #define iot_edge_v1_NetworkConfigResult_fields &iot_edge_v1_NetworkConfigResult_msg
+#define iot_edge_v1_VpnRoute_fields &iot_edge_v1_VpnRoute_msg
+#define iot_edge_v1_VpnConfigRequest_fields &iot_edge_v1_VpnConfigRequest_msg
+#define iot_edge_v1_VpnConfigResult_fields &iot_edge_v1_VpnConfigResult_msg
 #define iot_edge_v1_FirmwareUpdateRequest_fields &iot_edge_v1_FirmwareUpdateRequest_msg
 #define iot_edge_v1_FirmwareUpdateResult_fields &iot_edge_v1_FirmwareUpdateResult_msg
 #define iot_edge_v1_FirmwareChunkRequest_fields &iot_edge_v1_FirmwareChunkRequest_msg
@@ -2448,7 +2582,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 
 /* Maximum encoded size of messages (where known) */
 #define IOT_EDGE_V1_EDGE_PB_H_MAX_SIZE           iot_edge_v1_Envelope_size
-#define iot_edge_v1_CapabilityReport_size        11348
+#define iot_edge_v1_CapabilityReport_size        11487
 #define iot_edge_v1_CommandProgress_size         215
 #define iot_edge_v1_CommandRequest_size          2724
 #define iot_edge_v1_CommandResultAck_size        18
@@ -2512,6 +2646,10 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_TerminalOpen_size            96
 #define iot_edge_v1_TerminalOpened_size          18
 #define iot_edge_v1_TerminalResize_size          30
+#define iot_edge_v1_VpnCapabilities_size         136
+#define iot_edge_v1_VpnConfigRequest_size        2141
+#define iot_edge_v1_VpnConfigResult_size         340
+#define iot_edge_v1_VpnRoute_size                108
 
 #ifdef __cplusplus
 } /* extern "C" */

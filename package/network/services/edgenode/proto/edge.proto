@@ -209,12 +209,20 @@ message SerialCapability {
   bool rs485 = 4;
 }
 
+message VpnCapabilities {
+  bool supports_vpn = 1;
+  string wireguard_version = 2 [(nanopb).max_length = 32];
+  string agent_version = 3 [(nanopb).max_length = 32];
+  string public_key = 4 [(nanopb).max_length = 64];
+}
+
 message CapabilityReport {
   repeated InterfaceCapability interfaces = 1 [(nanopb).max_count = 16];
   repeated SerialCapability serial_ports = 2 [(nanopb).max_count = 8];
   string network_stack = 3 [(nanopb).max_length = 32];
   bool ttyd_available = 4;
   repeated NetworkCapability networks = 5 [(nanopb).max_count = 8];
+  VpnCapabilities vpn = 6;
 }
 
 message Heartbeat {
@@ -553,6 +561,34 @@ message NetworkConfigResult {
   string message = 4 [(nanopb).max_length = 256];
 }
 
+message VpnRoute {
+  string route_id = 1 [(nanopb).max_length = 36];
+  string virtual_cidr = 2 [(nanopb).max_length = 18];
+  string target_cidr = 3 [(nanopb).max_length = 18];
+  string mode = 4 [(nanopb).max_length = 8];
+  string nat_mode = 5 [(nanopb).max_length = 16];
+  bool enabled = 6;
+}
+
+message VpnConfigRequest {
+  bytes request_id = 1 [(nanopb).max_size = 16];
+  uint64 config_version = 2;
+  string hub_public_key = 3 [(nanopb).max_length = 64];
+  string hub_endpoint = 4 [(nanopb).max_length = 255];
+  uint32 hub_listen_port = 5;
+  string edge_address = 6 [(nanopb).max_length = 18];
+  repeated VpnRoute routes = 7 [(nanopb).max_count = 16];
+  bool enabled = 8;
+}
+
+message VpnConfigResult {
+  bytes request_id = 1 [(nanopb).max_size = 16];
+  uint64 config_version = 2;
+  bool applied = 3;
+  string error_code = 4 [(nanopb).max_length = 48];
+  string error_message = 5 [(nanopb).max_length = 256];
+}
+
 message FirmwareUpdateRequest {
   bytes request_id = 1 [(nanopb).max_size = 16];
   string download_url = 2 [(nanopb).max_length = 512];
@@ -743,6 +779,8 @@ message Envelope {
     CommandResultAck command_result_ack = 53;
     NetworkConfigRequest network_config_request = 60;
     NetworkConfigResult network_config_result = 61;
+    VpnConfigRequest vpn_config_request = 84;
+    VpnConfigResult vpn_config_result = 85;
     FirmwareUpdateRequest firmware_update_request = 62;
     FirmwareUpdateResult firmware_update_result = 63;
     PlatformConfigRequest platform_config_request = 64;
