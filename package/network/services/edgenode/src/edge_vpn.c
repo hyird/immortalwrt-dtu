@@ -195,7 +195,10 @@ static bool netlink_request(int protocol, edge_vpn_netlink_message *message,
         close(fd);
         return false;
     }
-    const uint32_t sequence = ((const struct nlmsghdr *)(const void *)message->data)->nlmsg_seq;
+    const struct nlmsghdr *request_header =
+        (const struct nlmsghdr *)(const void *)message->data;
+    const uint32_t sequence = request_header->nlmsg_seq;
+    const bool dump = (request_header->nlmsg_flags & NLM_F_DUMP) != 0U;
     uint8_t buffer[EDGE_VPN_NETLINK_BUFFER_SIZE];
     for (;;) {
         const ssize_t received = recv(fd, buffer, sizeof(buffer), 0);
@@ -217,8 +220,15 @@ static bool netlink_request(int protocol, edge_vpn_netlink_message *message,
                 }
                 const struct nlmsgerr *error =
                     (const struct nlmsgerr *)NLMSG_DATA(header);
-                close(fd);
-                return error->error == 0;
+                if (error->error != 0) {
+                    close(fd);
+                    return false;
+                }
+                if (!dump) {
+                    close(fd);
+                    return true;
+                }
+                continue;
             }
             if (header->nlmsg_type == NLMSG_DONE) {
                 close(fd);
@@ -429,7 +439,10 @@ static bool wireguard_begin(edge_vpn_netlink_message *message, uint16_t family,
         .cmd = command,
         .version = WG_GENL_VERSION,
     };
-    return netlink_begin(message, family, NLM_F_REQUEST | NLM_F_ACK, 1U) &&
+    const uint16_t flags =
+        (uint16_t)(NLM_F_REQUEST | NLM_F_ACK |
+                   (command == WG_CMD_GET_DEVICE ? NLM_F_DUMP : 0U));
+    return netlink_begin(message, family, flags, 1U) &&
            netlink_append(message, &generic, sizeof(generic)) &&
            netlink_string_attribute(message, WGDEVICE_A_IFNAME, EDGE_VPN_INTERFACE);
 }
