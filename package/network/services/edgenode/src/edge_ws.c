@@ -736,6 +736,11 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     session->active_revision = commit->revision;
     sync_acquisition_io(session->app);
     send_config_result(session, commit->revision, commit->sha256.bytes, true, NULL, NULL);
+    /* A freshly approved node reports once on hello_ack. Repeat the capability
+     * report after the initial config sync as a compatibility retry for older
+     * gateways or a first report lost while the session was being promoted. */
+    if (!send_capability_report(session))
+        edge_log_write("warn", "ws", "capability report after config sync failed", "");
     for (size_t index = 0U; index < session->app->config->platform_count; ++index)
         send_device_status(&session->app->sessions[index]);
 }
