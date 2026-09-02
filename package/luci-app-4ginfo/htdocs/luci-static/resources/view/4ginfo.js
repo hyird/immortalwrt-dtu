@@ -551,7 +551,7 @@ return view.extend({
 		var devicePanel = E('div', {}, [
 			E('div', { 'class': 'cbi-section-descr' },
 				'这里仅展示 EdgeNode 当前使用的 4G 设备接入参数，不提供修改、保存或重启操作。设备接入配置仍由 luci-app-edgenode 负责。'),
-			section('4G设备接入配置（只读）', configRows(data.config))
+			section('4G设备接入配置', configRows(data.config))
 		]);
 
 		data.statusContainer = statusContainer;
@@ -570,7 +570,7 @@ return view.extend({
 			var topTabs = tabbedPanels([
 				{ id: 'status', label: '4G信息', content: statusContainer },
 				{ id: 'connection', label: '4G连接配置', content: connectionContainer },
-				{ id: 'device', label: '设备接入（只读）', content: devicePanel }
+				{ id: 'device', label: '设备接入', content: devicePanel }
 			], 'status');
 
 			return E('div', { 'class': 'cbi-map' }, [
