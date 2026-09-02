@@ -372,6 +372,7 @@ static bool execute_commands(const struct modem_profile *profile, const char *ac
 		success = true;
 		for (index = 0U; index < sizeof(commands) / sizeof(commands[0]); ++index)
 			if (!run_at_command(fd, commands[index], true)) {
+				fprintf(stderr, "AT transaction failed at probe step %zu\n", index + 1U);
 				success = false;
 				break;
 			}
@@ -385,13 +386,17 @@ static bool execute_commands(const struct modem_profile *profile, const char *ac
 		if (profile->pin_code[0] != '\0') {
 			snprintf(command, sizeof(command), "AT+CPIN=\"%s\"\r", profile->pin_code);
 			success = run_at_command(fd, command, true);
+			if (!success)
+				fprintf(stderr, "AT transaction failed at SIM PIN\n");
 		} else {
 			success = true;
 		}
-		if (success) {
+		if (success && !profile->automatic_apn) {
 			snprintf(command, sizeof(command), "AT+CGDCONT=1,\"%s\",\"%s\"\r",
 				pdp_name(profile->pdp_type), profile->apn);
 			success = run_at_command(fd, command, true);
+			if (!success)
+				fprintf(stderr, "AT transaction failed at PDP/APN\n");
 		}
 		if (success) {
 			auth = auth_number(profile->auth_type);
@@ -401,6 +406,8 @@ static bool execute_commands(const struct modem_profile *profile, const char *ac
 				snprintf(command, sizeof(command), "AT+CGAUTH=1,%u,\"%s\",\"%s\"\r",
 					auth, profile->username, profile->password);
 			success = run_at_command(fd, command, true);
+			if (!success)
+				fprintf(stderr, "AT transaction failed at authentication\n");
 		}
 		if (success && profile->redial_after_apply)
 			success = run_at_command(fd, "AT+CFUN=1,1\r", false);
