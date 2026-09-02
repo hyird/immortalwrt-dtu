@@ -87,9 +87,9 @@ function section(title, rows) {
 }
 
 function tabbedPanels(items, active, onSelect) {
-	var root = E('div', { 'class': 'cbi-tabs-wrapper' });
-	var menu = E('div', { 'class': 'cbi-tabmenu', 'role': 'tablist' });
-	var list = E('ul');
+	var root = E('div', { 'class': 'cbi-4g-tabs' });
+	var menu = E('div', { 'class': 'cbi-4g-tabmenu', 'role': 'tablist' });
+	var list = E('ul', { 'class': 'cbi-4g-tablist' });
 	var tabs = [];
 	var panels = [];
 	var selected = active || items[0].id;
@@ -101,10 +101,10 @@ function tabbedPanels(items, active, onSelect) {
 			'role': 'tab',
 			'aria-controls': panelId
 		}, item.label);
-		var tab = E('li', { 'class': 'cbi-tabmenu-tab' }, [ link ]);
+		var tab = E('li', { 'class': 'cbi-4g-tab' }, [ link ]);
 		var panel = E('div', {
 			'id': panelId,
-			'class': 'cbi-tabpanel',
+			'class': 'cbi-4g-tabpanel',
 			'role': 'tabpanel',
 			'aria-labelledby': panelId + '-tab'
 		}, item.content);
@@ -127,7 +127,7 @@ function tabbedPanels(items, active, onSelect) {
 		tabs.forEach(function(tab) {
 			var isActive = tab.id === selected;
 
-			tab.node.classList.toggle('cbi-tabmenu-tab-active', isActive);
+			tab.node.classList.toggle('cbi-4g-tab-active', isActive);
 			tab.link.setAttribute('aria-selected', isActive ? 'true' : 'false');
 		});
 		panels.forEach(function(panel) {
@@ -143,6 +143,35 @@ function tabbedPanels(items, active, onSelect) {
 	update();
 
 	return root;
+}
+
+function tabStyles() {
+	return E('style', { 'type': 'text/css' }, [
+		'.cbi-4g-tabs { margin: .75rem 0 1.5rem; }',
+		'.cbi-4g-tabmenu { margin: 0 0 1rem; border-bottom: 1px solid #c6c6c6; overflow-x: auto; }',
+		'.cbi-4g-tablist { display: flex; flex-wrap: wrap; gap: .35rem; list-style: none; margin: 0; padding: 0; }',
+		'.cbi-4g-tab { display: block; margin: 0; padding: 0; }',
+		'.cbi-4g-tab a { display: block; padding: .45rem .85rem; border: 1px solid #c6c6c6; border-bottom: 0; border-radius: .35rem .35rem 0 0; background: #f3f3f3; color: inherit; text-decoration: none; white-space: nowrap; }',
+		'.cbi-4g-tab a:hover { background: #e8e8e8; }',
+		'.cbi-4g-tab-active a { margin-bottom: -1px; border-color: #888; background: #fff; color: #0069c0; font-weight: 600; }',
+		'.cbi-4g-tabpanel { padding-top: .25rem; }',
+		'.cbi-4g-tabs .cbi-4g-tabs { margin-top: 1rem; }',
+		'@media screen and (max-width: 600px) { .cbi-4g-tablist { flex-wrap: nowrap; } }'
+	]);
+}
+
+function removePageActions(node) {
+	if (!node)
+		return;
+
+	if (node.classList && node.classList.contains('cbi-page-actions') && node.parentNode)
+		node.parentNode.removeChild(node);
+
+	if (node.querySelectorAll)
+		Array.prototype.forEach.call(node.querySelectorAll('.cbi-page-actions'), function(actions) {
+			if (actions.parentNode)
+				actions.parentNode.removeChild(actions);
+		});
 }
 
 function statusRows(status) {
@@ -535,6 +564,7 @@ return view.extend({
 		}, 10);
 
 		return connectionMap.render().then(function(connectionMapView) {
+			removePageActions(connectionMapView);
 			dom.content(connectionContainer, connectionMapView);
 
 			var topTabs = tabbedPanels([
@@ -544,6 +574,7 @@ return view.extend({
 			], 'status');
 
 			return E('div', { 'class': 'cbi-map' }, [
+				tabStyles(),
 				E('h2', { 'class': 'cbi-map-title' }, '4G信息'),
 				E('div', { 'class': 'cbi-map-descr' },
 					'完整显示 4G 模块信息，并提供连接、选网、射频和逐条 AT 配置能力；设备接入参数仅展示。'),
