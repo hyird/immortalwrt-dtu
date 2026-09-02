@@ -21,7 +21,7 @@ define Package/edgenode
   TITLE:=Small multi-platform IoT edge node
   URL:=https://github.com/hyird/iot-engine
   DEPENDS:=+libev +libuci +libuwsc-mbedtls +libmbedtls +libustream-mbedtls +ca-bundle \
-    +kmod-wireguard +nftables-nojson
+    +kmod-wireguard
 endef
 
 define Package/edgenode/description
