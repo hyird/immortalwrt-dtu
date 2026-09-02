@@ -398,13 +398,10 @@ static bool execute_commands(const struct modem_profile *profile, const char *ac
 			if (!success)
 				fprintf(stderr, "AT transaction failed at PDP/APN\n");
 		}
-		if (success) {
+		if (success && strcmp(profile->auth_type, "none") != 0) {
 			auth = auth_number(profile->auth_type);
-			if (auth == 0U)
-				snprintf(command, sizeof(command), "AT+CGAUTH=1,0\r");
-			else
-				snprintf(command, sizeof(command), "AT+CGAUTH=1,%u,\"%s\",\"%s\"\r",
-					auth, profile->username, profile->password);
+			snprintf(command, sizeof(command), "AT+CGAUTH=1,%u,\"%s\",\"%s\"\r",
+				auth, profile->username, profile->password);
 			success = run_at_command(fd, command, true);
 			if (!success)
 				fprintf(stderr, "AT transaction failed at authentication\n");
