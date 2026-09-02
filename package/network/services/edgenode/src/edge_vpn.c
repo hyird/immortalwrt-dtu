@@ -3,6 +3,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/genetlink.h>
+#include <linux/netlink.h>
+#include <linux/wireguard.h>
 #include <netdb.h>
 #include <net/if.h>
 #include <stdint.h>
@@ -11,23 +14,29 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include "edge_process.h"
 
 #define EDGE_VPN_INTERFACE "wg-iot"
 #define EDGE_VPN_KEY_PATH "/etc/edgenode/vpn.key"
-#define EDGE_VPN_UAPI_PATH "/var/run/wireguard/wg-iot.sock"
 #define EDGE_VPN_NFT_TABLE "edgenode_vpn"
 #define EDGE_VPN_OVERLAY_CIDR "100.96.0.0/11"
 #define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC1F0000U /* 172.31.0.0/16 */
 #define EDGE_VPN_AGENT_VERSION "0.3.34"
+#define EDGE_VPN_NETLINK_BUFFER_SIZE 8192U
 
 typedef struct {
     uint32_t network;
     uint8_t prefix;
 } edge_vpn_cidr;
+
+typedef struct {
+    uint8_t data[EDGE_VPN_NETLINK_BUFFER_SIZE];
+    size_t size;
+} edge_vpn_netlink_message;
+
+typedef bool (*edge_vpn_netlink_handler)(const struct nlmsghdr *header, void *context);
 
 static uint64_t applied_version;
 
@@ -57,57 +66,201 @@ static bool write_all(int fd, const void *data, size_t size) {
     return true;
 }
 
-static bool read_all(int fd, char *output, size_t capacity) {
-    if (output == NULL || capacity < 2U)
-        return false;
-    size_t used = 0U;
-    while (used + 1U < capacity) {
-        const ssize_t count = read(fd, output + used, capacity - used - 1U);
-        if (count > 0) {
-            used += (size_t)count;
-            continue;
-        }
-        if (count < 0 && errno == EINTR)
-            continue;
-        if (count < 0)
-            return false;
-        break;
-    }
-    output[used] = '\0';
-    return used + 1U < capacity;
+static size_t align4(size_t value) {
+    return (value + 3U) & ~(size_t)3U;
 }
 
-static bool uapi_request(const char *request, char *response, size_t response_size) {
-    if (request == NULL || response == NULL || response_size < 2U)
+static bool netlink_append(edge_vpn_netlink_message *message,
+                           const void *data, size_t size) {
+    if (message == NULL || data == NULL || size > sizeof(message->data) - message->size)
         return false;
-    if (mkdir("/var/run/wireguard", 0755) != 0 && errno != EEXIST)
-        return false;
+    memcpy(message->data + message->size, data, size);
+    message->size += size;
+    return true;
+}
 
-    const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+static bool netlink_begin(edge_vpn_netlink_message *message, uint16_t type,
+                          uint16_t flags, uint32_t sequence) {
+    if (message == NULL)
+        return false;
+    memset(message, 0, sizeof(*message));
+    const struct nlmsghdr header = {
+        .nlmsg_len = NLMSG_HDRLEN,
+        .nlmsg_type = type,
+        .nlmsg_flags = flags,
+        .nlmsg_seq = sequence,
+    };
+    return netlink_append(message, &header, sizeof(header));
+}
+
+static bool netlink_attribute(edge_vpn_netlink_message *message, uint16_t type,
+                              const void *data, size_t size) {
+    if (message == NULL || size > UINT16_MAX - NLA_HDRLEN)
+        return false;
+    const struct nlattr attribute = {
+        .nla_len = (uint16_t)(NLA_HDRLEN + size),
+        .nla_type = type,
+    };
+    if (!netlink_append(message, &attribute, sizeof(attribute)) ||
+        (size != 0U && !netlink_append(message, data, size)))
+        return false;
+    const size_t aligned = align4(message->size);
+    if (aligned > sizeof(message->data))
+        return false;
+    memset(message->data + message->size, 0, aligned - message->size);
+    message->size = aligned;
+    return true;
+}
+
+static bool netlink_string_attribute(edge_vpn_netlink_message *message, uint16_t type,
+                                     const char *value) {
+    return value != NULL && netlink_attribute(message, type, value, strlen(value) + 1U);
+}
+
+static bool netlink_begin_nested(edge_vpn_netlink_message *message, uint16_t type,
+                                 size_t *offset) {
+    if (message == NULL || offset == NULL)
+        return false;
+    *offset = message->size;
+    const struct nlattr attribute = {
+        .nla_len = NLA_HDRLEN,
+        .nla_type = (uint16_t)(type | NLA_F_NESTED),
+    };
+    return netlink_append(message, &attribute, sizeof(attribute));
+}
+
+static bool netlink_end_nested(edge_vpn_netlink_message *message, size_t offset) {
+    if (message == NULL || offset > message->size ||
+        message->size - offset > UINT16_MAX || offset + NLA_HDRLEN > message->size)
+        return false;
+    struct nlattr *attribute = (struct nlattr *)(void *)(message->data + offset);
+    attribute->nla_len = (uint16_t)(message->size - offset);
+    const size_t aligned = align4(message->size);
+    if (aligned > sizeof(message->data))
+        return false;
+    memset(message->data + message->size, 0, aligned - message->size);
+    message->size = aligned;
+    return true;
+}
+
+static bool netlink_finish(edge_vpn_netlink_message *message) {
+    if (message == NULL || message->size < NLMSG_HDRLEN || message->size > UINT32_MAX)
+        return false;
+    ((struct nlmsghdr *)(void *)message->data)->nlmsg_len = (uint32_t)message->size;
+    return true;
+}
+
+static bool netlink_for_each_attribute(const uint8_t *data, size_t size,
+                                       bool (*handler)(uint16_t, const void *, size_t,
+                                                       void *),
+                                       void *context) {
+    if (data == NULL || handler == NULL)
+        return false;
+    size_t offset = 0U;
+    while (offset + NLA_HDRLEN <= size) {
+        const struct nlattr *attribute =
+            (const struct nlattr *)(const void *)(data + offset);
+        if (attribute->nla_len < NLA_HDRLEN || offset + attribute->nla_len > size)
+            return false;
+        if (!handler((uint16_t)(attribute->nla_type & NLA_TYPE_MASK),
+                     data + offset + NLA_HDRLEN,
+                     attribute->nla_len - NLA_HDRLEN, context))
+            return false;
+        offset += align4(attribute->nla_len);
+    }
+    return offset == size || (offset < size && size - offset < NLA_HDRLEN);
+}
+
+static bool netlink_request(int protocol, edge_vpn_netlink_message *message,
+                            edge_vpn_netlink_handler handler, void *context) {
+    if (!netlink_finish(message))
+        return false;
+    const int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, protocol);
     if (fd < 0)
         return false;
-    struct sockaddr_un address;
-    memset(&address, 0, sizeof(address));
-    address.sun_family = AF_UNIX;
-    if (snprintf(address.sun_path, sizeof(address.sun_path), "%s", EDGE_VPN_UAPI_PATH) >=
-        (int)sizeof(address.sun_path)) {
+    struct sockaddr_nl local = {.nl_family = AF_NETLINK};
+    if (bind(fd, (const struct sockaddr *)&local, sizeof(local)) != 0) {
         close(fd);
         return false;
     }
-    const bool connected = connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0;
-    const bool sent = connected && write_all(fd, request, strlen(request)) &&
-                      shutdown(fd, SHUT_WR) == 0;
-    const bool received = sent && read_all(fd, response, response_size);
-    close(fd);
-    return received;
+    const struct sockaddr_nl destination = {.nl_family = AF_NETLINK};
+    const struct iovec iov = {.iov_base = message->data, .iov_len = message->size};
+    const struct msghdr outgoing = {
+        .msg_name = (void *)&destination,
+        .msg_namelen = sizeof(destination),
+        .msg_iov = (struct iovec *)(void *)&iov,
+        .msg_iovlen = 1U,
+    };
+    if (sendmsg(fd, &outgoing, 0) < 0) {
+        close(fd);
+        return false;
+    }
+    const uint32_t sequence = ((const struct nlmsghdr *)(const void *)message->data)->nlmsg_seq;
+    uint8_t buffer[EDGE_VPN_NETLINK_BUFFER_SIZE];
+    for (;;) {
+        const ssize_t received = recv(fd, buffer, sizeof(buffer), 0);
+        if (received < 0 && errno == EINTR)
+            continue;
+        if (received <= 0) {
+            close(fd);
+            return false;
+        }
+        int remaining = (int)received;
+        for (struct nlmsghdr *header = (struct nlmsghdr *)(void *)buffer;
+             NLMSG_OK(header, remaining); header = NLMSG_NEXT(header, remaining)) {
+            if (header->nlmsg_seq != sequence)
+                continue;
+            if (header->nlmsg_type == NLMSG_ERROR) {
+                if (header->nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
+                    close(fd);
+                    return false;
+                }
+                const struct nlmsgerr *error =
+                    (const struct nlmsgerr *)NLMSG_DATA(header);
+                close(fd);
+                return error->error == 0;
+            }
+            if (header->nlmsg_type == NLMSG_DONE) {
+                close(fd);
+                return true;
+            }
+            if (handler != NULL && !handler(header, context)) {
+                close(fd);
+                return false;
+            }
+        }
+    }
 }
 
-static bool response_ok(const char *response) {
-    const char *value = strstr(response != NULL ? response : "", "errno=");
-    if (value == NULL)
+static bool family_attribute(uint16_t type, const void *data, size_t size, void *context) {
+    if (type == CTRL_ATTR_FAMILY_ID && data != NULL && size >= sizeof(uint16_t))
+        memcpy(context, data, sizeof(uint16_t));
+    return true;
+}
+
+static bool family_message(const struct nlmsghdr *header, void *context) {
+    if (header == NULL || header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
         return false;
-    value += strlen("errno=");
-    return *value == '0' && (value[1] == '\n' || value[1] == '\0');
+    const uint8_t *payload = (const uint8_t *)NLMSG_DATA(header) + GENL_HDRLEN;
+    const size_t size = header->nlmsg_len - NLMSG_HDRLEN - GENL_HDRLEN;
+    return netlink_for_each_attribute(payload, size, family_attribute, context);
+}
+
+static bool wireguard_family(uint16_t *family) {
+    if (family == NULL)
+        return false;
+    *family = 0U;
+    edge_vpn_netlink_message message;
+    const struct genlmsghdr generic = {
+        .cmd = CTRL_CMD_GETFAMILY,
+        .version = 1U,
+    };
+    if (!netlink_begin(&message, GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK, 1U) ||
+        !netlink_append(&message, &generic, sizeof(generic)) ||
+        !netlink_string_attribute(&message, CTRL_ATTR_FAMILY_NAME, WG_GENL_NAME) ||
+        !netlink_request(NETLINK_GENERIC, &message, family_message, family))
+        return false;
+    return *family != 0U;
 }
 
 static bool hex_byte(char high, char low, uint8_t *output) {
@@ -270,33 +423,61 @@ static bool delete_interface(void) {
     return edge_process_run(command, -1, -1) == 0 || !interface_exists();
 }
 
+static bool wireguard_begin(edge_vpn_netlink_message *message, uint16_t family,
+                            uint8_t command) {
+    const struct genlmsghdr generic = {
+        .cmd = command,
+        .version = WG_GENL_VERSION,
+    };
+    return netlink_begin(message, family, NLM_F_REQUEST | NLM_F_ACK, 1U) &&
+           netlink_append(message, &generic, sizeof(generic)) &&
+           netlink_string_attribute(message, WGDEVICE_A_IFNAME, EDGE_VPN_INTERFACE);
+}
+
 static bool set_private_key(const char private_key[65]) {
-    char request[160];
-    if (snprintf(request, sizeof(request), "set=1\nprivate_key=%s\n\n", private_key) >=
-        (int)sizeof(request))
+    uint8_t key[32];
+    uint16_t family = 0U;
+    edge_vpn_netlink_message message;
+    if (!hex_to_bytes(private_key, key, sizeof(key)) || !wireguard_family(&family) ||
+        !wireguard_begin(&message, family, WG_CMD_SET_DEVICE) ||
+        !netlink_attribute(&message, WGDEVICE_A_PRIVATE_KEY, key, sizeof(key)))
         return false;
-    char response[1024];
-    return uapi_request(request, response, sizeof(response)) && response_ok(response);
+    return netlink_request(NETLINK_GENERIC, &message, NULL, NULL);
+}
+
+typedef struct {
+    uint8_t key[32];
+    bool found;
+} edge_vpn_public_key;
+
+static bool public_key_attribute(uint16_t type, const void *data, size_t size,
+                                 void *context) {
+    edge_vpn_public_key *result = context;
+    if (type == WGDEVICE_A_PUBLIC_KEY && data != NULL && size == sizeof(result->key)) {
+        memcpy(result->key, data, sizeof(result->key));
+        result->found = true;
+    }
+    return true;
+}
+
+static bool public_key_message(const struct nlmsghdr *header, void *context) {
+    if (header == NULL || header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
+        return false;
+    const uint8_t *payload = (const uint8_t *)NLMSG_DATA(header) + GENL_HDRLEN;
+    const size_t size = header->nlmsg_len - NLMSG_HDRLEN - GENL_HDRLEN;
+    return netlink_for_each_attribute(payload, size, public_key_attribute, context);
 }
 
 static bool read_public_key(char output[65]) {
-    char response[2048];
-    if (!uapi_request("get=1\n\n", response, sizeof(response)))
+    uint16_t family = 0U;
+    edge_vpn_netlink_message message;
+    edge_vpn_public_key result = {0};
+    if (!wireguard_family(&family) ||
+        !wireguard_begin(&message, family, WG_CMD_GET_DEVICE) ||
+        !netlink_request(NETLINK_GENERIC, &message, public_key_message, &result) ||
+        !result.found)
         return false;
-    const char *value = strstr(response, "public_key=");
-    if (value == NULL)
-        return false;
-    value += strlen("public_key=");
-    const char *end = strchr(value, '\n');
-    if (end == NULL || (size_t)(end - value) != 64U)
-        return false;
-    char hex[65];
-    memcpy(hex, value, 64U);
-    hex[64] = '\0';
-    uint8_t bytes[32];
-    if (!hex_to_bytes(hex, bytes, sizeof(bytes)) || !base64_encode_key(bytes, (char *)output))
-        return false;
-    return true;
+    return base64_encode_key(result.key, (char *)output);
 }
 
 static bool ensure_interface(char private_key[65]) {
@@ -424,7 +605,9 @@ static bool split_endpoint(const char *input, unsigned fallback_port,
 }
 
 static bool resolve_endpoint(const char *input, unsigned fallback_port,
-                             char output[272]) {
+                             struct sockaddr_storage *output, socklen_t *output_size) {
+    if (output == NULL || output_size == NULL)
+        return false;
     char host[256] = {0};
     char port[6] = {0};
     if (!split_endpoint(input, fallback_port, host, port))
@@ -439,39 +622,67 @@ static bool resolve_endpoint(const char *input, unsigned fallback_port,
     bool resolved = false;
     for (const struct addrinfo *address = addresses; address != NULL && !resolved;
          address = address->ai_next) {
-        char numeric_host[256] = {0};
-        char numeric_port[6] = {0};
-        if (getnameinfo(address->ai_addr, address->ai_addrlen, numeric_host,
-                        sizeof(numeric_host), numeric_port, sizeof(numeric_port),
-                        NI_NUMERICHOST | NI_NUMERICSERV) != 0)
+        if ((address->ai_family != AF_INET && address->ai_family != AF_INET6) ||
+            address->ai_addrlen > sizeof(*output))
             continue;
-        if (address->ai_family == AF_INET6)
-            resolved = snprintf(output, 272U, "[%s]:%s", numeric_host, numeric_port) < 272;
-        else
-            resolved = snprintf(output, 272U, "%s:%s", numeric_host, numeric_port) < 272;
+        memset(output, 0, sizeof(*output));
+        memcpy(output, address->ai_addr, address->ai_addrlen);
+        *output_size = (socklen_t)address->ai_addrlen;
+        resolved = true;
     }
     freeaddrinfo(addresses);
     return resolved;
 }
 
-static bool uapi_set_config(const char private_key[65], const char *hub_public_key,
-                            const char *endpoint, unsigned listen_port) {
+static bool netlink_set_config(const char private_key[65], const char *hub_public_key,
+                               const struct sockaddr *endpoint, socklen_t endpoint_size) {
+    uint8_t private_key_bytes[32];
     uint8_t hub_key[32];
-    if (!base64_decode_key(hub_public_key, hub_key))
+    uint16_t family = 0U;
+    edge_vpn_netlink_message message;
+    if (!hex_to_bytes(private_key, private_key_bytes, sizeof(private_key_bytes)) ||
+        !base64_decode_key(hub_public_key, hub_key) || endpoint == NULL ||
+        (endpoint->sa_family != AF_INET && endpoint->sa_family != AF_INET6) ||
+        (endpoint_size != sizeof(struct sockaddr_in) &&
+         endpoint_size != sizeof(struct sockaddr_in6)) ||
+        !wireguard_family(&family) ||
+        !wireguard_begin(&message, family, WG_CMD_SET_DEVICE) ||
+        !netlink_attribute(&message, WGDEVICE_A_PRIVATE_KEY,
+                           private_key_bytes, sizeof(private_key_bytes)))
         return false;
-    char hub_key_hex[65];
-    bytes_to_hex(hub_key, sizeof(hub_key), hub_key_hex, sizeof(hub_key_hex));
-    char request[4096];
-    const int length = snprintf(
-        request, sizeof(request),
-        "set=1\nprivate_key=%s\nlisten_port=%u\nreplace_peers=true\n"
-        "public_key=%s\nendpoint=%s\npersistent_keepalive_interval=25\n"
-        "replace_allowed_ips=true\nallowed_ip=%s\n\n",
-        private_key, listen_port, hub_key_hex, endpoint, EDGE_VPN_OVERLAY_CIDR);
-    if (length < 0 || length >= (int)sizeof(request))
+    const uint32_t device_flags = WGDEVICE_F_REPLACE_PEERS;
+    const uint32_t peer_flags = WGPEER_F_REPLACE_ALLOWEDIPS;
+    const uint16_t keepalive = 25U;
+    const uint16_t address_family = AF_INET;
+    const uint8_t prefix = 11U;
+    struct in_addr allowed_address;
+    size_t peers_offset = 0U;
+    size_t peer_offset = 0U;
+    size_t allowed_ips_offset = 0U;
+    size_t allowed_ip_offset = 0U;
+    if (inet_pton(AF_INET, "100.96.0.0", &allowed_address) != 1 ||
+        !netlink_attribute(&message, WGDEVICE_A_FLAGS,
+                           &device_flags, sizeof(device_flags)) ||
+        !netlink_begin_nested(&message, WGDEVICE_A_PEERS, &peers_offset) ||
+        !netlink_begin_nested(&message, 0U, &peer_offset) ||
+        !netlink_attribute(&message, WGPEER_A_PUBLIC_KEY, hub_key, sizeof(hub_key)) ||
+        !netlink_attribute(&message, WGPEER_A_ENDPOINT, endpoint, endpoint_size) ||
+        !netlink_attribute(&message, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
+                           &keepalive, sizeof(keepalive)) ||
+        !netlink_attribute(&message, WGPEER_A_FLAGS, &peer_flags, sizeof(peer_flags)) ||
+        !netlink_begin_nested(&message, WGPEER_A_ALLOWEDIPS, &allowed_ips_offset) ||
+        !netlink_begin_nested(&message, 0U, &allowed_ip_offset) ||
+        !netlink_attribute(&message, WGALLOWEDIP_A_FAMILY,
+                           &address_family, sizeof(address_family)) ||
+        !netlink_attribute(&message, WGALLOWEDIP_A_IPADDR,
+                           &allowed_address, sizeof(allowed_address)) ||
+        !netlink_attribute(&message, WGALLOWEDIP_A_CIDR_MASK, &prefix, sizeof(prefix)) ||
+        !netlink_end_nested(&message, allowed_ip_offset) ||
+        !netlink_end_nested(&message, allowed_ips_offset) ||
+        !netlink_end_nested(&message, peer_offset) ||
+        !netlink_end_nested(&message, peers_offset))
         return false;
-    char response[1024];
-    return uapi_request(request, response, sizeof(response)) && response_ok(response);
+    return netlink_request(NETLINK_GENERIC, &message, NULL, NULL);
 }
 
 static bool run_ip_address(const char *address) {
@@ -483,6 +694,12 @@ static bool run_ip_address(const char *address) {
 static bool run_ip_up(void) {
     const char *const command[] = {"ip", "link", "set", "up", "dev", EDGE_VPN_INTERFACE,
                                    NULL};
+    return edge_process_run(command, -1, -1) == 0;
+}
+
+static bool run_ip_overlay_route(void) {
+    const char *const command[] = {"ip", "route", "replace", EDGE_VPN_OVERLAY_CIDR,
+                                   "dev", EDGE_VPN_INTERFACE, NULL};
     return edge_process_run(command, -1, -1) == 0;
 }
 
@@ -695,16 +912,19 @@ bool edge_vpn_apply(const iot_edge_v1_VpnConfigRequest *request,
         set_error(error, error_size, "too many VPN route mappings");
         return false;
     }
-    char endpoint[272];
-    if (!resolve_endpoint(request->hub_endpoint, request->hub_listen_port, endpoint)) {
+    struct sockaddr_storage endpoint;
+    socklen_t endpoint_size = 0;
+    if (!resolve_endpoint(request->hub_endpoint, request->hub_listen_port,
+                          &endpoint, &endpoint_size)) {
         set_error(error, error_size, "cannot resolve VPN hub endpoint");
         return false;
     }
     char private_key[65];
     if (!ensure_interface(private_key) ||
-        !uapi_set_config(private_key, request->hub_public_key, endpoint,
-                         request->hub_listen_port) ||
-        !run_ip_address(edge_address) || !run_ip_up() || !apply_firewall(request)) {
+        !netlink_set_config(private_key, request->hub_public_key,
+                            (const struct sockaddr *)&endpoint, endpoint_size) ||
+        !run_ip_address(edge_address) || !run_ip_up() || !run_ip_overlay_route() ||
+        !apply_firewall(request)) {
         edge_vpn_shutdown();
         set_error(error, error_size,
                   have_nat ? "cannot apply WireGuard or nftables NAT configuration"
