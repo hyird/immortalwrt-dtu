@@ -91,6 +91,19 @@ add_executable(edge_firmware_policy_test edge_firmware_policy_test.c)
 target_include_directories(edge_firmware_policy_test PRIVATE "${EDGENODE_ROOT}/src")
 add_test(NAME edge_firmware_policy COMMAND edge_firmware_policy_test)
 
+add_executable(edge_firmware_stream_test
+    edge_firmware_stream_test.c
+    "${EDGENODE_ROOT}/src/edge_firmware_stream.c")
+target_include_directories(edge_firmware_stream_test PRIVATE "${EDGENODE_ROOT}/src")
+add_test(NAME edge_firmware_stream COMMAND edge_firmware_stream_test)
+
+add_executable(edge_status_test
+    edge_status_test.c
+    "${EDGENODE_ROOT}/src/edge_status.c")
+target_include_directories(edge_status_test PRIVATE "${EDGENODE_ROOT}/src")
+target_link_libraries(edge_status_test PRIVATE edgenode_nanopb)
+add_test(NAME edge_status COMMAND edge_status_test)
+
 add_executable(edgenode_stability_x64
     edgenode_stability_test.c
     "${EDGENODE_ROOT}/src/edge_protocol.c"

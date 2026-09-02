@@ -57,27 +57,3 @@ bool edge_url_make_platform_transport(const char *base, char *output,
                               scheme, (int)host_size, host);
     return host_size != 0U && size > 0 && (size_t)size < capacity;
 }
-
-bool edge_url_valid_http_resource(const char *value) {
-    const char *host = NULL;
-    if (!split_http_scheme(value, &host, NULL) || host[0] == '\0' || host[0] == '/')
-        return false;
-
-    bool in_host = true;
-    size_t host_length = 0U;
-    for (const unsigned char *cursor = (const unsigned char *)host;
-         *cursor != '\0'; ++cursor) {
-        if (*cursor <= 0x20U || *cursor == 0x7fU || *cursor == '\\')
-            return false;
-        if (in_host && *cursor == '@')
-            return false;
-        if (*cursor == '/' || *cursor == '?' || *cursor == '#') {
-            if (in_host && host_length == 0U)
-                return false;
-            in_host = false;
-        } else if (in_host) {
-            ++host_length;
-        }
-    }
-    return host_length != 0U;
-}

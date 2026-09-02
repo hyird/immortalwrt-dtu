@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.29
+PKG_VERSION:=0.3.30
 PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
@@ -20,7 +20,7 @@ define Package/edgenode
   CATEGORY:=Network
   TITLE:=Small multi-platform IoT edge node
   URL:=https://github.com/hyird/iot-engine
-  DEPENDS:=+libev +libuci +libuwsc-mbedtls +libmbedtls +uclient-fetch +libustream-mbedtls +ca-bundle
+  DEPENDS:=+libev +libuci +libuwsc-mbedtls +libmbedtls +libustream-mbedtls +ca-bundle
 endef
 
 define Package/edgenode/description
@@ -64,7 +64,9 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/edge/src/edge_interface.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_capability.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_network.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_firmware_stream.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_firmware.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_status.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_terminal.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_ws.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_acquisition.c \

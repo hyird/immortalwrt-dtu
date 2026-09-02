@@ -11,8 +11,7 @@ Implemented foundations:
   session carrying one nanopb `Envelope` per message; HTTP/WS is unencrypted and intended
   only for trusted or temporary networks;
 - WSS validates both the certificate chain and hostname against OpenWrt's `ca-bundle`;
-  firmware HTTPS uses that same system trust store; TLS initialization and verification
-  failures fail closed;
+  TLS initialization and verification failures fail closed;
 - every platform has isolated registration, config, reconnect, heartbeat, and outbox state;
   failed connections retry forever; a 30-second application handshake deadline, an
   enrolled-session watchdog, and a 60-second outbox ACK deadline break half-open sessions;
@@ -43,21 +42,22 @@ Implemented foundations:
   restores the previous UCI network configuration automatically. Only the initiating
   platform can confirm its transaction, while apply, confirmation, and rollback results
   are broadcast to every enrolled platform;
-- any enrolled platform can download verified firmware and invoke `sysupgrade`; network
-  and firmware mutations are serialized. Bootstrap-only modem and terminal privileges
-  remain unchanged.
+- any enrolled platform can stream verified firmware through its authenticated WS/WSS
+  session and invoke `sysupgrade`; network and firmware mutations are serialized.
+  Bootstrap-only modem and terminal privileges remain unchanged.
 
 The active-config-to-physical-endpoint binding is kept separate from the wire/session
 layer. The current code provides the tested protocol codecs and scheduler that binding
 uses; actual target hardware is still required before declaring a target deployable.
 
-## Firmware download trust
+## Firmware transfer trust
 
-Firmware downloads accept HTTP and HTTPS URLs. HTTPS uses the standard `ca-bundle`
-store. The mbedTLS ustream backend retains valid certificates when a concatenated bundle
-contains an unrelated certificate that the local TLS build cannot parse; a store with no
-usable certificates still fails closed. HTTP downloads are unencrypted, but the requested
-size, SHA-256 digest, and `sysupgrade -T` image validation remain mandatory.
+The platform sends firmware in bounded chunks over the node's existing authenticated
+WS/WSS session. The node pulls one offset at a time, rejects gaps and overlaps, retries
+the current offset after reconnects, and never receives or opens a direct firmware URL.
+The requested size, SHA-256 digest, and `sysupgrade -T` image validation remain mandatory.
+The platform keeps its tokenized direct-download route for deployed legacy firmware;
+only new builds advertising WS firmware streaming use this transfer path.
 
 ## Runtime observability
 
@@ -115,6 +115,13 @@ pending session cannot stop reconnection.
 Additional platform sections may be managed locally through LuCI/UCI or by authenticated
 commands from the default platform; the node applies remote changes through
 `uci set/delete` and `uci commit`.
+
+The LuCI page also provides a read-only runtime dashboard. It reports both procd
+instances, each platform's WS enrollment and heartbeat age, outbox pressure, active and
+staging revisions, recent platform tasks, and the complete active acquisition snapshot
+(endpoints, devices, read/report intervals, fast-read windows, and Modbus/S7 points).
+Runtime status is written atomically to tmpfs and contains no platform credentials or
+command payload values.
 
 ## Build an IPK
 

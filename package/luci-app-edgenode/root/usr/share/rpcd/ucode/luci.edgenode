@@ -1,0 +1,112 @@
+#!/usr/bin/env ucode
+
+'use strict';
+
+import { access, readfile } from 'fs';
+import { connect } from 'ubus';
+
+const ubus = connect();
+const status_path = '/tmp/edgenode/status.json';
+const log_paths = [
+	'/tmp/edgenode/logs/current.log',
+	'/tmp/edgenode/logs/current.log.1',
+];
+
+function read_runtime() {
+	let text = readfile(status_path);
+
+	if (!text)
+		return null;
+
+	try {
+		return json(text);
+	} catch (e) {
+		return null;
+	}
+}
+
+function unescape_log(value) {
+	let output = '';
+
+	for (let index = 0; value && index < length(value); index++) {
+		let ch = substr(value, index, 1);
+
+		if (ch == '\\' && index + 1 < length(value)) {
+			let next = substr(value, ++index, 1);
+			output += next == 't' ? '\t' :
+				next == 'n' ? '\n' :
+				next == 'r' ? '\r' : next;
+		} else {
+			output += ch;
+		}
+	}
+
+	return output;
+}
+
+function read_tasks(limit) {
+	let result = [];
+
+	for (let path in log_paths) {
+		let text = readfile(path);
+
+		if (!text)
+			continue;
+
+		let lines = split(text, '\n');
+
+		for (let index = length(lines) - 1; index >= 0 && length(result) < limit; index--) {
+			let line = lines[index];
+
+			if (!line)
+				continue;
+
+			let fields = split(line, '\t');
+
+			if (length(fields) != 5 || fields[2] != 'task')
+				continue;
+
+			push(result, {
+				timeMs: +fields[0],
+				level: unescape_log(fields[1]),
+				type: unescape_log(fields[3]),
+				detail: unescape_log(fields[4]),
+			});
+		}
+	}
+
+	return result;
+}
+
+function service_status() {
+	let listed = ubus.call('service', 'list', { name: 'edgenode' });
+	let service = listed?.edgenode;
+	let instances = {};
+
+	for (let name, value in (service?.instances || {})) {
+		instances[name] = {
+			running: !!value.running,
+			pid: value.pid || null,
+			respawn: !!value.respawn,
+		};
+	}
+
+	return {
+		enabled: !!access('/etc/rc.d/S95edgenode'),
+		instances,
+	};
+}
+
+const methods = {
+	status: {
+		call: function() {
+			return {
+				service: service_status(),
+				runtime: read_runtime(),
+				tasks: read_tasks(50),
+			};
+		},
+	},
+};
+
+return { 'luci.edgenode': methods };

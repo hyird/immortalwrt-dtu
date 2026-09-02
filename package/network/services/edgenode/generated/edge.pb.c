@@ -135,6 +135,12 @@ PB_BIND(iot_edge_v1_FirmwareUpdateRequest, iot_edge_v1_FirmwareUpdateRequest, 2)
 PB_BIND(iot_edge_v1_FirmwareUpdateResult, iot_edge_v1_FirmwareUpdateResult, 2)
 
 
+PB_BIND(iot_edge_v1_FirmwareChunkRequest, iot_edge_v1_FirmwareChunkRequest, AUTO)
+
+
+PB_BIND(iot_edge_v1_FirmwareChunk, iot_edge_v1_FirmwareChunk, 4)
+
+
 PB_BIND(iot_edge_v1_ModemControlRequest, iot_edge_v1_ModemControlRequest, 2)
 
 

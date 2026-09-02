@@ -161,6 +161,7 @@ message Hello {
   bool supports_modem_control = 31;
   bool supports_logs = 32;
   string log_level = 33 [(nanopb).max_length = 8];
+  bool supports_firmware_stream = 34;
 }
 
 message HelloAck {
@@ -570,6 +571,19 @@ message FirmwareUpdateResult {
   uint32 progress_percent = 6;
 }
 
+message FirmwareChunkRequest {
+  bytes request_id = 1 [(nanopb).max_size = 16];
+  uint64 offset = 2;
+}
+
+message FirmwareChunk {
+  bytes request_id = 1 [(nanopb).max_size = 16];
+  uint64 offset = 2;
+  bytes data = 3 [(nanopb).max_size = 8192];
+  bool eof = 4;
+  string error = 5 [(nanopb).max_length = 128];
+}
+
 message ModemControlRequest {
   bytes request_id = 1 [(nanopb).max_size = 16];
   ModemControlAction action = 2;
@@ -745,6 +759,8 @@ message Envelope {
     LogLevelResult log_level_result = 75;
     TerminalOpened terminal_opened = 76;
     TerminalDataAck terminal_data_ack = 77;
+    FirmwareChunkRequest firmware_chunk_request = 78;
+    FirmwareChunk firmware_chunk = 79;
     Ping ping = 80;
     Pong pong = 81;
     Error error = 90;

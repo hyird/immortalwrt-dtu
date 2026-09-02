@@ -2,19 +2,17 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "edge_firmware_policy.h"
+#include "edge_firmware_stream.h"
 #include "edge_process.h"
-#include "edge_url.h"
 #include "edge_sha256.h"
 
 #define FIRMWARE_IMAGE "/tmp/edgenode/firmware.bin"
@@ -22,8 +20,10 @@
 #define OVERLAY_BINARY "/overlay/upper/usr/sbin/edgenode"
 #define OVERLAY_BINARY_BACKUP "/tmp/edgenode/edgenode-overlay-backup"
 #define FIRMWARE_STATUS_MAGIC 0x45444745U
-#define FIRMWARE_DOWNLOAD_TIMEOUT_MS 1800000U
 #define FIRMWARE_SYSUPGRADE_HANDOFF_GRACE_MS 120000U
+#define FIRMWARE_CHUNK_RETRY_MS 5000U
+#define FIRMWARE_TRANSFER_TIMEOUT_MS 1800000U
+#define FIRMWARE_MAX_SIZE (128U * 1024U * 1024U)
 
 typedef struct {
     uint32_t magic;
@@ -34,6 +34,23 @@ typedef struct {
     uint32_t progress_percent;
     char message[257];
 } firmware_status;
+
+typedef struct {
+    bool active;
+    int image_fd;
+    int lock_fd;
+    uint8_t platform_id[16];
+    iot_edge_v1_FirmwareUpdateRequest request;
+    uint64_t offset;
+    uint64_t last_request_ms;
+    uint64_t last_progress_ms;
+} firmware_transfer;
+
+static firmware_transfer transfer = {
+    .active = false,
+    .image_fd = -1,
+    .lock_fd = -1,
+};
 
 static void set_error(char *output, size_t capacity, const char *message) {
     if (output != NULL && capacity != 0U)
@@ -190,67 +207,15 @@ static void firmware_child(const uint8_t platform_id[16],
                            const iot_edge_v1_FirmwareUpdateRequest *request,
                            int lock_fd) {
     const uint8_t *request_id = request->request_id.bytes;
-    unlink(FIRMWARE_IMAGE);
-    (void)write_status(platform_id, request_id,
-                       iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_DOWNLOADING,
-                       "downloading firmware", 0U, request->size_bytes);
-    const pid_t downloader = fork();
-    if (downloader == 0) {
-        (void)setpgid(0, 0);
-        edge_process_close_inherited_fds(-1);
-        execlp("uclient-fetch", "uclient-fetch", "-O", FIRMWARE_IMAGE,
-               request->download_url, (char *)NULL);
-        _exit(127);
-    }
-    if (downloader > 0)
-        (void)setpgid(downloader, downloader);
-    int download_status = 0;
-    uint64_t downloaded_bytes = 0U;
-    pid_t waited = downloader < 0 ? -1 : 0;
-    const uint64_t download_deadline =
-        monotonic_milliseconds() + FIRMWARE_DOWNLOAD_TIMEOUT_MS;
-    while (waited == 0 && monotonic_milliseconds() < download_deadline) {
-        struct stat progress;
-        if (stat(FIRMWARE_IMAGE, &progress) == 0 && progress.st_size >= 0) {
-            const uint64_t current = (uint64_t)progress.st_size;
-            if (current != downloaded_bytes) {
-                downloaded_bytes = current;
-                (void)write_status(
-                    platform_id, request_id,
-                    iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_DOWNLOADING,
-                    "downloading firmware", downloaded_bytes, request->size_bytes);
-            }
-        }
-        usleep(500000U);
-        do {
-            waited = waitpid(downloader, &download_status, WNOHANG);
-        } while (waited < 0 && errno == EINTR);
-    }
-    const bool download_timed_out = waited == 0;
-    if (download_timed_out) {
-        (void)kill(-downloader, SIGKILL);
-        (void)kill(downloader, SIGKILL);
-        do {
-            waited = waitpid(downloader, &download_status, 0);
-        } while (waited < 0 && errno == EINTR);
-    }
-    if (downloader < 0 || waited != downloader || !WIFEXITED(download_status) ||
-        WEXITSTATUS(download_status) != 0) {
-        (void)write_status(platform_id, request_id,
-                           iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED,
-                           download_timed_out ? "firmware download timed out"
-                                              : "firmware download failed",
-                           downloaded_bytes, request->size_bytes);
-        _exit(1);
-    }
     struct stat info;
     if (stat(FIRMWARE_IMAGE, &info) != 0 || info.st_size < 0 ||
         (uint64_t)info.st_size != request->size_bytes) {
         (void)write_status(platform_id, request_id,
                            iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED,
-                           "firmware size mismatch", downloaded_bytes,
+                           "firmware size mismatch", request->size_bytes,
                            request->size_bytes);
         unlink(FIRMWARE_IMAGE);
+        close(lock_fd);
         _exit(1);
     }
     (void)write_status(platform_id, request_id,
@@ -323,9 +288,20 @@ bool edge_firmware_start(const uint8_t platform_id[16],
                          char *error, size_t error_size) {
     if (platform_id == NULL || request == NULL || request->request_id.size != 16U ||
         request->sha256.size != 32U || request->size_bytes == 0U ||
-        request->size_bytes > 128U * 1024U * 1024U ||
-        !edge_url_valid_http_resource(request->download_url)) {
+        request->size_bytes > FIRMWARE_MAX_SIZE || request->download_url[0] != '\0') {
         set_error(error, error_size, "firmware request is invalid");
+        return false;
+    }
+    if (transfer.active) {
+        if (memcmp(transfer.platform_id, platform_id, 16U) == 0 &&
+            memcmp(transfer.request.request_id.bytes, request->request_id.bytes, 16U) == 0 &&
+            memcmp(transfer.request.sha256.bytes, request->sha256.bytes, 32U) == 0 &&
+            transfer.request.size_bytes == request->size_bytes &&
+            transfer.request.keep_settings == request->keep_settings) {
+            set_error(error, error_size, "firmware WS transfer resumed");
+            return true;
+        }
+        set_error(error, error_size, "another firmware update is active");
         return false;
     }
     const int lock = open(FIRMWARE_LOCK, O_WRONLY | O_CREAT, 0600);
@@ -335,19 +311,170 @@ bool edge_firmware_start(const uint8_t platform_id[16],
         set_error(error, error_size, "another firmware update is active");
         return false;
     }
-    const int worker = edge_process_detach();
-    if (worker < 0) {
+    unlink(FIRMWARE_IMAGE);
+    const int image = open(FIRMWARE_IMAGE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (image < 0) {
+        (void)flock(lock, LOCK_UN);
         close(lock);
-        unlink(FIRMWARE_LOCK);
-        set_error(error, error_size, "cannot start firmware worker");
+        set_error(error, error_size, "cannot create firmware image");
         return false;
     }
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.active = true;
+    transfer.image_fd = image;
+    transfer.lock_fd = lock;
+    memcpy(transfer.platform_id, platform_id, 16U);
+    transfer.request = *request;
+    transfer.last_progress_ms = monotonic_milliseconds();
+    if (!write_status(platform_id, request->request_id.bytes,
+                      iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_DOWNLOADING,
+                      "receiving firmware over WebSocket", 0U, request->size_bytes)) {
+        close(image);
+        (void)flock(lock, LOCK_UN);
+        close(lock);
+        unlink(FIRMWARE_IMAGE);
+        memset(&transfer, 0, sizeof(transfer));
+        transfer.image_fd = -1;
+        transfer.lock_fd = -1;
+        set_error(error, error_size, "cannot persist firmware transfer state");
+        return false;
+    }
+    set_error(error, error_size, "firmware WS transfer initialized");
+    return true;
+}
+
+static void clear_transfer(bool remove_image) {
+    if (transfer.image_fd >= 0)
+        close(transfer.image_fd);
+    if (transfer.lock_fd >= 0) {
+        (void)flock(transfer.lock_fd, LOCK_UN);
+        close(transfer.lock_fd);
+    }
+    if (remove_image)
+        unlink(FIRMWARE_IMAGE);
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.image_fd = -1;
+    transfer.lock_fd = -1;
+}
+
+static edge_firmware_chunk_result fail_transfer(const char *message,
+                                                char *error,
+                                                size_t error_size) {
+    if (transfer.active) {
+        (void)write_status(
+            transfer.platform_id, transfer.request.request_id.bytes,
+            iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED,
+            message, transfer.offset, transfer.request.size_bytes);
+    }
+    set_error(error, error_size, message);
+    clear_transfer(true);
+    return EDGE_FIRMWARE_CHUNK_FAILED;
+}
+
+bool edge_firmware_receiving(const uint8_t platform_id[16]) {
+    return platform_id != NULL && transfer.active &&
+           memcmp(transfer.platform_id, platform_id, 16U) == 0;
+}
+
+bool edge_firmware_chunk_request(const uint8_t platform_id[16],
+                                 iot_edge_v1_FirmwareChunkRequest *request,
+                                 bool force) {
+    if (!edge_firmware_receiving(platform_id) || request == NULL)
+        return false;
+    const uint64_t now = monotonic_milliseconds();
+    if (now != 0U && transfer.last_progress_ms != 0U &&
+        now >= transfer.last_progress_ms &&
+        now - transfer.last_progress_ms >= FIRMWARE_TRANSFER_TIMEOUT_MS) {
+        (void)fail_transfer("firmware WS transfer timed out", NULL, 0U);
+        return false;
+    }
+    if (!force && transfer.last_request_ms != 0U && now >= transfer.last_request_ms &&
+        now - transfer.last_request_ms < FIRMWARE_CHUNK_RETRY_MS)
+        return false;
+    memset(request, 0, sizeof(*request));
+    request->request_id.size = 16U;
+    memcpy(request->request_id.bytes, transfer.request.request_id.bytes, 16U);
+    request->offset = transfer.offset;
+    transfer.last_request_ms = now;
+    return true;
+}
+
+edge_firmware_chunk_result edge_firmware_receive_chunk(
+    const uint8_t platform_id[16], const iot_edge_v1_FirmwareChunk *chunk,
+    char *error, size_t error_size) {
+    if (!edge_firmware_receiving(platform_id)) {
+        set_error(error, error_size, "no firmware WS transfer is receiving");
+        return EDGE_FIRMWARE_CHUNK_FAILED;
+    }
+    if (chunk == NULL || chunk->request_id.size != 16U ||
+        memcmp(chunk->request_id.bytes, transfer.request.request_id.bytes, 16U) != 0)
+        return fail_transfer("firmware WS chunk identity mismatch", error, error_size);
+    if (chunk->error[0] != '\0')
+        return fail_transfer(chunk->error, error, error_size);
+    const edge_firmware_stream_decision decision = edge_firmware_stream_evaluate(
+        transfer.offset, transfer.request.size_bytes, chunk->offset,
+        chunk->data.size, sizeof(chunk->data.bytes), chunk->eof);
+    if (decision == EDGE_FIRMWARE_STREAM_INVALID)
+        return fail_transfer("firmware WS chunk bounds are invalid", error, error_size);
+    if (decision == EDGE_FIRMWARE_STREAM_DUPLICATE) {
+        set_error(error, error_size, "duplicate firmware WS chunk ignored");
+        return EDGE_FIRMWARE_CHUNK_NEXT;
+    }
+    if (decision == EDGE_FIRMWARE_STREAM_GAP) {
+        set_error(error, error_size, "firmware WS chunk gap; retrying");
+        return EDGE_FIRMWARE_CHUNK_NEXT;
+    }
+    const uint64_t next_offset = transfer.offset + chunk->data.size;
+
+    size_t written_total = 0U;
+    while (written_total < chunk->data.size) {
+        const ssize_t written = pwrite(
+            transfer.image_fd, chunk->data.bytes + written_total,
+            chunk->data.size - written_total,
+            (off_t)(transfer.offset + written_total));
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0)
+            return fail_transfer("cannot write firmware WS chunk", error, error_size);
+        written_total += (size_t)written;
+    }
+    transfer.offset = next_offset;
+    transfer.last_progress_ms = monotonic_milliseconds();
+    (void)write_status(
+        transfer.platform_id, transfer.request.request_id.bytes,
+        iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_DOWNLOADING,
+        "receiving firmware over WebSocket", transfer.offset,
+        transfer.request.size_bytes);
+    if (decision == EDGE_FIRMWARE_STREAM_ACCEPT) {
+        set_error(error, error_size, "firmware WS chunk accepted");
+        return EDGE_FIRMWARE_CHUNK_NEXT;
+    }
+    if (fsync(transfer.image_fd) != 0)
+        return fail_transfer("cannot flush firmware image", error, error_size);
+    close(transfer.image_fd);
+    transfer.image_fd = -1;
+    (void)write_status(
+        transfer.platform_id, transfer.request.request_id.bytes,
+        iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_VERIFYING,
+        "verifying firmware sha256", transfer.offset, transfer.request.size_bytes);
+
+    const int lock = transfer.lock_fd;
+    const iot_edge_v1_FirmwareUpdateRequest request = transfer.request;
+    uint8_t worker_platform_id[16];
+    memcpy(worker_platform_id, transfer.platform_id, sizeof(worker_platform_id));
+    const int worker = edge_process_detach();
+    if (worker < 0)
+        return fail_transfer("cannot start firmware verification worker", error, error_size);
     if (worker == 0) {
         edge_process_close_inherited_fds(lock);
-        firmware_child(platform_id, request, lock);
+        firmware_child(worker_platform_id, &request, lock);
     }
     close(lock);
-    return true;
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.image_fd = -1;
+    transfer.lock_fd = -1;
+    set_error(error, error_size, "firmware WS transfer completed");
+    return EDGE_FIRMWARE_CHUNK_COMPLETE;
 }
 
 bool edge_firmware_read_status(const uint8_t platform_id[16],
@@ -377,6 +504,8 @@ bool edge_firmware_read_status(const uint8_t platform_id[16],
 }
 
 bool edge_firmware_active(void) {
+    if (transfer.active)
+        return true;
     const int lock = open(FIRMWARE_LOCK, O_WRONLY | O_CREAT, 0600);
     if (lock < 0)
         return true;

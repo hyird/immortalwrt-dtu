@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-edgenode
-PKG_VERSION:=1.0
+PKG_VERSION:=1.1
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 PKGARCH:=all
@@ -23,7 +23,7 @@ define Package/luci-app-edgenode
 endef
 
 define Package/luci-app-edgenode/description
- LuCI configuration interface for EdgeNode.
+ LuCI configuration and runtime status interface for EdgeNode.
 endef
 
 define Build/Compile
@@ -39,6 +39,9 @@ define Package/luci-app-edgenode/install
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-edgenode.json \
 		$(1)/usr/share/rpcd/acl.d/luci-app-edgenode.json
+	$(INSTALL_DIR) $(1)/usr/share/rpcd/ucode
+	$(INSTALL_BIN) ./root/usr/share/rpcd/ucode/luci.edgenode \
+		$(1)/usr/share/rpcd/ucode/luci.edgenode
 endef
 
 $(eval $(call BuildPackage,luci-app-edgenode))

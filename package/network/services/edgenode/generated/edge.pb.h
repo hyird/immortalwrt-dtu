@@ -169,6 +169,7 @@ typedef struct _iot_edge_v1_Hello {
     bool supports_modem_control;
     bool supports_logs;
     char log_level[9];
+    bool supports_firmware_stream;
 } iot_edge_v1_Hello;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_HelloAck_assigned_node_id_t;
@@ -632,6 +633,22 @@ typedef struct _iot_edge_v1_FirmwareUpdateResult {
     uint32_t progress_percent;
 } iot_edge_v1_FirmwareUpdateResult;
 
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_FirmwareChunkRequest_request_id_t;
+typedef struct _iot_edge_v1_FirmwareChunkRequest {
+    iot_edge_v1_FirmwareChunkRequest_request_id_t request_id;
+    uint64_t offset;
+} iot_edge_v1_FirmwareChunkRequest;
+
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_FirmwareChunk_request_id_t;
+typedef PB_BYTES_ARRAY_T(8192) iot_edge_v1_FirmwareChunk_data_t;
+typedef struct _iot_edge_v1_FirmwareChunk {
+    iot_edge_v1_FirmwareChunk_request_id_t request_id;
+    uint64_t offset;
+    iot_edge_v1_FirmwareChunk_data_t data;
+    bool eof;
+    char error[129];
+} iot_edge_v1_FirmwareChunk;
+
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_ModemControlRequest_request_id_t;
 typedef struct _iot_edge_v1_ModemControlRequest {
     iot_edge_v1_ModemControlRequest_request_id_t request_id;
@@ -827,6 +844,8 @@ typedef struct _iot_edge_v1_Envelope {
         iot_edge_v1_LogLevelResult log_level_result;
         iot_edge_v1_TerminalOpened terminal_opened;
         iot_edge_v1_TerminalDataAck terminal_data_ack;
+        iot_edge_v1_FirmwareChunkRequest firmware_chunk_request;
+        iot_edge_v1_FirmwareChunk firmware_chunk;
         iot_edge_v1_Ping ping;
         iot_edge_v1_Pong pong;
         iot_edge_v1_Error error;
@@ -957,6 +976,8 @@ extern "C" {
 
 #define iot_edge_v1_FirmwareUpdateResult_state_ENUMTYPE iot_edge_v1_FirmwareUpdateState
 
+
+
 #define iot_edge_v1_ModemControlRequest_action_ENUMTYPE iot_edge_v1_ModemControlAction
 #define iot_edge_v1_ModemControlRequest_pdp_type_ENUMTYPE iot_edge_v1_ModemPdpType
 #define iot_edge_v1_ModemControlRequest_auth_type_ENUMTYPE iot_edge_v1_ModemAuthType
@@ -985,7 +1006,7 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define iot_edge_v1_Empty_init_default           {0}
-#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, ""}
+#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0}
 #define iot_edge_v1_HelloAck_init_default        {{0, {0}}, 0, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_default {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_default {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1027,6 +1048,8 @@ extern "C" {
 #define iot_edge_v1_NetworkConfigResult_init_default {{0, {0}}, 0, 0, ""}
 #define iot_edge_v1_FirmwareUpdateRequest_init_default {{0, {0}}, "", {0, {0}}, 0, "", 0}
 #define iot_edge_v1_FirmwareUpdateResult_init_default {{0, {0}}, _iot_edge_v1_FirmwareUpdateState_MIN, "", 0, 0, 0}
+#define iot_edge_v1_FirmwareChunkRequest_init_default {{0, {0}}, 0}
+#define iot_edge_v1_FirmwareChunk_init_default   {{0, {0}}, 0, {0, {0}}, 0, ""}
 #define iot_edge_v1_ModemControlRequest_init_default {{0, {0}}, _iot_edge_v1_ModemControlAction_MIN, "", 0, "", "", _iot_edge_v1_ModemPdpType_MIN, _iot_edge_v1_ModemAuthType_MIN, "", 0}
 #define iot_edge_v1_ModemControlResult_init_default {{0, {0}}, _iot_edge_v1_ModemControlAction_MIN, _iot_edge_v1_ModemControlState_MIN, "", ""}
 #define iot_edge_v1_PlatformConfigRequest_init_default {{0, {0}}, _iot_edge_v1_PlatformConfigOperation_MIN, {0, {0}}, "", "", 0, 0, 0, 0}
@@ -1047,7 +1070,7 @@ extern "C" {
 #define iot_edge_v1_Error_init_default           {"", "", 0}
 #define iot_edge_v1_Envelope_init_default        {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, 0, {iot_edge_v1_Hello_init_default}}
 #define iot_edge_v1_Empty_init_zero              {0}
-#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, ""}
+#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0}
 #define iot_edge_v1_HelloAck_init_zero           {{0, {0}}, 0, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_zero   {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_zero {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1089,6 +1112,8 @@ extern "C" {
 #define iot_edge_v1_NetworkConfigResult_init_zero {{0, {0}}, 0, 0, ""}
 #define iot_edge_v1_FirmwareUpdateRequest_init_zero {{0, {0}}, "", {0, {0}}, 0, "", 0}
 #define iot_edge_v1_FirmwareUpdateResult_init_zero {{0, {0}}, _iot_edge_v1_FirmwareUpdateState_MIN, "", 0, 0, 0}
+#define iot_edge_v1_FirmwareChunkRequest_init_zero {{0, {0}}, 0}
+#define iot_edge_v1_FirmwareChunk_init_zero      {{0, {0}}, 0, {0, {0}}, 0, ""}
 #define iot_edge_v1_ModemControlRequest_init_zero {{0, {0}}, _iot_edge_v1_ModemControlAction_MIN, "", 0, "", "", _iot_edge_v1_ModemPdpType_MIN, _iot_edge_v1_ModemAuthType_MIN, "", 0}
 #define iot_edge_v1_ModemControlResult_init_zero {{0, {0}}, _iot_edge_v1_ModemControlAction_MIN, _iot_edge_v1_ModemControlState_MIN, "", ""}
 #define iot_edge_v1_PlatformConfigRequest_init_zero {{0, {0}}, _iot_edge_v1_PlatformConfigOperation_MIN, {0, {0}}, "", "", 0, 0, 0, 0}
@@ -1142,6 +1167,7 @@ extern "C" {
 #define iot_edge_v1_Hello_supports_modem_control_tag 31
 #define iot_edge_v1_Hello_supports_logs_tag      32
 #define iot_edge_v1_Hello_log_level_tag          33
+#define iot_edge_v1_Hello_supports_firmware_stream_tag 34
 #define iot_edge_v1_HelloAck_assigned_node_id_tag 1
 #define iot_edge_v1_HelloAck_session_epoch_tag   2
 #define iot_edge_v1_HelloAck_negotiated_protocol_version_tag 3
@@ -1410,6 +1436,13 @@ extern "C" {
 #define iot_edge_v1_FirmwareUpdateResult_downloaded_bytes_tag 4
 #define iot_edge_v1_FirmwareUpdateResult_total_bytes_tag 5
 #define iot_edge_v1_FirmwareUpdateResult_progress_percent_tag 6
+#define iot_edge_v1_FirmwareChunkRequest_request_id_tag 1
+#define iot_edge_v1_FirmwareChunkRequest_offset_tag 2
+#define iot_edge_v1_FirmwareChunk_request_id_tag 1
+#define iot_edge_v1_FirmwareChunk_offset_tag     2
+#define iot_edge_v1_FirmwareChunk_data_tag       3
+#define iot_edge_v1_FirmwareChunk_eof_tag        4
+#define iot_edge_v1_FirmwareChunk_error_tag      5
 #define iot_edge_v1_ModemControlRequest_request_id_tag 1
 #define iot_edge_v1_ModemControlRequest_action_tag 2
 #define iot_edge_v1_ModemControlRequest_apn_tag  3
@@ -1525,6 +1558,8 @@ extern "C" {
 #define iot_edge_v1_Envelope_log_level_result_tag 75
 #define iot_edge_v1_Envelope_terminal_opened_tag 76
 #define iot_edge_v1_Envelope_terminal_data_ack_tag 77
+#define iot_edge_v1_Envelope_firmware_chunk_request_tag 78
+#define iot_edge_v1_Envelope_firmware_chunk_tag  79
 #define iot_edge_v1_Envelope_ping_tag            80
 #define iot_edge_v1_Envelope_pong_tag            81
 #define iot_edge_v1_Envelope_error_tag           90
@@ -1567,7 +1602,8 @@ X(a, STATIC,   SINGULAR, BOOL,     mobile_connected,  29) \
 X(a, STATIC,   SINGULAR, STRING,   mobile_ipv4,      30) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_modem_control,  31) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_logs,    32) \
-X(a, STATIC,   SINGULAR, STRING,   log_level,        33)
+X(a, STATIC,   SINGULAR, STRING,   log_level,        33) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_firmware_stream,  34)
 #define iot_edge_v1_Hello_CALLBACK NULL
 #define iot_edge_v1_Hello_DEFAULT NULL
 
@@ -2022,6 +2058,21 @@ X(a, STATIC,   SINGULAR, UINT32,   progress_percent,   6)
 #define iot_edge_v1_FirmwareUpdateResult_CALLBACK NULL
 #define iot_edge_v1_FirmwareUpdateResult_DEFAULT NULL
 
+#define iot_edge_v1_FirmwareChunkRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
+X(a, STATIC,   SINGULAR, UINT64,   offset,            2)
+#define iot_edge_v1_FirmwareChunkRequest_CALLBACK NULL
+#define iot_edge_v1_FirmwareChunkRequest_DEFAULT NULL
+
+#define iot_edge_v1_FirmwareChunk_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
+X(a, STATIC,   SINGULAR, UINT64,   offset,            2) \
+X(a, STATIC,   SINGULAR, BYTES,    data,              3) \
+X(a, STATIC,   SINGULAR, BOOL,     eof,               4) \
+X(a, STATIC,   SINGULAR, STRING,   error,             5)
+#define iot_edge_v1_FirmwareChunk_CALLBACK NULL
+#define iot_edge_v1_FirmwareChunk_DEFAULT NULL
+
 #define iot_edge_v1_ModemControlRequest_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
 X(a, STATIC,   SINGULAR, UENUM,    action,            2) \
@@ -2211,6 +2262,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,log_level_request,payload.log_level_
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,log_level_result,payload.log_level_result),  75) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,terminal_opened,payload.terminal_opened),  76) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,terminal_data_ack,payload.terminal_data_ack),  77) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,firmware_chunk_request,payload.firmware_chunk_request),  78) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,firmware_chunk,payload.firmware_chunk),  79) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,ping,payload.ping),  80) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,pong,payload.pong),  81) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,error,payload.error),  90)
@@ -2256,6 +2309,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,error,payload.error),  90)
 #define iot_edge_v1_Envelope_payload_log_level_result_MSGTYPE iot_edge_v1_LogLevelResult
 #define iot_edge_v1_Envelope_payload_terminal_opened_MSGTYPE iot_edge_v1_TerminalOpened
 #define iot_edge_v1_Envelope_payload_terminal_data_ack_MSGTYPE iot_edge_v1_TerminalDataAck
+#define iot_edge_v1_Envelope_payload_firmware_chunk_request_MSGTYPE iot_edge_v1_FirmwareChunkRequest
+#define iot_edge_v1_Envelope_payload_firmware_chunk_MSGTYPE iot_edge_v1_FirmwareChunk
 #define iot_edge_v1_Envelope_payload_ping_MSGTYPE iot_edge_v1_Ping
 #define iot_edge_v1_Envelope_payload_pong_MSGTYPE iot_edge_v1_Pong
 #define iot_edge_v1_Envelope_payload_error_MSGTYPE iot_edge_v1_Error
@@ -2303,6 +2358,8 @@ extern const pb_msgdesc_t iot_edge_v1_NetworkConfigRequest_msg;
 extern const pb_msgdesc_t iot_edge_v1_NetworkConfigResult_msg;
 extern const pb_msgdesc_t iot_edge_v1_FirmwareUpdateRequest_msg;
 extern const pb_msgdesc_t iot_edge_v1_FirmwareUpdateResult_msg;
+extern const pb_msgdesc_t iot_edge_v1_FirmwareChunkRequest_msg;
+extern const pb_msgdesc_t iot_edge_v1_FirmwareChunk_msg;
 extern const pb_msgdesc_t iot_edge_v1_ModemControlRequest_msg;
 extern const pb_msgdesc_t iot_edge_v1_ModemControlResult_msg;
 extern const pb_msgdesc_t iot_edge_v1_PlatformConfigRequest_msg;
@@ -2367,6 +2424,8 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_NetworkConfigResult_fields &iot_edge_v1_NetworkConfigResult_msg
 #define iot_edge_v1_FirmwareUpdateRequest_fields &iot_edge_v1_FirmwareUpdateRequest_msg
 #define iot_edge_v1_FirmwareUpdateResult_fields &iot_edge_v1_FirmwareUpdateResult_msg
+#define iot_edge_v1_FirmwareChunkRequest_fields &iot_edge_v1_FirmwareChunkRequest_msg
+#define iot_edge_v1_FirmwareChunk_fields &iot_edge_v1_FirmwareChunk_msg
 #define iot_edge_v1_ModemControlRequest_fields &iot_edge_v1_ModemControlRequest_msg
 #define iot_edge_v1_ModemControlResult_fields &iot_edge_v1_ModemControlResult_msg
 #define iot_edge_v1_PlatformConfigRequest_fields &iot_edge_v1_PlatformConfigRequest_msg
@@ -2409,12 +2468,14 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_Envelope_size                13241
 #define iot_edge_v1_Error_size                   311
 #define iot_edge_v1_EventReport_size             807
+#define iot_edge_v1_FirmwareChunkRequest_size    29
+#define iot_edge_v1_FirmwareChunk_size           8357
 #define iot_edge_v1_FirmwareUpdateRequest_size   646
 #define iot_edge_v1_FirmwareUpdateResult_size    307
 #define iot_edge_v1_HeartbeatAck_size            15
 #define iot_edge_v1_Heartbeat_size               355
 #define iot_edge_v1_HelloAck_size                58
-#define iot_edge_v1_Hello_size                   712
+#define iot_edge_v1_Hello_size                   715
 #define iot_edge_v1_InterfaceCapability_size     424
 #define iot_edge_v1_LogLevelRequest_size         28
 #define iot_edge_v1_LogLevelResult_size          128

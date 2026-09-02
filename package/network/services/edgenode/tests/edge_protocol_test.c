@@ -35,6 +35,8 @@ static void test_hello_round_trip(void) {
     envelope.payload.hello.supported_protocol_versions_count = 1U;
     envelope.payload.hello.supported_protocol_versions[0] =
         EDGENODE_PROTOCOL_VERSION;
+    envelope.payload.hello.supports_firmware_update = true;
+    envelope.payload.hello.supports_firmware_stream = true;
     strcpy(envelope.payload.hello.iccid, "89860012345678901234");
     envelope.payload.hello.signal_csq = 23U;
     envelope.payload.hello.signal_rssi_dbm = -67;
@@ -68,6 +70,9 @@ static void test_hello_round_trip(void) {
                 decoded.payload.hello.supported_protocol_versions[0] ==
                     EDGENODE_PROTOCOL_VERSION,
             "supported protocol advertisement changed during round trip");
+    require(decoded.payload.hello.supports_firmware_update &&
+                decoded.payload.hello.supports_firmware_stream,
+            "firmware WS capability changed during round trip");
     require(decoded.message_id.size == 16U && (decoded.message_id.bytes[6] >> 4U) == 7U,
             "message id is not UUIDv7");
     require((decoded.message_id.bytes[8] & 0xc0U) == 0x80U, "bad UUID variant");
@@ -319,17 +324,50 @@ static void test_reject_text_or_oversized_input(void) {
             "oversized WebSocket body was accepted");
 }
 
+static void test_firmware_chunk_round_trip(void) {
+    iot_edge_v1_Envelope envelope = iot_edge_v1_Envelope_init_zero;
+    uint8_t platform_id[16] = {1U};
+    uint8_t random[10] = {2U};
+    require(edge_protocol_init_envelope(&envelope, platform_id, NULL, 0U, 1U,
+                                        1, random),
+            "firmware chunk envelope setup failed");
+    envelope.which_payload = iot_edge_v1_Envelope_firmware_chunk_tag;
+    iot_edge_v1_FirmwareChunk *chunk = &envelope.payload.firmware_chunk;
+    chunk->request_id.size = 16U;
+    memset(chunk->request_id.bytes, 3, chunk->request_id.size);
+    chunk->offset = 4096U;
+    chunk->data.size = 8192U;
+    memset(chunk->data.bytes, 0x5a, chunk->data.size);
+    chunk->eof = true;
+
+    uint8_t encoded[EDGENODE_MAX_WS_MESSAGE];
+    size_t encoded_size = 0U;
+    const char *error = NULL;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded),
+                                 &encoded_size, &error),
+            error != NULL ? error : "firmware chunk encode failed");
+    iot_edge_v1_Envelope decoded;
+    require(edge_protocol_decode(encoded, encoded_size, &decoded, &error),
+            error != NULL ? error : "firmware chunk decode failed");
+    require(decoded.which_payload == iot_edge_v1_Envelope_firmware_chunk_tag &&
+                decoded.payload.firmware_chunk.offset == 4096U &&
+                decoded.payload.firmware_chunk.data.size == 8192U &&
+                decoded.payload.firmware_chunk.eof,
+            "firmware WS chunk changed during round trip");
+}
+
 int main(void) {
     test_imei();
     test_hello_round_trip();
     test_heartbeat_mobile_state_round_trip();
-    require(EDGENODE_PROTOCOL_VERSION == 5U,
-            "terminal flow control did not advance the wire protocol");
+    require(EDGENODE_PROTOCOL_VERSION == 6U,
+            "firmware streaming did not advance the wire protocol");
     test_terminal_opened_round_trip();
     test_terminal_flow_control_round_trip();
     test_modem_profile_round_trip();
     test_cpp_protobuf_wire_contract();
     test_cpp_protobuf_config_digest_contract();
+    test_firmware_chunk_round_trip();
     test_reject_text_or_oversized_input();
     puts("edge protocol tests passed");
     return 0;

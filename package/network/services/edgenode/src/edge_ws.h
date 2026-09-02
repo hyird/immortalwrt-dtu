@@ -48,6 +48,8 @@ typedef struct {
     edge_spool spool;
     edge_runtime_config runtime_config;
     uint64_t sequence;
+    uint64_t last_heartbeat_ms;
+    uint64_t last_inbound_ms;
     uint64_t terminal_output_sequence;
     uint64_t terminal_output_acked_sequence;
     uint64_t terminal_output_deadline_ms;
@@ -71,6 +73,7 @@ struct edge_ws_app {
     struct ev_loop *loop;
     const edge_app_config *config;
     struct ev_timer acquisition_timer;
+    struct ev_timer status_timer;
     struct ev_io acquisition_io;
     edge_acquisition *acquisition;
     edge_ws_session sessions[EDGE_MAX_PLATFORMS];

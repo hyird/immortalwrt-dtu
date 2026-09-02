@@ -7,11 +7,16 @@
   LuCI application under `package/luci-app-edgenode`.
 - Track the official ImmortalWrt `packages` and `luci` master feeds directly;
   do not add private feed forks or duplicate EdgeNode packages in a feed.
-- Preserve compatibility with the deployed EdgeNode protocol unless a protocol
-  migration and server compatibility path are implemented and tested together.
-- Preserve both HTTP/WS and HTTPS/WSS platform connectivity. An HTTP platform
-  must also accept HTTP firmware download URLs; keep HTTPS certificate-policy
-  changes separate unless they are explicitly requested and tested.
+- Every EdgeNode change must remain backward compatible with deployed firmware,
+  including protocol messages, platform APIs, configuration, tasks, and upgrade
+  transport. Do not remove an old path until a tested migration and compatibility
+  window have been provided and the user has explicitly approved the break.
+- Preserve both HTTP/WS and HTTPS/WSS platform connectivity. Firmware bytes
+  for new EdgeNode builds must travel through the authenticated platform
+  WebSocket with bounded chunks and backpressure. The platform must retain its
+  tokenized direct-download path for legacy firmware that does not advertise WS
+  firmware streaming. Keep HTTPS certificate-policy changes separate unless
+  they are explicitly requested and tested.
 - Keep each platform's session, configuration, and outbox isolated, while one
   application-level acquisition scheduler serializes shared physical I/O.
   Serial settings are selected per task, and TCP Server listeners are shared

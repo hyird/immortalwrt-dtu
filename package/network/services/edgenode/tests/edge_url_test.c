@@ -45,27 +45,9 @@ static void test_platform_transport(void) {
                  "HTTPS platform did not map to WSS");
 }
 
-static void test_firmware_resource(void) {
-    require_true(edge_url_valid_http_resource(
-                     "http://8.160.189.44:3000/edge/v1/firmware/1/download?token=x"),
-                 "HTTP firmware URL was rejected");
-    require_true(edge_url_valid_http_resource(
-                     "https://i.a-z.xin/edge/v1/firmware/1/download?token=x"),
-                 "HTTPS firmware URL was rejected");
-    require_true(!edge_url_valid_http_resource("ftp://edge.local/firmware.bin"),
-                 "unsupported firmware URL scheme was accepted");
-    require_true(!edge_url_valid_http_resource("http:///firmware.bin"),
-                 "firmware URL without a host was accepted");
-    require_true(!edge_url_valid_http_resource("http://user@edge.local/file"),
-                 "firmware URL credentials were accepted");
-    require_true(!edge_url_valid_http_resource("http://edge.local/file bad"),
-                 "firmware URL whitespace was accepted");
-}
-
 int main(void) {
     test_platform_base();
     test_platform_transport();
-    test_firmware_resource();
     puts("edge URL tests passed");
     return 0;
 }

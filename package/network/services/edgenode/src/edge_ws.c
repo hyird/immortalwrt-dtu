@@ -1,6 +1,7 @@
 #include "edge_ws.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -23,11 +24,12 @@
 #include "edge_network.h"
 #include "edge_process.h"
 #include "edge_sha256.h"
+#include "edge_status.h"
 #include "edge_terminal.h"
 #include "edge_url.h"
 #include "log.h"
 
-#define EDGE_SOFTWARE_VERSION "0.3.29"
+#define EDGE_SOFTWARE_VERSION "0.3.30"
 #define EDGE_OUTBOX_WINDOW 16U
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
@@ -100,6 +102,10 @@ static edge_ws_app *app_from_acquisition(struct ev_timer *timer) {
     return (edge_ws_app *)((uint8_t *)timer - offsetof(edge_ws_app, acquisition_timer));
 }
 
+static edge_ws_app *app_from_status(struct ev_timer *timer) {
+    return (edge_ws_app *)((uint8_t *)timer - offsetof(edge_ws_app, status_timer));
+}
+
 static edge_ws_app *app_from_acquisition_io(struct ev_io *watcher) {
     return (edge_ws_app *)((uint8_t *)watcher - offsetof(edge_ws_app, acquisition_io));
 }
@@ -112,6 +118,81 @@ static edge_ws_session *session_for_platform(edge_ws_app *app,
         if (memcmp(app->sessions[index].config->id, platform_id, 16U) == 0)
             return &app->sessions[index];
     return NULL;
+}
+
+static const char *command_state_name(iot_edge_v1_CommandState state) {
+    switch (state) {
+    case iot_edge_v1_CommandState_COMMAND_STATE_ACCEPTED:
+        return "accepted";
+    case iot_edge_v1_CommandState_COMMAND_STATE_RUNNING:
+        return "running";
+    case iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED:
+        return "succeeded";
+    case iot_edge_v1_CommandState_COMMAND_STATE_READBACK_MISMATCH:
+        return "readback-mismatch";
+    case iot_edge_v1_CommandState_COMMAND_STATE_DEVICE_OFFLINE:
+        return "device-offline";
+    case iot_edge_v1_CommandState_COMMAND_STATE_TIMED_OUT:
+        return "timed-out";
+    case iot_edge_v1_CommandState_COMMAND_STATE_REJECTED:
+        return "rejected";
+    case iot_edge_v1_CommandState_COMMAND_STATE_FAILED:
+        return "failed";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *modem_state_name(iot_edge_v1_ModemControlState state) {
+    switch (state) {
+    case iot_edge_v1_ModemControlState_MODEM_CONTROL_ACCEPTED:
+        return "accepted";
+    case iot_edge_v1_ModemControlState_MODEM_CONTROL_RUNNING:
+        return "running";
+    case iot_edge_v1_ModemControlState_MODEM_CONTROL_SUCCEEDED:
+        return "succeeded";
+    case iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED:
+        return "failed";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *firmware_state_name(iot_edge_v1_FirmwareUpdateState state) {
+    switch (state) {
+    case iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_ACCEPTED:
+        return "accepted";
+    case iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_DOWNLOADING:
+        return "receiving";
+    case iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_VERIFYING:
+        return "verifying";
+    case iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FLASHING:
+        return "flashing";
+    case iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED:
+        return "failed";
+    default:
+        return "unknown";
+    }
+}
+
+static void log_uuid_task(const edge_ws_session *session, const char *type,
+                          const uint8_t id[16], const char *state,
+                          const char *summary) {
+    char uuid[37];
+    edge_config_format_uuid(id, uuid);
+    char detail[257];
+    snprintf(detail, sizeof(detail),
+             "platform=%s id=%s state=%s %s",
+             session->config->name, uuid, state != NULL ? state : "unknown",
+             summary != NULL ? summary : "");
+    edge_log_write(
+        state != NULL &&
+                (strcmp(state, "failed") == 0 || strcmp(state, "rejected") == 0 ||
+                 strcmp(state, "timed-out") == 0 ||
+                 strcmp(state, "readback-mismatch") == 0)
+            ? "warn"
+            : "info",
+        "task", type, detail);
 }
 
 static void sync_acquisition_io(edge_ws_app *app) {
@@ -216,6 +297,11 @@ static bool acquisition_command_result(void *context,
         return false;
     uint8_t command_id[16];
     memcpy(command_id, result->command_id.bytes, sizeof(command_id));
+    char summary[160];
+    snprintf(summary, sizeof(summary), "actualValues=%u message=%s",
+             (unsigned)result->actual_values_count, result->message);
+    log_uuid_task(session, "device-command", command_id,
+                  command_state_name(result->state), summary);
     iot_edge_v1_Envelope *envelope = &session->app->envelope;
     if (!init_envelope(session, envelope))
         return false;
@@ -277,6 +363,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_network_config = true;
     hello->supports_terminal = edge_capability_has_terminal();
     hello->supports_firmware_update = true;
+    hello->supports_firmware_stream = true;
     hello->supports_device_config = true;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -533,6 +620,15 @@ static void send_config_result(edge_ws_session *session, uint64_t revision,
                   sizeof(out->payload.config_rejected.message), message);
     }
     send_envelope(session, out);
+    char detail[257];
+    snprintf(detail, sizeof(detail),
+             "platform=%s revision=%" PRIu64 " state=%s endpoints=%u devices=%u message=%s",
+             session->config->name, revision, applied ? "applied" : "rejected",
+             session->runtime_config.endpoint_count,
+             session->runtime_config.device_count,
+             applied ? "configuration active" : (message != NULL ? message : ""));
+    edge_log_write(applied ? "info" : "warn", "task",
+                   "acquisition-config", detail);
 }
 
 static size_t build_acquisition_sources(
@@ -655,8 +751,19 @@ static void handle_device_command(edge_ws_session *session,
     char error[257] = {0};
     if (edge_acquisition_command_for_platform(session->app->acquisition,
                                               session->config->id, request,
-                                              error, sizeof(error)))
+                                              error, sizeof(error))) {
+        char device_uuid[37];
+        edge_config_format_uuid(device_id, device_uuid);
+        char summary[160];
+        snprintf(summary, sizeof(summary),
+                 "device=%s values=%u timeoutMs=%u readback=%u fastRead=%u/%u",
+                 device_uuid, (unsigned)request->values_count,
+                 request->timeout_ms, request->readback_count,
+                 request->fast_read_duration_sec,
+                 request->fast_read_interval_sec);
+        log_uuid_task(session, "device-command", command_id, "accepted", summary);
         return;
+    }
     iot_edge_v1_CommandResult result = iot_edge_v1_CommandResult_init_zero;
     edge_protocol_set_bytes(&result.command_id, sizeof(result.command_id.bytes),
                             command_id, sizeof(command_id));
@@ -701,6 +808,19 @@ static void send_firmware_result(edge_ws_session *session, const uint8_t request
     output->payload.firmware_update_result.total_bytes = total_bytes;
     output->payload.firmware_update_result.progress_percent = progress_percent;
     send_envelope(session, output);
+}
+
+static bool send_firmware_chunk_request(edge_ws_session *session, bool force) {
+    iot_edge_v1_FirmwareChunkRequest request =
+        iot_edge_v1_FirmwareChunkRequest_init_zero;
+    if (!edge_firmware_chunk_request(session->config->id, &request, force))
+        return false;
+    iot_edge_v1_Envelope *output = &session->app->envelope;
+    if (!init_envelope(session, output))
+        return false;
+    output->which_payload = iot_edge_v1_Envelope_firmware_chunk_request_tag;
+    output->payload.firmware_chunk_request = request;
+    return send_envelope(session, output);
 }
 
 static void send_network_result(edge_ws_session *session,
@@ -776,7 +896,13 @@ static bool send_modem_result(edge_ws_session *session, const uint8_t request_id
               sizeof(output->payload.modem_control_result.message), message);
     safe_copy(output->payload.modem_control_result.apn,
               sizeof(output->payload.modem_control_result.apn), apn);
-    return send_envelope(session, output);
+    const bool sent = send_envelope(session, output);
+    char summary[160];
+    snprintf(summary, sizeof(summary), "action=%d message=%s",
+             (int)action, message != NULL ? message : "");
+    log_uuid_task(session, "modem-control", request_id,
+                  modem_state_name(state), summary);
+    return sent;
 }
 
 typedef struct {
@@ -844,6 +970,8 @@ static void handle_network_config(edge_ws_session *session,
         broadcast_network_result(session->app, request_id, true, false, message);
     else
         send_network_result(session, request_id, false, false, message);
+    log_uuid_task(session, "network-config", request_id,
+                  success ? "accepted" : "rejected", message);
     if (success) {
         ev_timer_stop(session->app->loop, &session->network_timer);
         ev_timer_set(&session->network_timer, 2.0, 0.0);
@@ -869,6 +997,11 @@ static void handle_firmware_update(edge_ws_session *session,
         accepted ? iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_ACCEPTED
                  : iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED,
         accepted ? "firmware update accepted" : message, 0U, total_bytes, 0U);
+    char summary[160];
+    snprintf(summary, sizeof(summary), "bytes=%" PRIu64 " %s",
+             total_bytes, accepted ? "transport=ws" : message);
+    log_uuid_task(session, "firmware-update", request_id,
+                  accepted ? "accepted" : "rejected", summary);
     if (accepted) {
         memcpy(session->firmware_request_id, request_id,
                sizeof(session->firmware_request_id));
@@ -877,7 +1010,17 @@ static void handle_firmware_update(edge_ws_session *session,
         ev_timer_stop(session->app->loop, &session->firmware_timer);
         ev_timer_set(&session->firmware_timer, 0.25, 0.5);
         ev_timer_start(session->app->loop, &session->firmware_timer);
+        (void)send_firmware_chunk_request(session, true);
     }
+}
+
+static void handle_firmware_chunk(edge_ws_session *session,
+                                  const iot_edge_v1_FirmwareChunk *chunk) {
+    char message[257] = {0};
+    const edge_firmware_chunk_result result = edge_firmware_receive_chunk(
+        session->config->id, chunk, message, sizeof(message));
+    if (result == EDGE_FIRMWARE_CHUNK_NEXT)
+        (void)send_firmware_chunk_request(session, true);
 }
 
 static void handle_modem_control(edge_ws_session *session,
@@ -1076,7 +1219,8 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         client->send_close(client, UWSC_CLOSE_STATUS_PROTOCOL_ERR, "invalid envelope");
         return;
     }
-    edge_retry_application_alive(&session->retry, monotonic_ms(),
+    session->last_inbound_ms = monotonic_ms();
+    edge_retry_application_alive(&session->retry, session->last_inbound_ms,
                                  application_timeout_ms(session));
 
     switch (envelope->which_payload) {
@@ -1172,6 +1316,10 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
     case iot_edge_v1_Envelope_firmware_update_request_tag:
         if (session->enrolled)
             handle_firmware_update(session, &envelope->payload.firmware_update_request);
+        break;
+    case iot_edge_v1_Envelope_firmware_chunk_tag:
+        if (session->enrolled)
+            handle_firmware_chunk(session, &envelope->payload.firmware_chunk);
         break;
     case iot_edge_v1_Envelope_modem_control_request_tag:
         if (session->enrolled && session->config->bootstrap)
@@ -1311,9 +1459,39 @@ static void heartbeat_timer(struct ev_loop *loop, struct ev_timer *timer, int ev
     edge_spool_maintain(&session->spool);
     heartbeat->outbox_records = session->spool.outbox.count;
     heartbeat->outbox_bytes = session->spool.outbox.bytes;
-    send_envelope(session, envelope);
+    if (send_envelope(session, envelope))
+        session->last_heartbeat_ms = monotonic_ms();
     send_outbox_window(session);
     report_network_rollback(session->app);
+}
+
+static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
+    (void)loop;
+    (void)events;
+    edge_ws_app *app = app_from_status(timer);
+    edge_status_platform platforms[EDGE_MAX_PLATFORMS];
+    for (size_t index = 0U; index < app->config->platform_count; ++index) {
+        const edge_ws_session *session = &app->sessions[index];
+        platforms[index] = (edge_status_platform){
+            .config = session->config,
+            .runtime_config = &session->runtime_config,
+            .staging_config = &session->spool.staging_config,
+            .outbox = &session->spool.outbox,
+            .phase = session->retry.phase,
+            .last_heartbeat_ms = session->last_heartbeat_ms,
+            .last_inbound_ms = session->last_inbound_ms,
+            .heartbeat_interval_sec = session->heartbeat_interval_sec,
+            .websocket_open = session->websocket_open,
+            .enrolled = session->enrolled,
+        };
+    }
+    const edge_status_snapshot snapshot = {
+        .software_version = EDGE_SOFTWARE_VERSION,
+        .now_ms = monotonic_ms(),
+        .platforms = platforms,
+        .platform_count = app->config->platform_count,
+    };
+    (void)edge_status_write(&snapshot);
 }
 
 static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
@@ -1322,6 +1500,8 @@ static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     edge_ws_session *session = session_from_firmware(timer);
     if (!session->enrolled)
         return;
+    if (edge_firmware_receiving(session->config->id))
+        (void)send_firmware_chunk_request(session, false);
     iot_edge_v1_FirmwareUpdateResult result = iot_edge_v1_FirmwareUpdateResult_init_zero;
     if (!edge_firmware_read_status(session->config->id, &result)) {
         if (session->firmware_operation_active && !edge_firmware_active()) {
@@ -1330,6 +1510,9 @@ static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
                 iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED,
                 "firmware worker exited unexpectedly", 0U,
                 session->firmware_total_bytes, 0U);
+            log_uuid_task(session, "firmware-update",
+                          session->firmware_request_id, "failed",
+                          "firmware worker exited unexpectedly");
             session->firmware_operation_active = false;
             ev_timer_stop(session->app->loop, &session->firmware_timer);
         }
@@ -1348,6 +1531,12 @@ static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     send_firmware_result(session, request_id, state, message,
                          result.downloaded_bytes, result.total_bytes,
                          result.progress_percent);
+    char summary[160];
+    snprintf(summary, sizeof(summary), "progress=%u bytes=%" PRIu64 "/%" PRIu64
+             " message=%s", result.progress_percent, result.downloaded_bytes,
+             result.total_bytes, message);
+    log_uuid_task(session, "firmware-update", request_id,
+                  firmware_state_name(state), summary);
     if (state == iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED) {
         session->firmware_operation_active = false;
         ev_timer_stop(session->app->loop, &session->firmware_timer);
@@ -1666,6 +1855,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         ev_timer_init(&session->terminal_timer, terminal_timer, 0.0, 0.0);
     }
     ev_timer_init(&app->acquisition_timer, acquisition_timer, 0.0, 0.0);
+    ev_timer_init(&app->status_timer, status_timer, 0.0, 0.0);
     ev_io_init(&app->acquisition_io, acquisition_io, 0, EV_READ);
     edge_acquisition_source sources[EDGE_MAX_PLATFORMS];
     const size_t source_count = build_acquisition_sources(app, NULL, NULL, sources);
@@ -1695,9 +1885,12 @@ void edge_ws_app_start(edge_ws_app *app) {
         return;
     ev_timer_set(&app->acquisition_timer, 0.0, 1.0);
     ev_timer_start(app->loop, &app->acquisition_timer);
+    ev_timer_set(&app->status_timer, 0.1, 2.0);
+    ev_timer_start(app->loop, &app->status_timer);
     sync_acquisition_io(app);
     for (size_t index = 0; index < app->config->platform_count; ++index) {
-        if (edge_firmware_has_status(app->sessions[index].config->id)) {
+        if (edge_firmware_has_status(app->sessions[index].config->id) ||
+            edge_firmware_receiving(app->sessions[index].config->id)) {
             app->sessions[index].firmware_operation_active = true;
             ev_timer_set(&app->sessions[index].firmware_timer, 0.25, 0.5);
             ev_timer_start(app->loop, &app->sessions[index].firmware_timer);
@@ -1710,6 +1903,8 @@ void edge_ws_app_stop(edge_ws_app *app) {
     if (app == NULL)
         return;
     ev_timer_stop(app->loop, &app->acquisition_timer);
+    ev_timer_stop(app->loop, &app->status_timer);
+    edge_status_remove();
     ev_io_stop(app->loop, &app->acquisition_io);
     edge_acquisition_destroy(app->acquisition);
     app->acquisition = NULL;
