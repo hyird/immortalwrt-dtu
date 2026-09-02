@@ -128,8 +128,16 @@ function registrationRows(status) {
 		row('运营商名称', text(status.operator_name || status.mobile_operator)),
 		row('网络制式', text(status.network_mode || status.network_type)),
 		row('接入技术码', text(status.access_technology || status.registration_act)),
+		row('网络信息原始值', text(status.network_info_raw)),
+		row('服务小区状态', text(status.serving_state)),
+		row('服务小区 RAT', text(status.serving_rat)),
+		row('双工模式', text(status.serving_duplex)),
+		row('小区 MCC', text(status.mcc)),
+		row('小区 MNC', text(status.mnc)),
 		row('位置区/跟踪区', text(status.location_area_code)),
-		row('小区 ID', text(status.cell_id))
+		row('跟踪区代码（TAC）', text(status.tracking_area_code || status.location_area_code)),
+		row('小区 ID', text(status.cell_id)),
+		row('物理小区 ID（PCI）', text(status.pci))
 	];
 }
 
@@ -145,7 +153,10 @@ function signalRows(status) {
 		row('QCSQ 原始指标', text(status.qcsq_rssi) + ' / ' + text(status.rsrp_dbm) + ' / ' + text(status.rsrq_db) + ' / ' + text(status.sinr_db)),
 		row('CESQ 原始指标', text(status.cesq)),
 		row('当前频段', text(status.band)),
-		row('信道/EARFCN', text(status.channel))
+		row('服务小区频段码', text(status.serving_band)),
+		row('信道/EARFCN', text(status.channel || status.earfcn)),
+		row('上行带宽码', text(status.uplink_bandwidth)),
+		row('下行带宽码', text(status.downlink_bandwidth))
 	];
 }
 
@@ -158,6 +169,7 @@ function dataRows(status) {
 		row('PDP 地址', text(status.pdp_address || status.mobile_ipv4)),
 		row('移动 IPv4', text(status.mobile_ipv4)),
 		row('移动 IPv6', text(status.mobile_ipv6)),
+		row('PDP 配置原始值', text(status.pdp_config)),
 		row('网关/DNS 原始信息', text(status.cgcontrdp)),
 		row('Quectel 数据会话', text(status.qiact)),
 		row('自动 APN 查询', text(status.cgnapn)),

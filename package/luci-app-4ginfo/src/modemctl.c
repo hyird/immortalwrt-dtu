@@ -589,8 +589,16 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 			char plmn[32] = "";
 			char band[64] = "";
 			int channel = -1;
+			int parsed;
 
-			if (sscanf(value, "+QNWINFO: \"%31[^\"]\",\"%31[^\"]\",\"%63[^\"]\",%d", mode, plmn, band, &channel) >= 3) {
+			parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",\"%31[^\"]\",\"%63[^\"]\",%d", mode, plmn, band, &channel);
+			if (parsed < 3) {
+				char plmn_field[32] = "";
+
+				parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",%31[^,],\"%63[^\"]\",%d", mode, plmn_field, band, &channel);
+				trim_copy(plmn, sizeof(plmn), plmn_field, strlen(plmn_field));
+			}
+			if (parsed >= 3) {
 				write_value(status, "network_mode", mode);
 				write_value(status, "plmn", plmn);
 				write_value(status, "band", band);
@@ -600,6 +608,7 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 				}
 			}
 		}
+		write_response_value(status, "network_info_raw", result);
 	} else if (strcmp(label, "cops") == 0) {
 		value = strstr(result->response, "+COPS:");
 		if (value != NULL) {
@@ -625,14 +634,18 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 			char pdp[16] = "";
 			char apn[128] = "";
 			char address[128] = "";
+			int parsed;
 
-			if (sscanf(value, "+CGDCONT: %*d,\"%15[^\"]\",\"%127[^\"]\",\"%127[^\"]\"", pdp, apn, address) >= 2) {
+			parsed = sscanf(value, "+CGDCONT: %*d,\"%15[^\"]\",\"%127[^\"]\",\"%127[^\"]\"", pdp, apn, address);
+			if (parsed >= 1) {
 				write_value(status, "pdp_type", pdp);
-				write_value(status, "apn", apn);
-				if (address[0] != '\0')
+				if (parsed >= 2)
+					write_value(status, "apn", apn);
+				if (parsed >= 3 && address[0] != '\0')
 					write_value(status, "pdp_address", address);
 			}
 		}
+		write_response_value(status, "pdp_config", result);
 	} else if (strcmp(label, "cgpaddr") == 0) {
 		value = strstr(result->response, "+CGPADDR:");
 		if (value != NULL && sscanf(value, "+CGPADDR: %*d,\"%255[^\"]\"", text) == 1)
@@ -654,7 +667,8 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 				snprintf(number, sizeof(number), "%d", voltage);
 				write_value(status, "battery_voltage_mv", number);
 			}
-		}
+		} else
+			write_response_value(status, "battery_status", result);
 	} else if (strcmp(label, "cnum") == 0) {
 		write_response_value(status, "msisdn", result);
 	} else if (strcmp(label, "cimi") == 0) {
@@ -694,6 +708,68 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 		write_response_value(status, "cnmi", result);
 	} else if (strcmp(label, "qeng_serving") == 0) {
 		write_response_value(status, "serving_cell", result);
+		value = strstr(result->response, "+QENG: \"servingcell\",");
+		if (value != NULL) {
+			char state[32] = "";
+			char rat[32] = "";
+			char duplex[16] = "";
+			char cell[32] = "";
+			int mcc = -1;
+			int mnc = -1;
+			int pci = -1;
+			int earfcn = -1;
+			int band = -1;
+			int ul_bandwidth = -1;
+			int dl_bandwidth = -1;
+			int tac = -1;
+			int rsrp = -1;
+			int rsrq = -1;
+			int rssi = -1;
+			int sinr = -1;
+			int parsed;
+
+			parsed = sscanf(value, "+QENG: \"servingcell\",\"%31[^\"]\",\"%31[^\"]\",\"%15[^\"]\",%d,%d,%31[^,],%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+				state, rat, duplex, &mcc, &mnc, cell, &pci, &earfcn, &band,
+				&ul_bandwidth, &dl_bandwidth, &tac, &rsrp, &rsrq, &rssi, &sinr);
+			if (parsed >= 6) {
+				write_value(status, "serving_state", state);
+				write_value(status, "serving_rat", rat);
+				write_value(status, "serving_duplex", duplex);
+				snprintf(number, sizeof(number), "%d", mcc);
+				write_value(status, "mcc", number);
+				snprintf(number, sizeof(number), "%d", mnc);
+				write_value(status, "mnc", number);
+				write_value(status, "cell_id", cell);
+			}
+			if (parsed >= 8) {
+				snprintf(number, sizeof(number), "%d", pci);
+				write_value(status, "pci", number);
+				snprintf(number, sizeof(number), "%d", earfcn);
+				write_value(status, "earfcn", number);
+			}
+			if (parsed >= 12) {
+				snprintf(number, sizeof(number), "%d", band);
+				write_value(status, "serving_band", number);
+				snprintf(number, sizeof(number), "%d", ul_bandwidth);
+				write_value(status, "uplink_bandwidth", number);
+				snprintf(number, sizeof(number), "%d", dl_bandwidth);
+				write_value(status, "downlink_bandwidth", number);
+				snprintf(number, sizeof(number), "%d", tac);
+				write_value(status, "tracking_area_code", number);
+			}
+			if (parsed >= 16) {
+				if (rsrp != -888) {
+					snprintf(number, sizeof(number), "%d", rsrp);
+					write_value(status, "rsrp_dbm", number);
+				}
+				snprintf(number, sizeof(number), "%d", rsrq);
+				write_value(status, "rsrq_db", number);
+				snprintf(number, sizeof(number), "%d", rssi);
+				write_value(status, "rssi_dbm", number);
+				snprintf(number, sizeof(number), "%d", sinr);
+				write_value(status, "sinr_db", number);
+			}
+		}
 	} else if (strcmp(label, "qeng_neighbour") == 0) {
 		write_response_value(status, "neighbour_cell", result);
 	} else if (strcmp(label, "qpref_mode") == 0) {
