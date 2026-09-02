@@ -1,10 +1,19 @@
 {
 	"luci-app-4ginfo": {
-		"description": "Grant access to EdgeNode 4G modem information",
+		"description": "Grant access to EdgeNode 4G information and configuration",
 		"read": {
-			"uci": [ "edgenode" ],
+			"uci": [ "edgenode", "4ginfo" ],
 			"file": {
 				"/tmp/edgenode/modem.status": [ "read" ]
+			}
+		},
+		"write": {
+			"uci": [ "edgenode", "4ginfo" ],
+			"file": {
+				"/usr/sbin/4ginfo-modemctl probe": [ "exec" ],
+				"/usr/sbin/4ginfo-modemctl apply": [ "exec" ],
+				"/usr/sbin/4ginfo-modemctl redial": [ "exec" ],
+				"/etc/init.d/edgenode restart": [ "exec" ]
 			}
 		}
 	}
