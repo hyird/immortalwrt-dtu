@@ -86,6 +86,65 @@ function section(title, rows) {
 	]);
 }
 
+function tabbedPanels(items, active, onSelect) {
+	var root = E('div', { 'class': 'cbi-tabs-wrapper' });
+	var menu = E('div', { 'class': 'cbi-tabmenu', 'role': 'tablist' });
+	var list = E('ul');
+	var tabs = [];
+	var panels = [];
+	var selected = active || items[0].id;
+
+	items.forEach(function(item) {
+		var panelId = '4ginfo-tab-' + item.id;
+		var link = E('a', {
+			'href': '#' + panelId,
+			'role': 'tab',
+			'aria-controls': panelId
+		}, item.label);
+		var tab = E('li', { 'class': 'cbi-tabmenu-tab' }, [ link ]);
+		var panel = E('div', {
+			'id': panelId,
+			'class': 'cbi-tabpanel',
+			'role': 'tabpanel',
+			'aria-labelledby': panelId + '-tab'
+		}, item.content);
+
+		link.id = panelId + '-tab';
+		link.addEventListener('click', function(event) {
+			event.preventDefault();
+			selected = item.id;
+			update();
+			if (onSelect)
+				onSelect(item.id);
+		});
+
+		list.appendChild(tab);
+		tabs.push({ id: item.id, node: tab, link: link });
+		panels.push({ id: item.id, node: panel });
+	});
+
+	function update() {
+		tabs.forEach(function(tab) {
+			var isActive = tab.id === selected;
+
+			tab.node.classList.toggle('cbi-tabmenu-tab-active', isActive);
+			tab.link.setAttribute('aria-selected', isActive ? 'true' : 'false');
+		});
+		panels.forEach(function(panel) {
+			panel.node.style.display = panel.id === selected ? '' : 'none';
+		});
+	}
+
+	menu.appendChild(list);
+	root.appendChild(menu);
+	panels.forEach(function(panel) {
+		root.appendChild(panel.node);
+	});
+	update();
+
+	return root;
+}
+
 function statusRows(status) {
 	return [
 		row('模块可用', boolText(status.available, '已发现', '未发现')),
@@ -365,64 +424,6 @@ function addConnectionMap() {
 	return m;
 }
 
-function addDeviceMap() {
-	var m = new form.Map('edgenode', '4G设备接入配置',
-		'配置 EdgeNode 使用的 4G USB 设备、AT 串口、状态文件和监测参数。保存后点击重启 EdgeNode。');
-	var s = m.section(form.NamedSection, 'modem', 'modem', 'USB/串口');
-	var o;
-
-	s.addremove = false;
-	o = s.option(form.Value, 'usb_vendor', 'USB 厂商 ID');
-	o.datatype = 'hex16';
-	o.maxlength = 4;
-	o.rmempty = false;
-	o = s.option(form.Value, 'usb_product', 'USB 产品 ID');
-	o.datatype = 'hex16';
-	o.maxlength = 4;
-	o.rmempty = false;
-	o = s.option(form.Value, 'at_port', 'AT 通信端口');
-	o.maxlength = 127;
-	o.rmempty = false;
-	o.validate = function(section_id, value) {
-		return /^\/dev\/[A-Za-z0-9._/-]+$/.test(value) || '请输入有效的 /dev 设备路径';
-	};
-	o = s.option(form.Value, 'status_path', 'EdgeNode 状态文件');
-	o.readonly = true;
-	o.description = '完整 4G信息另存于 /tmp/4ginfo/modem.status。';
-	o = s.option(form.Value, 'monitor_interval', '监测间隔（秒）');
-	o.datatype = 'range(1,3600)';
-	o.default = '30';
-	o.rmempty = false;
-	o = s.option(form.Value, 'imei', '模块 IMEI');
-	o.maxlength = 15;
-	o.validate = function(section_id, value) {
-		return value === '' || /^\d{15}$/.test(value) || 'IMEI 必须为空或 15 位数字';
-	};
-	o = s.option(form.Value, 'iccid', 'SIM ICCID');
-	o.maxlength = 22;
-	o.validate = function(section_id, value) {
-		return value === '' || /^\d{18,22}$/.test(value) || 'ICCID 必须为空或 18 至 22 位数字';
-	};
-
-	s = m.section(form.NamedSection, 'hardware', 'hardware', '网络接口');
-	s.addremove = false;
-	o = s.option(form.Value, 'wan_interface', '4G 网络接口');
-	o.maxlength = 15;
-	o.rmempty = false;
-	o.validate = function(section_id, value) {
-		return /^[A-Za-z0-9_.-]+$/.test(value) || '请输入有效的网络接口名称';
-	};
-	o = s.option(form.Button, '_restart', '重启 EdgeNode');
-	o.inputtitle = '保存并重启';
-	o.inputstyle = 'apply';
-	o.description = '保存设备接入参数并重启监测进程。';
-	o.onclick = function() {
-		return runCommand(m, '/etc/init.d/edgenode', [ 'restart' ], 'EdgeNode 已重启');
-	};
-
-	return m;
-}
-
 return view.extend({
 	load: function() {
 		var probe = initialProbe ? L.resolveDefault(fs.exec('/usr/sbin/4ginfo-modemctl', [ 'probe' ]), null) : Promise.resolve(null);
@@ -492,27 +493,37 @@ return view.extend({
 			content.push(E('div', { 'class': 'alert-message warning' },
 				'暂时无法读取 4G 状态，请检查 EdgeNode 服务、AT 端口和权限。'));
 
-		content.push(section('运行状态', statusRows(data.status)));
-		content.push(section('模块身份与 SIM', identityRows(data.status)));
-		content.push(section('注册与运营商', registrationRows(data.status)));
-		content.push(section('无线信号与小区', signalRows(data.status)));
-		content.push(section('移动数据与 PDP', dataRows(data.status)));
-		content.push(section('射频、电池、短信与定位', ancillaryRows(data.status)));
-		content.push(section('本地设备配置', configRows(data.config)));
-		content.push(E('div', { 'class': 'cbi-section' }, [
-			E('h3', { 'class': 'cbi-section-title' }, '逐条 AT 原始响应'),
-			E('pre', { 'style': 'max-height: 32rem; overflow: auto; white-space: pre-wrap;' },
-				data.raw || '尚未生成原始响应；请点击“刷新全部 4G信息”。')
-		]));
+		var activeTab = data.statusContainer && data.statusContainer._activeTab || 'overview';
+		content.push(tabbedPanels([
+			{ id: 'overview', label: '概览', content: section('运行状态', statusRows(data.status)) },
+			{ id: 'identity', label: '模块/SIM', content: section('模块身份与 SIM', identityRows(data.status)) },
+			{ id: 'network', label: '网络注册', content: section('注册与运营商', registrationRows(data.status)) },
+			{ id: 'signal', label: '信号/小区', content: section('无线信号与小区', signalRows(data.status)) },
+			{ id: 'data', label: '数据/PDP', content: section('移动数据与 PDP', dataRows(data.status)) },
+			{ id: 'ancillary', label: '射频/短信/GPS', content: section('射频、电池、短信与定位', ancillaryRows(data.status)) },
+			{ id: 'raw', label: '原始 AT', content: E('div', { 'class': 'cbi-section' }, [
+				E('h3', { 'class': 'cbi-section-title' }, '逐条 AT 原始响应'),
+				E('pre', { 'style': 'max-height: 32rem; overflow: auto; white-space: pre-wrap;' },
+					data.raw || '尚未生成原始响应；请点击“刷新全部 4G信息”。')
+			]) }
+		], activeTab, function(tab) {
+			if (data.statusContainer)
+				data.statusContainer._activeTab = tab;
+		}));
 
 		return content;
 	},
 
 	render: function(data) {
 		var statusContainer = E('div');
+		var connectionContainer = E('div');
 		var self = this;
 		var connectionMap = addConnectionMap();
-		var deviceMap = addDeviceMap();
+		var devicePanel = E('div', {}, [
+			E('div', { 'class': 'cbi-section-descr' },
+				'这里仅展示 EdgeNode 当前使用的 4G 设备接入参数，不提供修改、保存或重启操作。设备接入配置仍由 luci-app-edgenode 负责。'),
+			section('4G设备接入配置（只读）', configRows(data.config))
+		]);
 
 		data.statusContainer = statusContainer;
 		dom.content(statusContainer, this.renderStatus(data));
@@ -523,14 +534,20 @@ return view.extend({
 			});
 		}, 10);
 
-		return Promise.all([ connectionMap.render(), deviceMap.render() ]).then(function(maps) {
+		return connectionMap.render().then(function(connectionMapView) {
+			dom.content(connectionContainer, connectionMapView);
+
+			var topTabs = tabbedPanels([
+				{ id: 'status', label: '4G信息', content: statusContainer },
+				{ id: 'connection', label: '4G连接配置', content: connectionContainer },
+				{ id: 'device', label: '设备接入（只读）', content: devicePanel }
+			], 'status');
+
 			return E('div', { 'class': 'cbi-map' }, [
 				E('h2', { 'class': 'cbi-map-title' }, '4G信息'),
 				E('div', { 'class': 'cbi-map-descr' },
-					'完整显示 4G 模块信息，并提供连接、选网、射频、设备接入和逐条 AT 配置能力。'),
-				statusContainer,
-				maps[0],
-				maps[1]
+					'完整显示 4G 模块信息，并提供连接、选网、射频和逐条 AT 配置能力；设备接入参数仅展示。'),
+				topTabs
 			]);
 		});
 	}

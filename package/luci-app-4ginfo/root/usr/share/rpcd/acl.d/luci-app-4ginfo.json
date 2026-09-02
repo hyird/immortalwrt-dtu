@@ -10,13 +10,12 @@
 			}
 		},
 		"write": {
-			"uci": [ "edgenode", "4ginfo" ],
+			"uci": [ "4ginfo" ],
 			"file": {
 				"/usr/sbin/4ginfo-modemctl probe": [ "exec" ],
 				"/usr/sbin/4ginfo-modemctl apply": [ "exec" ],
 				"/usr/sbin/4ginfo-modemctl redial": [ "exec" ],
-				"/usr/sbin/4ginfo-modemctl at": [ "exec" ],
-				"/etc/init.d/edgenode restart": [ "exec" ]
+				"/usr/sbin/4ginfo-modemctl at": [ "exec" ]
 			}
 		}
 	}
