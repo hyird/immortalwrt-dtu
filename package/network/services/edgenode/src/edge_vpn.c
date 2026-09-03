@@ -599,9 +599,11 @@ static bool write_atomic(const char *path, const char *content) {
 }
 
 static bool append_rule(char *script, size_t capacity, size_t *used,
-                        const char *format, const char *first, const char *second) {
+                        const char *format, const char *first, const char *second,
+                        const char *third) {
     const int written = snprintf(script + *used, capacity - *used, format,
-                                 first != NULL ? first : "", second != NULL ? second : "");
+                                 first != NULL ? first : "", second != NULL ? second : "",
+                                 third != NULL ? third : "");
     if (written < 0 || (size_t)written >= capacity - *used)
         return false;
     *used += (size_t)written;
@@ -633,29 +635,29 @@ static bool configure_firewall(const iot_edge_v1_VpnConfigRequest *request) {
         if (strcmp(route->mode, "nat") == 0) {
             if (!append_rule(dstnat, sizeof(dstnat), &dstnat_used,
                              "iifname \"" EDGE_VPN_INTERFACE
-                             "\" ip daddr %s dnat to %s\n",
-                             virtual_text, target_text) ||
+                             "\" ip daddr %s dnat ip prefix to ip daddr map { %s : %s }\n",
+                             virtual_text, virtual_text, target_text) ||
                 !append_rule(forward, sizeof(forward), &forward_used,
                              "iifname \"" EDGE_VPN_INTERFACE
                              "\" ip daddr %s accept\n",
-                             target_text, NULL))
+                             target_text, NULL, NULL))
                 return false;
             have_nat = true;
         } else if (!append_rule(forward, sizeof(forward), &forward_used,
                                 "iifname \"" EDGE_VPN_INTERFACE
                                 "\" ip daddr %s accept\n",
-                                virtual_text, NULL)) {
+                                virtual_text, NULL, NULL)) {
             return false;
         }
     }
     if (!append_rule(forward, sizeof(forward), &forward_used,
-                     "iifname \"" EDGE_VPN_INTERFACE "\" drop\n", NULL, NULL))
+                     "iifname \"" EDGE_VPN_INTERFACE "\" drop\n", NULL, NULL, NULL))
         return false;
     if (have_nat &&
         !append_rule(srcnat, sizeof(srcnat), &srcnat_used,
                      "oifname != \"" EDGE_VPN_INTERFACE "\" ip saddr "
                      EDGE_VPN_OVERLAY_CIDR " masquerade\n",
-                     NULL, NULL))
+                     NULL, NULL, NULL))
         return false;
     if (!write_atomic(EDGE_VPN_DSTNAT_INCLUDE, dstnat) ||
         !write_atomic(EDGE_VPN_FORWARD_INCLUDE, forward) ||

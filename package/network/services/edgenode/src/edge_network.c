@@ -13,6 +13,7 @@
 
 #include <uci.h>
 
+#include "edge_interface.h"
 #include "edge_process.h"
 
 #define NETWORK_BACKUP "/tmp/edgenode/network.backup"
@@ -97,6 +98,8 @@ static bool valid_device_name(const char *value) {
 }
 
 static bool protected_device(const char *name, const char *protected_name) {
+    if (edge_interface_is_managed_vpn(name))
+        return true;
     if (name == NULL || protected_name == NULL || protected_name[0] == '\0')
         return false;
     const size_t length = strlen(protected_name);

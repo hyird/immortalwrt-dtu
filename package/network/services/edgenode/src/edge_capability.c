@@ -22,6 +22,8 @@ static void safe_copy(char *output, size_t capacity, const char *input) {
 }
 
 static bool protected_device(const char *name, const char *protected_name) {
+    if (edge_interface_is_managed_vpn(name))
+        return true;
     if (name == NULL || protected_name == NULL || protected_name[0] == '\0')
         return false;
     const size_t length = strlen(protected_name);

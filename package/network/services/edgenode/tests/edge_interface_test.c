@@ -36,6 +36,10 @@ int main(void) {
                  "alias syntax is not a VLAN child");
     expect_false(edge_interface_has_subinterface(NULL, names, count),
                  "null candidate must be safe");
+    expect_true(edge_interface_is_managed_vpn("wg"),
+                "managed VPN interface must be hidden from physical interfaces");
+    expect_false(edge_interface_is_managed_vpn("wwan0"),
+                 "physical interfaces must remain visible");
 
     if (failures != 0)
         return 1;

@@ -39,6 +39,8 @@ int main(void) {
                 strstr(source, "/usr/share/nftables.d/chain-pre/forward/") != NULL &&
                 strstr(source, "/usr/share/nftables.d/chain-pre/srcnat/") != NULL,
             "VPN mapping is not integrated with firewall4 includes");
+    require(strstr(source, "dnat ip prefix to ip daddr map") != NULL,
+            "VPN NAT does not preserve host bits across mapped prefixes");
     require(strstr(source, "ip\", \"link\", \"add") == NULL &&
                 strstr(source, "WG_CMD_SET_DEVICE") == NULL,
             "edge still configures WireGuard outside netifd");
