@@ -8,7 +8,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-4ginfo
 PKG_VERSION:=1.0
-PKG_RELEASE:=9
+PKG_RELEASE:=10
 PKG_LICENSE:=Apache-2.0
 
 include $(INCLUDE_DIR)/package.mk
@@ -41,6 +41,11 @@ define Package/luci-app-4ginfo/install
 	chmod 0600 $(1)/etc/config/4ginfo
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/4ginfo-modemctl $(1)/usr/sbin/4ginfo-modemctl
+	$(INSTALL_BIN) ./files/4ginfo-modem-power $(1)/usr/sbin/4ginfo-modem-power
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./files/4ginfo.init $(1)/etc/init.d/4ginfo
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/96-tastek-4ginfo $(1)/etc/uci-defaults/96-tastek-4ginfo
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/4ginfo.js \
 		$(1)/www/luci-static/resources/view/4ginfo.js

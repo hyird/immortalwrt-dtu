@@ -1,8 +1,11 @@
 #define _GNU_SOURCE
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,10 +17,11 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include <uci.h>
 
-#define MODEM_LOCK "/tmp/edgenode/modem.lock"
+#define MODEM_LOCK "/tmp/4ginfo/modem.lock"
 #define DETAIL_DIR "/tmp/4ginfo"
 #define DETAIL_STATUS "/tmp/4ginfo/modem.status"
 #define DETAIL_STATUS_TMP "/tmp/4ginfo/modem.status.tmp"
@@ -39,6 +43,7 @@ struct modem_profile {
 	char radio_function[16];
 	char operator_mode[16];
 	char operator_mccmnc[8];
+	char network_interface[33];
 	bool automatic_apn;
 	bool redial_after_apply;
 };
@@ -54,6 +59,8 @@ struct probe_command {
 	int timeout_ms;
 	bool required;
 };
+
+static volatile sig_atomic_t monitor_stop;
 
 static int64_t monotonic_milliseconds(void)
 {
@@ -111,7 +118,7 @@ static int lock_modem(void)
 {
 	int lock;
 
-	if (mkdir("/tmp/edgenode", 0700) != 0 && errno != EEXIST)
+	if (mkdir(DETAIL_DIR, 0700) != 0 && errno != EEXIST)
 		return -1;
 	lock = open(MODEM_LOCK, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
 	if (lock < 0 || flock(lock, LOCK_EX) != 0) {
@@ -227,11 +234,13 @@ static bool load_profile(struct modem_profile *profile)
 	struct uci_context *context = NULL;
 	struct uci_package *edgenode = NULL;
 	struct uci_package *four_g = NULL;
-	struct uci_section *modem;
+	struct uci_section *edgenode_modem;
+	struct uci_section *four_g_modem;
 	bool success = false;
 
 	memset(profile, 0, sizeof(*profile));
 	if (!copy_option(profile->port, sizeof(profile->port), AT_PORT_DEFAULT) ||
+		!copy_option(profile->network_interface, sizeof(profile->network_interface), "usb0") ||
 		!copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4") ||
 		!copy_option(profile->auth_type, sizeof(profile->auth_type), "none") ||
 		!copy_option(profile->radio_function, sizeof(profile->radio_function), "full") ||
@@ -242,22 +251,27 @@ static bool load_profile(struct modem_profile *profile)
 	if (context == NULL || uci_load(context, "edgenode", &edgenode) != UCI_OK ||
 		uci_load(context, "4ginfo", &four_g) != UCI_OK)
 		goto out;
-	modem = find_section(edgenode, "modem");
-	if (!copy_option(profile->port, sizeof(profile->port), option(context, modem, "at_port", AT_PORT_DEFAULT)))
+	edgenode_modem = find_section(edgenode, "modem");
+	four_g_modem = find_section(four_g, "modem");
+	if (!copy_option(profile->port, sizeof(profile->port),
+			option(context, four_g_modem, "at_port",
+			       option(context, edgenode_modem, "at_port", AT_PORT_DEFAULT))))
 		goto out;
-	modem = find_section(four_g, "modem");
-	profile->automatic_apn = strcmp(option(context, modem, "automatic_apn", "1"), "0") != 0;
-	if (!copy_option(profile->apn, sizeof(profile->apn), option(context, modem, "apn", "")) ||
-		!copy_option(profile->pdp_type, sizeof(profile->pdp_type), option(context, modem, "pdp_type", "ipv4")) ||
-		!copy_option(profile->auth_type, sizeof(profile->auth_type), option(context, modem, "auth_type", "none")) ||
-		!copy_option(profile->username, sizeof(profile->username), option(context, modem, "username", "")) ||
-		!copy_option(profile->password, sizeof(profile->password), option(context, modem, "password", "")) ||
-		!copy_option(profile->pin_code, sizeof(profile->pin_code), option(context, modem, "pin_code", "")) ||
-		!copy_option(profile->radio_function, sizeof(profile->radio_function), option(context, modem, "radio_function", "full")) ||
-		!copy_option(profile->operator_mode, sizeof(profile->operator_mode), option(context, modem, "operator_mode", "auto")) ||
-		!copy_option(profile->operator_mccmnc, sizeof(profile->operator_mccmnc), option(context, modem, "operator_mccmnc", "")))
+	if (!copy_option(profile->network_interface, sizeof(profile->network_interface),
+			option(context, four_g_modem, "network_interface", "usb0")))
 		goto out;
-	profile->redial_after_apply = strcmp(option(context, modem, "redial_after_apply", "0"), "0") != 0;
+	profile->automatic_apn = strcmp(option(context, four_g_modem, "automatic_apn", "1"), "0") != 0;
+	if (!copy_option(profile->apn, sizeof(profile->apn), option(context, four_g_modem, "apn", "")) ||
+		!copy_option(profile->pdp_type, sizeof(profile->pdp_type), option(context, four_g_modem, "pdp_type", "ipv4")) ||
+		!copy_option(profile->auth_type, sizeof(profile->auth_type), option(context, four_g_modem, "auth_type", "none")) ||
+		!copy_option(profile->username, sizeof(profile->username), option(context, four_g_modem, "username", "")) ||
+		!copy_option(profile->password, sizeof(profile->password), option(context, four_g_modem, "password", "")) ||
+		!copy_option(profile->pin_code, sizeof(profile->pin_code), option(context, four_g_modem, "pin_code", "")) ||
+		!copy_option(profile->radio_function, sizeof(profile->radio_function), option(context, four_g_modem, "radio_function", "full")) ||
+		!copy_option(profile->operator_mode, sizeof(profile->operator_mode), option(context, four_g_modem, "operator_mode", "auto")) ||
+		!copy_option(profile->operator_mccmnc, sizeof(profile->operator_mccmnc), option(context, four_g_modem, "operator_mccmnc", "")))
+		goto out;
+	profile->redial_after_apply = strcmp(option(context, four_g_modem, "redial_after_apply", "0"), "0") != 0;
 	success = true;
 out:
 	if (four_g != NULL)
@@ -267,6 +281,95 @@ out:
 	if (context != NULL)
 		uci_free_context(context);
 	return success;
+}
+
+static bool load_stdin_profile(struct modem_profile *profile)
+{
+	char line[256];
+	bool have_apn = false;
+	bool have_automatic_apn = false;
+	bool have_username = false;
+	bool have_password = false;
+	bool have_pdp_type = false;
+	bool have_auth_type = false;
+	bool have_pin_code = false;
+	bool have_redial = false;
+
+	while (fgets(line, sizeof(line), stdin) != NULL) {
+		char *separator;
+		char *value;
+		char *end = NULL;
+		unsigned long number;
+
+		line[strcspn(line, "\r\n")] = '\0';
+		separator = strchr(line, '=');
+		if (separator == NULL)
+			return false;
+		*separator++ = '\0';
+		value = separator;
+		if (strcmp(line, "apn") == 0) {
+			if (!copy_option(profile->apn, sizeof(profile->apn), value))
+				return false;
+			have_apn = true;
+		} else if (strcmp(line, "automatic_apn") == 0) {
+			if (strcmp(value, "0") == 0)
+				profile->automatic_apn = false;
+			else if (strcmp(value, "1") == 0)
+				profile->automatic_apn = true;
+			else
+				return false;
+			have_automatic_apn = true;
+		} else if (strcmp(line, "username") == 0) {
+			if (!copy_option(profile->username, sizeof(profile->username), value))
+				return false;
+			have_username = true;
+		} else if (strcmp(line, "password") == 0) {
+			if (!copy_option(profile->password, sizeof(profile->password), value))
+				return false;
+			have_password = true;
+		} else if (strcmp(line, "pdp_type") == 0) {
+			number = strtoul(value, &end, 10);
+			if (*value == '\0' || *end != '\0' || number < 1U || number > 3U)
+				return false;
+			if (number == 1U)
+				copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4");
+			else if (number == 2U)
+				copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv6");
+			else
+				copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4v6");
+			have_pdp_type = true;
+		} else if (strcmp(line, "auth_type") == 0) {
+			number = strtoul(value, &end, 10);
+			if (*value == '\0' || *end != '\0' || number < 1U || number > 4U)
+				return false;
+			if (number == 1U)
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "none");
+			else if (number == 2U)
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "pap");
+			else if (number == 3U)
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "chap");
+			else
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "pap_or_chap");
+			have_auth_type = true;
+		} else if (strcmp(line, "pin_code") == 0) {
+			if (!copy_option(profile->pin_code, sizeof(profile->pin_code), value))
+				return false;
+			have_pin_code = true;
+		} else if (strcmp(line, "redial_after_apply") == 0) {
+			if (strcmp(value, "0") == 0)
+				profile->redial_after_apply = false;
+			else if (strcmp(value, "1") == 0)
+				profile->redial_after_apply = true;
+			else
+				return false;
+			have_redial = true;
+		} else {
+			return false;
+		}
+	}
+
+	return have_apn && have_automatic_apn && have_username && have_password &&
+		have_pdp_type && have_auth_type && have_pin_code && have_redial;
 }
 
 static bool valid_apn(const char *apn, bool allow_empty)
@@ -330,6 +433,97 @@ static bool valid_digits(const char *value, size_t minimum, size_t maximum)
 		if (!isdigit((unsigned char)*cursor))
 			return false;
 	return true;
+}
+
+static bool valid_imei(const char *value)
+{
+	unsigned sum = 0U;
+
+	if (!valid_digits(value, 15U, 15U))
+		return false;
+	for (size_t index = 0U; index < 15U; ++index) {
+		unsigned digit = (unsigned)(value[index] - '0');
+		if ((index & 1U) != 0U) {
+			digit *= 2U;
+			if (digit > 9U)
+				digit -= 9U;
+		}
+		sum += digit;
+	}
+	return (sum % 10U) == 0U;
+}
+
+static bool set_uci_option_if_changed(struct uci_context *context,
+	struct uci_package *package, struct uci_section *section, const char *name,
+	const char *value, bool *changed)
+{
+	const char *current = uci_lookup_option_string(context, section, name);
+	struct uci_ptr pointer = {
+		.p = package,
+		.s = section,
+		.option = name,
+		.value = value,
+	};
+
+	if (current != NULL && strcmp(current, value) == 0)
+		return true;
+	if (uci_set(context, &pointer) != UCI_OK)
+		return false;
+	*changed = true;
+	return true;
+}
+
+static bool sync_identity_from_status(void)
+{
+	char line[256];
+	char imei[32] = "";
+	char iccid[32] = "";
+	struct uci_context *context = NULL;
+	struct uci_package *package = NULL;
+	struct uci_section *node;
+	struct uci_section *modem;
+	FILE *status;
+	bool changed = false;
+	bool success = false;
+
+	status = fopen(DETAIL_STATUS, "r");
+	if (status == NULL)
+		return false;
+	while (fgets(line, sizeof(line), status) != NULL) {
+		line[strcspn(line, "\r\n")] = '\0';
+		if (strncmp(line, "imei=", 5U) == 0)
+			(void)copy_option(imei, sizeof(imei), line + 5U);
+		else if (strncmp(line, "iccid=", 6U) == 0)
+			(void)copy_option(iccid, sizeof(iccid), line + 6U);
+	}
+	fclose(status);
+	if (!valid_imei(imei))
+		return false;
+	if (!valid_digits(iccid, 18U, 22U))
+		iccid[0] = '\0';
+
+	context = uci_alloc_context();
+	if (context == NULL || uci_load(context, "edgenode", &package) != UCI_OK)
+		goto out;
+	node = find_section(package, "node");
+	modem = find_section(package, "modem");
+	if (node == NULL || modem == NULL ||
+		!set_uci_option_if_changed(context, package, node, "imei", imei, &changed) ||
+		!set_uci_option_if_changed(context, package, modem, "imei", imei, &changed))
+		goto out;
+	if (iccid[0] != '\0' &&
+		!set_uci_option_if_changed(context, package, modem, "iccid", iccid, &changed))
+		goto out;
+	if (changed && (uci_save(context, package) != UCI_OK ||
+		uci_commit(context, &package, false) != UCI_OK))
+		goto out;
+	success = true;
+out:
+	if (package != NULL)
+		uci_unload(context, package);
+	if (context != NULL)
+		uci_free_context(context);
+	return success;
 }
 
 static bool validate_profile(const struct modem_profile *profile)
@@ -493,6 +687,10 @@ static void parse_registration(FILE *status, const char *prefix, const char *res
 	}
 	snprintf(number, sizeof(number), "%d", registration);
 	write_value(status, key, number);
+	if (strcmp(key, "cereg_status") == 0) {
+		write_value(status, "registration_status", number);
+		write_value(status, "registered", (registration == 1 || registration == 5) ? "1" : "0");
+	}
 	snprintf(number, sizeof(number), "%d", mode);
 	write_value(status, "registration_mode", number);
 	if (area[0] != '\0')
@@ -537,8 +735,22 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 		else
 			write_response_value(status, "iccid", result);
 	} else if (strcmp(label, "sim") == 0) {
-		if (value_after_prefix(result->response, "+CPIN:", text, sizeof(text)))
+		if (value_after_prefix(result->response, "+CPIN:", text, sizeof(text))) {
+			const char *state = "1";
+
 			write_value(status, "sim_state_name", text);
+			if (strstr(text, "READY") != NULL)
+				state = "2";
+			else if (strstr(text, "NOT INSERTED") != NULL || strstr(text, "NOT READY") != NULL)
+				state = "3";
+			else if (strstr(text, "SIM PIN") != NULL)
+				state = "4";
+			else if (strstr(text, "SIM PUK") != NULL)
+				state = "5";
+			else if (strstr(text, "BLOCKED") != NULL)
+				state = "6";
+			write_value(status, "sim_state", state);
+		}
 	} else if (strcmp(label, "cereg") == 0) {
 		parse_registration(status, "+CEREG:", result->response, "cereg_status");
 	} else if (strcmp(label, "creg") == 0) {
@@ -622,6 +834,8 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 				write_value(status, "operator_selection_mode", number);
 				if (name[0] != '\0')
 					write_value(status, "operator_name", name);
+				if (name[0] != '\0')
+					write_value(status, "mobile_operator", name);
 				if (act >= 0) {
 					snprintf(number, sizeof(number), "%d", act);
 					write_value(status, "access_technology", number);
@@ -777,6 +991,60 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 	}
 }
 
+static void write_network_state(FILE *status, const struct modem_profile *profile)
+{
+	struct ifaddrs *interfaces = NULL;
+	char address[INET_ADDRSTRLEN] = "";
+	bool connected = false;
+
+	if (getifaddrs(&interfaces) == 0) {
+		for (const struct ifaddrs *item = interfaces; item != NULL; item = item->ifa_next) {
+			const struct sockaddr_in *ipv4;
+
+			if (item->ifa_addr == NULL || item->ifa_addr->sa_family != AF_INET ||
+				strcmp(item->ifa_name, profile->network_interface) != 0)
+				continue;
+			ipv4 = (const struct sockaddr_in *)item->ifa_addr;
+			if (inet_ntop(AF_INET, &ipv4->sin_addr, address, sizeof(address)) != NULL) {
+				connected = true;
+				break;
+			}
+		}
+		freeifaddrs(interfaces);
+	}
+	write_value(status, "connected", connected ? "1" : "0");
+	write_value(status, "mobile_ipv4", address);
+}
+
+static void write_unavailable_status(const struct modem_profile *profile)
+{
+	FILE *status;
+
+	if (mkdir(DETAIL_DIR, 0700) != 0 && errno != EEXIST)
+		return;
+	status = fopen(DETAIL_STATUS_TMP, "w");
+	if (status == NULL)
+		return;
+	(void)chmod(DETAIL_STATUS_TMP, 0600);
+	write_value(status, "at_port", profile->port);
+	write_value(status, "available", "0");
+	write_value(status, "probe_ok", "0");
+	write_value(status, "registered", "0");
+	write_value(status, "registration_status", "-1");
+	write_value(status, "imei", "");
+	write_value(status, "iccid", "");
+	write_value(status, "csq", "99");
+	write_value(status, "rssi_dbm", "-1");
+	write_value(status, "signal_percent", "0");
+	write_value(status, "sim_state", "1");
+	write_value(status, "connected", "0");
+	write_value(status, "mobile_ipv4", "");
+	write_value(status, "updated_at", "0");
+	write_value(status, "raw_path", DETAIL_RAW);
+	if (fclose(status) == 0)
+		(void)rename(DETAIL_STATUS_TMP, DETAIL_STATUS);
+}
+
 static bool probe_modem(const struct modem_profile *profile, int fd)
 {
 	static const struct probe_command commands[] = {
@@ -835,6 +1103,15 @@ static bool probe_modem(const struct modem_profile *profile, int fd)
 	(void)chmod(DETAIL_STATUS_TMP, 0600);
 	(void)chmod(DETAIL_RAW ".tmp", 0600);
 	write_value(status, "at_port", profile->port);
+	write_value(status, "registered", "0");
+	write_value(status, "registration_status", "-1");
+	write_value(status, "imei", "");
+	write_value(status, "iccid", "");
+	write_value(status, "csq", "99");
+	write_value(status, "rssi_dbm", "-1");
+	write_value(status, "signal_percent", "0");
+	write_value(status, "sim_state", "1");
+	write_network_state(status, profile);
 	write_value(status, "updated_at", "0");
 	fprintf(raw, "4G AT probe; one command per transaction\n\n");
 	for (index = 0U; index < sizeof(commands) / sizeof(commands[0]); ++index) {
@@ -964,14 +1241,20 @@ static bool execute_command(const struct modem_profile *profile, const char *act
 	fd = open(profile->port, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
 	if (fd < 0) {
 		fprintf(stderr, "cannot open modem AT port %s: %s\n", profile->port, strerror(errno));
+		if (strcmp(action, "probe") == 0)
+			write_unavailable_status(profile);
 		goto out;
 	}
 	if (!configure_port(fd, &original)) {
 		fprintf(stderr, "cannot configure modem AT port %s: %s\n", profile->port, strerror(errno));
+		if (strcmp(action, "probe") == 0)
+			write_unavailable_status(profile);
 		goto out;
 	}
 	if (strcmp(action, "probe") == 0) {
 		success = probe_modem(profile, fd);
+		if (success)
+			(void)sync_identity_from_status();
 		printf(success ? "complete 4G probe succeeded on %s\n" : "4G probe completed with required AT failures on %s\n", profile->port);
 	} else if (strcmp(action, "redial") == 0) {
 		success = run_at_command(fd, "AT+CFUN=1,1\r", AT_TIMEOUT_MS, &result);
@@ -999,17 +1282,53 @@ out:
 	return success;
 }
 
+static void stop_monitor(int signal_number)
+{
+	(void)signal_number;
+	monitor_stop = 1;
+}
+
+static int monitor_modem(const struct modem_profile *profile, unsigned interval)
+{
+	monitor_stop = 0;
+	signal(SIGTERM, stop_monitor);
+	signal(SIGINT, stop_monitor);
+	signal(SIGHUP, stop_monitor);
+	if (interval == 0U || interval > 3600U)
+		interval = 30U;
+	while (!monitor_stop) {
+		(void)execute_command(profile, "probe", NULL);
+		for (unsigned elapsed = 0U; elapsed < interval && !monitor_stop; ++elapsed)
+			sleep(1U);
+	}
+	return EXIT_SUCCESS;
+}
+
 int main(int argc, char **argv)
 {
 	struct modem_profile profile;
 	const char *action;
+	char *end = NULL;
+	unsigned long interval = 30U;
 
 	if (argc < 2 || (strcmp(argv[1], "probe") != 0 && strcmp(argv[1], "apply") != 0 &&
+		strcmp(argv[1], "apply-stdin") != 0 && strcmp(argv[1], "monitor") != 0 &&
 		strcmp(argv[1], "redial") != 0 && strcmp(argv[1], "at") != 0)) {
-		fprintf(stderr, "usage: %s probe|apply|redial|at <AT command>\n", argv[0]);
+		fprintf(stderr, "usage: %s probe|apply|apply-stdin|monitor [INTERVAL]|redial|at <AT command>\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 	action = argv[1];
+	if (strcmp(action, "monitor") == 0) {
+		if (argc == 3) {
+			interval = strtoul(argv[2], &end, 10);
+			if (end == argv[2] || *end != '\0' || interval == 0U || interval > 3600U)
+				return EXIT_FAILURE;
+		} else if (argc != 2) {
+			return EXIT_FAILURE;
+		}
+	} else if (strcmp(action, "apply-stdin") == 0 && argc != 2) {
+		return EXIT_FAILURE;
+	}
 	if (strcmp(action, "at") == 0 && (argc != 3 || !valid_custom_command(argv[2]))) {
 		fprintf(stderr, "AT command must start with AT and contain no control characters\n");
 		return EXIT_FAILURE;
@@ -1018,9 +1337,18 @@ int main(int argc, char **argv)
 		fprintf(stderr, "cannot load 4G configuration\n");
 		return EXIT_FAILURE;
 	}
-	if (strcmp(action, "apply") == 0 && !validate_profile(&profile)) {
+	if (strcmp(action, "apply-stdin") == 0 && !load_stdin_profile(&profile)) {
+		fprintf(stderr, "invalid 4GINFO control request\n");
+		return EXIT_FAILURE;
+	}
+	if ((strcmp(action, "apply") == 0 || strcmp(action, "apply-stdin") == 0) &&
+		!validate_profile(&profile)) {
 		fprintf(stderr, "invalid 4G connection configuration\n");
 		return EXIT_FAILURE;
 	}
+	if (strcmp(action, "monitor") == 0)
+		return monitor_modem(&profile, (unsigned)interval);
+	if (strcmp(action, "apply-stdin") == 0)
+		action = "apply";
 	return execute_command(&profile, action, strcmp(action, "at") == 0 ? argv[2] : NULL) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

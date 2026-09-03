@@ -20,20 +20,8 @@ static void signal_received(struct ev_loop *loop, ev_signal *watcher, int events
 }
 
 int main(int argc, char **argv) {
-    if (argc == 5 && strcmp(argv[1], "--initialize-modem") == 0)
-        return edge_modem_initialize(argv[2], argv[3], argv[4]);
-    if (argc == 6 && strcmp(argv[1], "--monitor-modem") == 0) {
-        char *end = NULL;
-        const unsigned long interval = strtoul(argv[5], &end, 10);
-        if (end == argv[5] || *end != '\0' || interval == 0U || interval > 3600U)
-            return EXIT_FAILURE;
-        return edge_modem_monitor(argv[2], argv[3], argv[4], (unsigned)interval);
-    }
     if (argc != 1) {
-        fprintf(stderr,
-                "usage: %s [--initialize-modem PORT STATUS WAN | "
-                "--monitor-modem PORT STATUS WAN INTERVAL]\n",
-                argv[0]);
+        fprintf(stderr, "usage: %s\n", argv[0]);
         return EXIT_FAILURE;
     }
 

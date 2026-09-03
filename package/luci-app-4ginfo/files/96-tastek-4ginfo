@@ -1,0 +1,71 @@
+#!/bin/sh
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+case "$board" in
+	tastek,it692|tastek,it694) ;;
+	*) exit 0 ;;
+esac
+
+changed_edgenode=0
+changed_4ginfo=0
+changed_network=0
+
+set_if_needed() {
+	local current
+	current="$(uci -q get "$1" 2>/dev/null)"
+	[ "$current" = "$2" ] && return 0
+	uci -q set "$1=$2"
+	case "$1" in
+		edgenode.*) changed_edgenode=1 ;;
+		4ginfo.*) changed_4ginfo=1 ;;
+		network.*) changed_network=1 ;;
+	esac
+}
+
+# Common modem ownership and service settings.
+set_if_needed edgenode.modem.at_port /dev/ttyUSB2
+set_if_needed edgenode.modem.status_path /tmp/4ginfo/modem.status
+set_if_needed 4ginfo.modem.at_port /dev/ttyUSB2
+set_if_needed 4ginfo.modem.enabled 1
+set_if_needed 4ginfo.modem.monitor_interval 30
+
+case "$board" in
+	tastek,it692)
+		# IT-692 uses the legacy modem USB identity and its RNDIS interface.
+		set_if_needed edgenode.modem.usb_vendor 3505
+		set_if_needed edgenode.modem.usb_product 0003
+		set_if_needed 4ginfo.modem.network_interface eth1
+		set_if_needed 4ginfo.modem.power_control none
+		;;
+	tastek,it694)
+		# IT-694 uses the Marvell composite identity, usb0, and a named
+		# modem-power GPIO exported by its DTS.
+		set_if_needed edgenode.modem.usb_vendor 1286
+		set_if_needed edgenode.modem.usb_product 4e3c
+		set_if_needed 4ginfo.modem.network_interface usb0
+		set_if_needed 4ginfo.modem.power_control gpio
+		set_if_needed 4ginfo.modem.power_path /sys/class/gpio/modem_power/value
+		;;
+esac
+
+# IT-694 keeps both the physical WAN port and USB 4G IPv4-only. Its switch
+# mapping is defined separately in target/linux/ramips/mt76x8/base-files.
+if [ "$board" = 'tastek,it694' ] && [ -e /etc/config/network ]; then
+	set_if_needed network.wan.ipv6 0
+	set_if_needed network.wan.delegate 0
+	set_if_needed network.wwan_4g.ipv6 0
+	set_if_needed network.wwan_4g.delegate 0
+	if uci -q get network.wan6 >/dev/null 2>&1; then
+		uci -q delete network.wan6
+		changed_network=1
+	fi
+fi
+
+[ "$changed_edgenode" -eq 0 ] || uci -q commit edgenode
+[ "$changed_4ginfo" -eq 0 ] || uci -q commit 4ginfo
+[ "$changed_network" -eq 0 ] || uci -q commit network
+[ -x /etc/init.d/edgenode ] && /etc/init.d/edgenode enable
+[ -x /etc/init.d/4ginfo ] && /etc/init.d/4ginfo enable
+[ -x /etc/init.d/network-watchdog ] && /etc/init.d/network-watchdog enable
+
+exit 0

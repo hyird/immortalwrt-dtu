@@ -155,7 +155,7 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
                 !copy_option(context, section, "model", config->model, sizeof(config->model),
                              true, error, error_size))
                 goto fail;
-            if (!edge_protocol_validate_imei(config->imei)) {
+            if (config->imei[0] != '\0' && !edge_protocol_validate_imei(config->imei)) {
                 set_error(error, error_size, "node IMEI must be 15 digits with valid Luhn check");
                 goto fail;
             }

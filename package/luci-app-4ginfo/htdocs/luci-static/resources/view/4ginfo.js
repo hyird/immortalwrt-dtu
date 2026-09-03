@@ -289,7 +289,7 @@ function configRows(config) {
 		row('USB 厂商 ID', text(config.usbVendor)),
 		row('USB 产品 ID', text(config.usbProduct)),
 		row('AT 通信端口', text(config.atPort)),
-		row('4G 网络接口', text(config.wanInterface)),
+		row('4G 网络接口', text(config.networkInterface)),
 		row('EdgeNode 状态文件', text(config.statusPath)),
 		row('完整信息文件', detailStatusPath),
 		row('监测间隔', config.monitorInterval ? withUnit(config.monitorInterval, ' 秒') : '-'),
@@ -469,10 +469,10 @@ return view.extend({
 			var config = {
 				usbVendor: uci.get('edgenode', 'modem', 'usb_vendor'),
 				usbProduct: uci.get('edgenode', 'modem', 'usb_product'),
-				atPort: uci.get('edgenode', 'modem', 'at_port'),
-				statusPath: uci.get('edgenode', 'modem', 'status_path') || legacyStatusPath,
-				monitorInterval: uci.get('edgenode', 'modem', 'monitor_interval'),
-				wanInterface: uci.get('edgenode', 'hardware', 'wan_interface'),
+				atPort: uci.get('4ginfo', 'modem', 'at_port') || uci.get('edgenode', 'modem', 'at_port'),
+				statusPath: detailStatusPath,
+				monitorInterval: uci.get('4ginfo', 'modem', 'monitor_interval') || '30',
+				networkInterface: uci.get('4ginfo', 'modem', 'network_interface') || 'usb0',
 				configuredImei: uci.get('edgenode', 'modem', 'imei'),
 				configuredIccid: uci.get('edgenode', 'modem', 'iccid')
 			};

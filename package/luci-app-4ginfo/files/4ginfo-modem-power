@@ -1,0 +1,51 @@
+#!/bin/sh
+
+# The board DTS exports the power GPIO by name so user space does not depend
+# on a global-numbering ABI. The path is supplied by the hardware profile.
+DEFAULT_POWER_VALUE='/sys/class/gpio/modem_power/value'
+
+set_power() {
+	local value="$1" path="${2:-$DEFAULT_POWER_VALUE}"
+	[ -w "$path" ] || return 1
+	echo "$value" >"$path"
+}
+
+case "$1" in
+	--on)
+		set_power 1 "$2"
+		exit $?
+		;;
+	--off)
+		set_power 0 "$2"
+		exit $?
+		;;
+	--watch)
+		at_port="${2:-/dev/ttyUSB2}"
+		power_path="${3:-$DEFAULT_POWER_VALUE}"
+		set_power 1 "$power_path" || exit 0
+		cleanup() {
+			set_power 0 "$power_path"
+		}
+		trap 'cleanup; exit 0' INT TERM
+		trap cleanup EXIT
+		while :; do
+			if [ -e "$at_port" ]; then
+				sleep 5
+				continue
+			fi
+
+			# A partial ttyUSB enumeration is the same failure mode handled by
+			# the original firmware: power-cycle and let USB enumerate again.
+			if [ -e /dev/ttyUSB0 ]; then
+				set_power 0 "$power_path"
+				sleep 1
+				set_power 1 "$power_path"
+			fi
+			sleep 5
+		done
+		;;
+	*)
+		echo "usage: $0 --on|--off [POWER_PATH] | --watch [AT_PORT] [POWER_PATH]" >&2
+		exit 2
+		;;
+esac

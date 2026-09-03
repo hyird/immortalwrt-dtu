@@ -976,12 +976,6 @@ static void modem_worker(edge_ws_session *session, int worker_fd,
     safe_copy(result.apn, sizeof(result.apn), request->apn);
     result.success = edge_modem_control(session->app->config->modem_at_port, request,
                                         result.message, sizeof(result.message));
-    edge_modem_info modem;
-    const bool available = edge_modem_probe(session->app->config->modem_at_port,
-                                             session->app->config->wan_interface,
-                                             &modem);
-    (void)edge_modem_write_status(session->app->config->modem_status_path,
-                                  &modem, available);
     for (;;) {
         const ssize_t sent = send(worker_fd, &result, sizeof(result), MSG_NOSIGNAL);
         if (sent == (ssize_t)sizeof(result))
