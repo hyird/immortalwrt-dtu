@@ -1,0 +1,103 @@
+Avoid installing libtool archives for runtime-only PPP plugins. The firmware
+only needs the shared objects; installing the .la files makes libtool emit a
+misleading --finish reminder for the DESTDIR staging path.
+
+--- a/pppd/plugins/Makefile.am
++++ b/pppd/plugins/Makefile.am
+@@ -1,3 +1,9 @@
+-pppd_plugin_LTLIBRARIES = minconn.la passwordfd.la winbind.la
++pppd_plugin_LIBS = minconn.la passwordfd.la winbind.la
++pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
+ pppd_plugindir = $(PPPD_PLUGIN_DIR)
+ 
++install-data-local:
++	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
++	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++		"$(DESTDIR)$(pppd_plugindir)/"
+
+--- a/pppd/plugins/pppoe/Makefile.am
++++ b/pppd/plugins/pppoe/Makefile.am
+@@ -1,3 +1,9 @@
+-pppd_plugin_LTLIBRARIES = pppoe.la 
++pppd_plugin_LIBS = pppoe.la
++pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
+ pppd_plugindir = $(PPPD_PLUGIN_DIR)
+ 
++install-data-local:
++	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
++	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++		"$(DESTDIR)$(pppd_plugindir)/"
+
+--- a/pppd/plugins/pppoatm/Makefile.am
++++ b/pppd/plugins/pppoatm/Makefile.am
+@@ -1,3 +1,9 @@
+-pppd_plugin_LTLIBRARIES = pppoatm.la
++pppd_plugin_LIBS = pppoatm.la
++pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
+ pppd_plugindir = $(PPPD_PLUGIN_DIR)
+ 
++install-data-local:
++	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
++	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++		"$(DESTDIR)$(pppd_plugindir)/"
+
+--- a/pppd/plugins/pppol2tp/Makefile.am
++++ b/pppd/plugins/pppol2tp/Makefile.am
+@@ -1,3 +1,9 @@
+-pppd_plugin_LTLIBRARIES = pppol2tp.la openl2tp.la
++pppd_plugin_LIBS = pppol2tp.la openl2tp.la
++pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
+ pppd_plugindir = $(PPPD_PLUGIN_DIR)
+ 
++install-data-local:
++	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
++	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++		"$(DESTDIR)$(pppd_plugindir)/"
+
+--- a/pppd/plugins/radius/Makefile.am
++++ b/pppd/plugins/radius/Makefile.am
+@@ -1,4 +1,10 @@
+-pppd_plugin_LTLIBRARIES = radius.la radattr.la radrealms.la
++pppd_plugin_LIBS = radius.la radattr.la radrealms.la
++pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
+ pppd_plugindir = $(PPPD_PLUGIN_DIR)
+ 
+-noinst_LTLIBRARIES = libradiusclient.la
++noinst_LTLIBRARIES = libradiusclient.la $(pppd_plugin_LIBS)
++
++install-data-local:
++	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
++	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++		"$(DESTDIR)$(pppd_plugindir)/"
+
+--- a/pppd/plugins/dhcpv6relay/Makefile.am
++++ b/pppd/plugins/dhcpv6relay/Makefile.am
+@@ -1,3 +1,9 @@
+-pppd_plugin_LTLIBRARIES = dhcpv6relay.la
++pppd_plugin_LIBS = dhcpv6relay.la
++pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
+ pppd_plugindir = $(PPPD_PLUGIN_DIR)
+ 
++install-data-local:
++	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
++	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++		"$(DESTDIR)$(pppd_plugindir)/"
+
+--- a/pppd/plugins/pptp/Makefile.am
++++ b/pppd/plugins/pptp/Makefile.am
+@@ -1,3 +1,9 @@
+-pppd_plugin_LTLIBRARIES = pptp.la
++pppd_plugin_LIBS = pptp.la
++pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
+ pppd_plugindir = $(PPPD_PLUGIN_DIR)
+ 
++install-data-local:
++	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
++	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++		"$(DESTDIR)$(pppd_plugindir)/"
