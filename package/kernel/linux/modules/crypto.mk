@@ -550,8 +550,10 @@ $(eval $(call KernelPackage,crypto-hw-eip93))
 
 define KernelPackage/crypto-kpp
   TITLE:=Key-agreement Protocol Primitives
-  KCONFIG:=CONFIG_CRYPTO_KPP
-  FILES:=$(LINUX_DIR)/crypto/kpp.ko
+  # Linux 6.18 moved the implementation to the CRYPTO_KPP2 symbol.
+  KCONFIG:=CONFIG_CRYPTO_KPP@lt6.18 CONFIG_CRYPTO_KPP2@ge6.18
+  FILES:=$(LINUX_DIR)/crypto/kpp.ko@lt6.18 \
+	$(LINUX_DIR)/crypto/kpp.ko@ge6.18
   AUTOLOAD:=$(call AutoLoad,09,kpp)
   $(call AddDepends/crypto)
 endef
