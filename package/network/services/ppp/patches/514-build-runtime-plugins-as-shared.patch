@@ -3,44 +3,45 @@ so keep them shared even though their libtool archives are build-only.
 
 --- a/pppd/plugins/Makefile.am
 +++ b/pppd/plugins/Makefile.am
-@@ -1 +1 @@
+@@ -12 +12 @@
 -PLUGIN_LDFLAGS = -module -avoid-version
 +PLUGIN_LDFLAGS = -module -avoid-version -shared
 
 --- a/pppd/plugins/pppoe/Makefile.am
 +++ b/pppd/plugins/pppoe/Makefile.am
-@@ -1 +1 @@
+@@ -17 +17 @@
 -pppoe_la_LDFLAGS = -module -avoid-version
 +pppoe_la_LDFLAGS = -module -avoid-version -shared
 
 --- a/pppd/plugins/pppoatm/Makefile.am
 +++ b/pppd/plugins/pppoatm/Makefile.am
-@@ -1 +1 @@
+@@ -17 +17 @@
 -pppoatm_la_LDFLAGS = -module -avoid-version
 +pppoatm_la_LDFLAGS = -module -avoid-version -shared
 
 --- a/pppd/plugins/pppol2tp/Makefile.am
 +++ b/pppd/plugins/pppol2tp/Makefile.am
-@@ -1 +1 @@
+@@ -14 +14 @@
 -pppol2tp_la_LDFLAGS = -module -avoid-version
 +pppol2tp_la_LDFLAGS = -module -avoid-version -shared
+@@ -18 +18 @@
 -openl2tp_la_LDFLAGS = -module -avoid-version
 +openl2tp_la_LDFLAGS = -module -avoid-version -shared
 
 --- a/pppd/plugins/radius/Makefile.am
 +++ b/pppd/plugins/radius/Makefile.am
-@@ -1 +1 @@
+@@ -35 +35 @@
 -RADIUS_LDFLAGS = -module -avoid-version $(LDFLAGS)
 +RADIUS_LDFLAGS = -module -avoid-version -shared $(LDFLAGS)
 
 --- a/pppd/plugins/dhcpv6relay/Makefile.am
 +++ b/pppd/plugins/dhcpv6relay/Makefile.am
-@@ -1 +1 @@
+@@ -14 +14 @@
 -dhcpv6relay_la_LDFLAGS = -module -avoid-version
 +dhcpv6relay_la_LDFLAGS = -module -avoid-version -shared
 
 --- a/pppd/plugins/pptp/Makefile.am
 +++ b/pppd/plugins/pptp/Makefile.am
-@@ -1 +1 @@
+@@ -19 +19 @@
 -pptp_la_LDFLAGS = -fPIC -module -avoid-version
 +pptp_la_LDFLAGS = -fPIC -module -avoid-version -shared
