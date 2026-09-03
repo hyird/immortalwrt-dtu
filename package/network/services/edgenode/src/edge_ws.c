@@ -30,7 +30,7 @@
 #include "edge_vpn.h"
 #include "log.h"
 
-#define EDGE_SOFTWARE_VERSION "0.3.36"
+#define EDGE_SOFTWARE_VERSION "0.3.37"
 #define EDGE_OUTBOX_WINDOW 16U
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
@@ -848,19 +848,16 @@ static void send_network_result(edge_ws_session *session,
 }
 
 static void send_vpn_result(edge_ws_session *session,
-                            const iot_edge_v1_VpnConfigRequest *request,
+                            const uint8_t request_id[16], uint64_t config_version,
                             bool applied, const char *error_message) {
     iot_edge_v1_Envelope *output = &session->app->envelope;
     if (!init_envelope(session, output))
         return;
     output->which_payload = iot_edge_v1_Envelope_vpn_config_result_tag;
     iot_edge_v1_VpnConfigResult *result = &output->payload.vpn_config_result;
-    uint8_t request_id[16] = {0};
-    if (request != NULL && request->request_id.size == sizeof(request_id))
-        memcpy(request_id, request->request_id.bytes, sizeof(request_id));
     edge_protocol_set_bytes(&result->request_id, sizeof(result->request_id.bytes),
-                            request_id, sizeof(request_id));
-    result->config_version = request != NULL ? request->config_version : 0U;
+                            request_id, 16U);
+    result->config_version = config_version;
     result->applied = applied;
     if (!applied) {
         safe_copy(result->error_code, sizeof(result->error_code),
@@ -877,11 +874,19 @@ static void send_vpn_result(edge_ws_session *session,
 static void handle_vpn_config(edge_ws_session *session,
                               const iot_edge_v1_VpnConfigRequest *request) {
     char error[257] = {0};
+    uint8_t request_id[16] = {0};
+    uint64_t config_version = 0U;
+    if (request != NULL) {
+        config_version = request->config_version;
+        if (request->request_id.size == sizeof(request_id))
+            memcpy(request_id, request->request_id.bytes, sizeof(request_id));
+    }
     const bool applied = edge_vpn_apply(request, error, sizeof(error));
-    send_vpn_result(session, request, applied, applied ? "" : error);
+    send_vpn_result(session, request_id, config_version, applied,
+                    applied ? "" : error);
     char detail[320];
     snprintf(detail, sizeof(detail), "version=%" PRIu64 " applied=%u message=%s",
-             request != NULL ? request->config_version : 0U, applied ? 1U : 0U,
+             config_version, applied ? 1U : 0U,
              applied ? "" : error);
     edge_log_write(applied ? "info" : "warn", "vpn", "VPN configuration", detail);
 }
