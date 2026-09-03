@@ -3,84 +3,44 @@ so keep them shared even though their libtool archives are build-only.
 
 --- a/pppd/plugins/Makefile.am
 +++ b/pppd/plugins/Makefile.am
-@@ -3,7 +3,7 @@ pppd_plugin_LIBS = minconn.la passwordfd.la winbind.la
- noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
- pppd_plugindir = $(PPPD_PLUGIN_DIR)
- 
+@@ -1 +1 @@
 -PLUGIN_LDFLAGS = -module -avoid-version
 +PLUGIN_LDFLAGS = -module -avoid-version -shared
- 
- minconn_la_CPPFLAGS = $(PLUGIN_CPPFLAGS)
 
 --- a/pppd/plugins/pppoe/Makefile.am
 +++ b/pppd/plugins/pppoe/Makefile.am
-@@ -8,7 +8,7 @@ noinst_HEADERS = \
-     pppoe.h
- 
- pppoe_la_CPPFLAGS = -I${top_srcdir} -DSYSCONFDIR=\"${sysconfdir}\" -DPLUGIN
+@@ -1 +1 @@
 -pppoe_la_LDFLAGS = -module -avoid-version
 +pppoe_la_LDFLAGS = -module -avoid-version -shared
- pppoe_la_SOURCES = plugin.c discovery.c if.c common.c
- 
- pppoe_discovery_CPPFLAGS = -I${top_srcdir}
 
 --- a/pppd/plugins/pppoatm/Makefile.am
 +++ b/pppd/plugins/pppoatm/Makefile.am
-@@ -6,7 +6,7 @@ noinst_HEADERS = \
-     atmsap.h
- 
- pppoatm_la_CPPFLAGS = -I${top_srcdir}
+@@ -1 +1 @@
 -pppoatm_la_LDFLAGS = -module -avoid-version
 +pppoatm_la_LDFLAGS = -module -avoid-version -shared
- pppoatm_la_SOURCES = pppoatm.c
- 
- if WITH_LIBATM
 
 --- a/pppd/plugins/pppol2tp/Makefile.am
 +++ b/pppd/plugins/pppol2tp/Makefile.am
-@@ -5,11 +5,11 @@ noinst_HEADERS = \
-     l2tp_event.h
- 
- pppol2tp_la_CPPFLAGS = -I${top_srcdir}
+@@ -1 +1 @@
 -pppol2tp_la_LDFLAGS = -module -avoid-version
 +pppol2tp_la_LDFLAGS = -module -avoid-version -shared
- pppol2tp_la_SOURCES = pppol2tp.c
- 
- openl2tp_la_CPPFLAGS = -I${top_srcdir}
 -openl2tp_la_LDFLAGS = -module -avoid-version
 +openl2tp_la_LDFLAGS = -module -avoid-version -shared
- openl2tp_la_SOURCES = openl2tp.c
 
 --- a/pppd/plugins/radius/Makefile.am
 +++ b/pppd/plugins/radius/Makefile.am
-@@ -22,7 +22,7 @@ EXTRA_ETC = \
-     etc/servers
- 
- RADIUS_CPPFLAGS = -I${top_srcdir} -DRC_LOG_FACILITY=LOG_DAEMON
+@@ -1 +1 @@
 -RADIUS_LDFLAGS = -module -avoid-version $(LDFLAGS)
 +RADIUS_LDFLAGS = -module -avoid-version -shared $(LDFLAGS)
- 
- radius_la_CPPFLAGS = $(RADIUS_CPPFLAGS)
- radius_la_LDFLAGS = $(RADIUS_LDFLAGS)
 
 --- a/pppd/plugins/dhcpv6relay/Makefile.am
 +++ b/pppd/plugins/dhcpv6relay/Makefile.am
-@@ -3,7 +3,7 @@ pppd_plugin_LIBS = dhcpv6relay.la
- noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
- pppd_plugindir = $(PPPD_PLUGIN_DIR)
- 
- dhcpv6relay_la_CPPFLAGS = -I${top_srcdir} -DSYSCONFDIR=\"${sysconfdir}\" -DPLUGIN
+@@ -1 +1 @@
 -dhcpv6relay_la_LDFLAGS = -module -avoid-version
 +dhcpv6relay_la_LDFLAGS = -module -avoid-version -shared
- dhcpv6relay_la_SOURCES = dhcpv6relay.c
 
 --- a/pppd/plugins/pptp/Makefile.am
 +++ b/pppd/plugins/pptp/Makefile.am
-@@ -8,7 +8,7 @@ noinst_HEADERS = \
-     vector.h
- 
- pptp_la_CPPFLAGS = -I${top_srcdir} -DSYSCONFDIR=\"${sysconfdir}\" -DPLUGIN
+@@ -1 +1 @@
 -pptp_la_LDFLAGS = -fPIC -module -avoid-version
 +pptp_la_LDFLAGS = -fPIC -module -avoid-version -shared
- pptp_la_SOURCES = dirutil.c orckit_quirks.c pptp.c pptp_callmgr.c pptp_ctrl.c \
-     pptp_quirks.c util.c vector.c
