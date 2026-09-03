@@ -13,7 +13,7 @@ misleading --finish reminder for the DESTDIR staging path.
  
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
 
 --- a/pppd/plugins/pppoe/Makefile.am
@@ -27,7 +27,7 @@ misleading --finish reminder for the DESTDIR staging path.
 +
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
 
 --- a/pppd/plugins/pppoatm/Makefile.am
@@ -41,7 +41,7 @@ misleading --finish reminder for the DESTDIR staging path.
  
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
 
 --- a/pppd/plugins/pppol2tp/Makefile.am
@@ -55,7 +55,7 @@ misleading --finish reminder for the DESTDIR staging path.
  
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
 
 --- a/pppd/plugins/radius/Makefile.am
@@ -71,7 +71,7 @@ misleading --finish reminder for the DESTDIR staging path.
 +
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
 
 --- a/pppd/plugins/dhcpv6relay/Makefile.am
@@ -85,7 +85,7 @@ misleading --finish reminder for the DESTDIR staging path.
  
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
 
 --- a/pppd/plugins/pptp/Makefile.am
@@ -99,5 +99,5 @@ misleading --finish reminder for the DESTDIR staging path.
  
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
++	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
