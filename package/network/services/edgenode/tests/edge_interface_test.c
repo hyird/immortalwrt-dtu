@@ -40,6 +40,12 @@ int main(void) {
                 "managed VPN interface must be hidden from physical interfaces");
     expect_false(edge_interface_is_managed_vpn("wwan0"),
                  "physical interfaces must remain visible");
+    expect_true(edge_interface_is_modem_device("usb0"),
+                "USB modem interface must be hidden");
+    expect_true(edge_interface_is_modem_device("usb0.1"),
+                "USB modem subinterface must be hidden");
+    expect_false(edge_interface_is_modem_device("usb1"),
+                 "other USB interface must remain visible");
 
     if (failures != 0)
         return 1;

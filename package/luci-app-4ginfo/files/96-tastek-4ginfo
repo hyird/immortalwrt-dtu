@@ -53,6 +53,10 @@ esac
 # IT-694 keeps both the physical WAN port and USB 4G IPv4-only. Its switch
 # mapping is defined separately in target/linux/ramips/mt76x8/base-files.
 if [ "$board" = 'tastek,it694' ] && [ -e /etc/config/network ]; then
+	set_if_needed network.wan.device eth0.2
+	if [ "$(uci -q get network.@device[0].name 2>/dev/null)" = 'br-lan' ]; then
+		set_if_needed network.@device[0].ports eth0.1
+	fi
 	set_if_needed network.wan.ipv6 0
 	set_if_needed network.wan.delegate 0
 	set_if_needed network.wwan_4g.ipv6 0

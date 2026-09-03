@@ -6,6 +6,12 @@ bool edge_interface_is_managed_vpn(const char *candidate) {
     return candidate != NULL && strcmp(candidate, "wg") == 0;
 }
 
+bool edge_interface_is_modem_device(const char *candidate) {
+    return candidate != NULL &&
+           (strcmp(candidate, "usb0") == 0 ||
+            (strncmp(candidate, "usb0.", 5U) == 0 && candidate[5] != '\0'));
+}
+
 bool edge_interface_has_subinterface(
     const char *candidate,
     const char names[][EDGE_INTERFACE_NAME_CAPACITY],
