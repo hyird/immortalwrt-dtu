@@ -29,9 +29,9 @@ PKG_INSTALL:=1
 
 include $(INCLUDE_DIR)/package.mk
 
-# Tell libtool that DESTDIR is a staging prefix, so it does not emit a
-# misleading post-install --finish reminder for the target plugin directory.
-MAKE_INSTALL_FLAGS += LIBTOOLFLAGS="-inst-prefix-dir $(PKG_INSTALL_DIR)"
+# libtool's --finish advice is not applicable to a DESTDIR-staged package
+# install; keep the install step quiet without changing the resulting files.
+MAKE_INSTALL_FLAGS += AM_LIBTOOLFLAGS=--silent
 
 # PPPoA is the only consumer of libatm. Do not make every PPP build pull the
 # obsolete linux-atm source tree into the build graph when PPPoA is disabled.
