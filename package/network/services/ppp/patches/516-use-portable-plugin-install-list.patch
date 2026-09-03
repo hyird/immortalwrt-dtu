@@ -1,0 +1,44 @@
+Avoid GNU make functions in Automake recipes. Keep the runtime plugin list
+explicit so current Automake does not warn about a non-POSIX variable name.
+
+--- a/pppd/plugins/Makefile.am
++++ b/pppd/plugins/Makefile.am
+@@ -2 +2 @@
+-pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++pppd_plugin_SOS = .libs/minconn.so .libs/passwordfd.so .libs/winbind.so
+
+--- a/pppd/plugins/pppoe/Makefile.am
++++ b/pppd/plugins/pppoe/Makefile.am
+@@ -2 +2 @@
+-pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++pppd_plugin_SOS = .libs/pppoe.so
+
+--- a/pppd/plugins/pppoatm/Makefile.am
++++ b/pppd/plugins/pppoatm/Makefile.am
+@@ -2 +2 @@
+-pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++pppd_plugin_SOS = .libs/pppoatm.so
+
+--- a/pppd/plugins/pppol2tp/Makefile.am
++++ b/pppd/plugins/pppol2tp/Makefile.am
+@@ -2 +2 @@
+-pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++pppd_plugin_SOS = .libs/pppol2tp.so .libs/openl2tp.so
+
+--- a/pppd/plugins/radius/Makefile.am
++++ b/pppd/plugins/radius/Makefile.am
+@@ -2 +2 @@
+-pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++pppd_plugin_SOS = .libs/radius.so .libs/radattr.so .libs/radrealms.so
+
+--- a/pppd/plugins/dhcpv6relay/Makefile.am
++++ b/pppd/plugins/dhcpv6relay/Makefile.am
+@@ -2 +2 @@
+-pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++pppd_plugin_SOS = .libs/dhcpv6relay.so
+
+--- a/pppd/plugins/pptp/Makefile.am
++++ b/pppd/plugins/pptp/Makefile.am
+@@ -2 +2 @@
+-pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
++pppd_plugin_SOS = .libs/pptp.so

@@ -29,6 +29,8 @@ PKG_INSTALL:=1
 
 include $(INCLUDE_DIR)/package.mk
 
+CONFIGURE_VARS += MANIFEST_TOOL=:
+
 # PPPoA is the only consumer of libatm. Do not make every PPP build pull the
 # obsolete linux-atm source tree into the build graph when PPPoA is disabled.
 DISABLE_NLS:=

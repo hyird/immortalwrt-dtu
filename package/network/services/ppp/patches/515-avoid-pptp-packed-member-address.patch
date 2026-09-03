@@ -1,0 +1,13 @@
+Keep the pointer passed to get_call_id naturally aligned. The kernel PPTP
+socket address is intentionally packed for ABI compatibility, so taking the
+address of its call_id member triggers an alignment warning on newer GCC.
+
+--- a/pppd/plugins/pptp/pptp.c
++++ b/pppd/plugins/pptp/pptp.c
+@@ -121 +121,2 @@ static int pptp_start_client(void)
+ 	struct sockaddr_pppox src_addr,dst_addr;
++	u_int16_t peer_call_id;
+@@ -185 +186,2 @@ static int pptp_start_client(void)
+-    } while (get_call_id(callmgr_sock, getpid(), getpid(), &dst_addr.sa_addr.pptp.call_id) < 0);
++    } while (get_call_id(callmgr_sock, getpid(), getpid(), &peer_call_id) < 0);
++    dst_addr.sa_addr.pptp.call_id = peer_call_id;
