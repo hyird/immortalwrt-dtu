@@ -3,45 +3,44 @@ so keep them shared even though their libtool archives are build-only.
 
 --- a/pppd/plugins/Makefile.am
 +++ b/pppd/plugins/Makefile.am
-@@ -12 +12 @@
+@@ -1 +1 @@
 -PLUGIN_LDFLAGS = -module -avoid-version
-+PLUGIN_LDFLAGS = -module -avoid-version -shared
++PLUGIN_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir)
 
 --- a/pppd/plugins/pppoe/Makefile.am
 +++ b/pppd/plugins/pppoe/Makefile.am
-@@ -17 +17 @@
+@@ -1 +1 @@
 -pppoe_la_LDFLAGS = -module -avoid-version
-+pppoe_la_LDFLAGS = -module -avoid-version -shared
++pppoe_la_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir)
 
 --- a/pppd/plugins/pppoatm/Makefile.am
 +++ b/pppd/plugins/pppoatm/Makefile.am
-@@ -17 +17 @@
+@@ -1 +1 @@
 -pppoatm_la_LDFLAGS = -module -avoid-version
-+pppoatm_la_LDFLAGS = -module -avoid-version -shared
++pppoatm_la_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir)
 
 --- a/pppd/plugins/pppol2tp/Makefile.am
 +++ b/pppd/plugins/pppol2tp/Makefile.am
-@@ -14 +14 @@
+@@ -1 +1 @@
 -pppol2tp_la_LDFLAGS = -module -avoid-version
-+pppol2tp_la_LDFLAGS = -module -avoid-version -shared
-@@ -18 +18 @@
++pppol2tp_la_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir)
 -openl2tp_la_LDFLAGS = -module -avoid-version
-+openl2tp_la_LDFLAGS = -module -avoid-version -shared
++openl2tp_la_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir)
 
 --- a/pppd/plugins/radius/Makefile.am
 +++ b/pppd/plugins/radius/Makefile.am
-@@ -35 +35 @@
+@@ -1 +1 @@
 -RADIUS_LDFLAGS = -module -avoid-version $(LDFLAGS)
-+RADIUS_LDFLAGS = -module -avoid-version -shared $(LDFLAGS)
++RADIUS_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir) $(LDFLAGS)
 
 --- a/pppd/plugins/dhcpv6relay/Makefile.am
 +++ b/pppd/plugins/dhcpv6relay/Makefile.am
-@@ -14 +14 @@
+@@ -1 +1 @@
 -dhcpv6relay_la_LDFLAGS = -module -avoid-version
-+dhcpv6relay_la_LDFLAGS = -module -avoid-version -shared
++dhcpv6relay_la_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir)
 
 --- a/pppd/plugins/pptp/Makefile.am
 +++ b/pppd/plugins/pptp/Makefile.am
-@@ -19 +19 @@
+@@ -1 +1 @@
 -pptp_la_LDFLAGS = -fPIC -module -avoid-version
-+pptp_la_LDFLAGS = -fPIC -module -avoid-version -shared
++pptp_la_LDFLAGS = -fPIC -module -avoid-version -rpath $(pppd_plugindir)
