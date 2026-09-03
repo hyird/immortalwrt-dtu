@@ -8,7 +8,7 @@ while retaining the same structure layout on older toolchains.
 
 --- a/src/apk_database.h
 +++ b/src/apk_database.h
-@@ -24,20 +24,29 @@ APK_ARRAY(apk_name_array, struct apk_name *);
+@@ -24,11 +24,20 @@ APK_ARRAY(apk_name_array, struct apk_name *);
  int apk_name_array_qsort(const void *a, const void *b);
  
 +#if defined(__has_attribute)
