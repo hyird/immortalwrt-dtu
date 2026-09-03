@@ -151,7 +151,7 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
         if (strcmp(section->type, "node") == 0) {
             if (have_node ||
                 !copy_option(context, section, "imei", config->imei, sizeof(config->imei),
-                             true, error, error_size) ||
+                             false, error, error_size) ||
                 !copy_option(context, section, "model", config->model, sizeof(config->model),
                              true, error, error_size))
                 goto fail;

@@ -34,6 +34,7 @@
 
 struct modem_profile {
 	char port[128];
+	char at_profile[16];
 	char apn[101];
 	char pdp_type[16];
 	char auth_type[16];
@@ -55,10 +56,152 @@ struct at_result {
 
 struct probe_command {
 	const char *label;
-	const char *command;
+	const char *const *commands;
+	size_t command_count;
 	int timeout_ms;
 	bool required;
 };
+
+struct modem_at_profile {
+	const char *name;
+	const char *const *imei_commands;
+	size_t imei_command_count;
+	const char *const *iccid_commands;
+	size_t iccid_command_count;
+	const char *const *registration_commands;
+	size_t registration_command_count;
+	const char *const *signal_commands;
+	size_t signal_command_count;
+	const char *const *sim_commands;
+	size_t sim_command_count;
+	const char *const *apn_query_commands;
+	size_t apn_query_command_count;
+	bool uses_cstt;
+};
+
+#define ARRAY_SIZE(value) (sizeof(value) / sizeof((value)[0]))
+
+static const char *const at_generic_imei[] = {
+	"AT+GSN\r", "AT+CGSN\r"
+};
+static const char *const at_it692_imei[] = {
+	"AT+GSN\r", "AT+CGSN\r"
+};
+static const char *const at_it694_imei[] = {
+	"AT+GSN\r", "AT+CGSN\r"
+};
+
+static const char *const at_generic_iccid[] = {
+	"AT+ICCID\r", "AT+CCID\r", "AT+QCCID\r"
+};
+static const char *const at_it692_iccid[] = {
+	"AT+QCCID\r", "AT+ICCID\r", "AT+CCID\r"
+};
+static const char *const at_it694_iccid[] = {
+	"AT+ICCID\r", "AT+CCID\r", "AT+QCCID\r"
+};
+
+static const char *const at_registration[] = {
+	"AT+CEREG?\r", "AT+CREG?\r", "AT+CGREG?\r"
+};
+static const char *const at_generic_sim[] = {
+	"AT+CPIN?\r", "AT+CPIN\r"
+};
+static const char *const at_it692_sim[] = {
+	"AT+CPIN?\r", "AT+CPIN\r"
+};
+static const char *const at_it694_sim[] = {
+	"AT+CPIN\r", "AT+CPIN?\r"
+};
+static const char *const at_generic_apn_query[] = {
+	"AT+CGDCONT?\r"
+};
+static const char *const at_it692_apn_query[] = {
+	"AT+CGDCONT?\r"
+};
+static const char *const at_it694_apn_query[] = {
+	"AT+CSTT?\r", "AT+CGDCONT?\r"
+};
+static const char *const at_generic_signal[] = {
+	"AT+CSQ\r", "AT+CESQ\r", "AT+QCSQ\r"
+};
+static const char *const at_it692_signal[] = {
+	"AT+QCSQ\r", "AT+CSQ\r", "AT+CESQ\r"
+};
+static const char *const at_it694_signal[] = {
+	"AT+CSQ\r", "AT+CESQ\r", "AT+QCSQ\r"
+};
+static const struct modem_at_profile at_profiles[] = {
+	{
+		.name = "generic",
+		.imei_commands = at_generic_imei,
+		.imei_command_count = ARRAY_SIZE(at_generic_imei),
+		.iccid_commands = at_generic_iccid,
+		.iccid_command_count = ARRAY_SIZE(at_generic_iccid),
+		.registration_commands = at_registration,
+		.registration_command_count = ARRAY_SIZE(at_registration),
+		.signal_commands = at_generic_signal,
+		.signal_command_count = ARRAY_SIZE(at_generic_signal),
+		.sim_commands = at_generic_sim,
+		.sim_command_count = ARRAY_SIZE(at_generic_sim),
+		.apn_query_commands = at_generic_apn_query,
+		.apn_query_command_count = ARRAY_SIZE(at_generic_apn_query),
+		.uses_cstt = false
+	},
+	{
+		.name = "it692",
+		.imei_commands = at_it692_imei,
+		.imei_command_count = ARRAY_SIZE(at_it692_imei),
+		.iccid_commands = at_it692_iccid,
+		.iccid_command_count = ARRAY_SIZE(at_it692_iccid),
+		.registration_commands = at_registration,
+		.registration_command_count = ARRAY_SIZE(at_registration),
+		.signal_commands = at_it692_signal,
+		.signal_command_count = ARRAY_SIZE(at_it692_signal),
+		.sim_commands = at_it692_sim,
+		.sim_command_count = ARRAY_SIZE(at_it692_sim),
+		.apn_query_commands = at_it692_apn_query,
+		.apn_query_command_count = ARRAY_SIZE(at_it692_apn_query),
+		.uses_cstt = false
+	},
+	{
+		.name = "it694",
+		.imei_commands = at_it694_imei,
+		.imei_command_count = ARRAY_SIZE(at_it694_imei),
+		.iccid_commands = at_it694_iccid,
+		.iccid_command_count = ARRAY_SIZE(at_it694_iccid),
+		.registration_commands = at_registration,
+		.registration_command_count = ARRAY_SIZE(at_registration),
+		.signal_commands = at_it694_signal,
+		.signal_command_count = ARRAY_SIZE(at_it694_signal),
+		.sim_commands = at_it694_sim,
+		.sim_command_count = ARRAY_SIZE(at_it694_sim),
+		.apn_query_commands = at_it694_apn_query,
+		.apn_query_command_count = ARRAY_SIZE(at_it694_apn_query),
+		.uses_cstt = true
+	}
+};
+
+static const char *const at_basic[] = { "AT\r" };
+static const char *const at_manufacturer[] = { "AT+CGMI\r" };
+static const char *const at_model[] = { "AT+CGMM\r" };
+static const char *const at_firmware[] = { "AT+CGMR\r" };
+static const char *const at_imsi[] = { "AT+CIMI\r" };
+static const char *const at_operator[] = { "AT+COPS?\r" };
+static const char *const at_cgatt[] = { "AT+CGATT?\r" };
+static const char *const at_cgact[] = { "AT+CGACT?\r" };
+static const char *const at_cgpaddr[] = { "AT+CGPADDR=1\r" };
+static const char *const at_cgcontrdp[] = { "AT+CGCONTRDP\r" };
+
+static const struct modem_at_profile *find_at_profile(const char *name)
+{
+	size_t index;
+
+	for (index = 0U; index < ARRAY_SIZE(at_profiles); ++index)
+		if (strcmp(at_profiles[index].name, name) == 0)
+			return &at_profiles[index];
+	return &at_profiles[0];
+}
 
 static volatile sig_atomic_t monitor_stop;
 
@@ -240,6 +383,7 @@ static bool load_profile(struct modem_profile *profile)
 
 	memset(profile, 0, sizeof(*profile));
 	if (!copy_option(profile->port, sizeof(profile->port), AT_PORT_DEFAULT) ||
+		!copy_option(profile->at_profile, sizeof(profile->at_profile), "generic") ||
 		!copy_option(profile->network_interface, sizeof(profile->network_interface), "usb0") ||
 		!copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4") ||
 		!copy_option(profile->auth_type, sizeof(profile->auth_type), "none") ||
@@ -259,6 +403,9 @@ static bool load_profile(struct modem_profile *profile)
 		goto out;
 	if (!copy_option(profile->network_interface, sizeof(profile->network_interface),
 			option(context, four_g_modem, "network_interface", "usb0")))
+		goto out;
+	if (!copy_option(profile->at_profile, sizeof(profile->at_profile),
+			option(context, four_g_modem, "at_profile", "generic")))
 		goto out;
 	profile->automatic_apn = strcmp(option(context, four_g_modem, "automatic_apn", "1"), "0") != 0;
 	if (!copy_option(profile->apn, sizeof(profile->apn), option(context, four_g_modem, "apn", "")) ||
@@ -629,6 +776,32 @@ static bool first_numeric_value(const char *response, char *destination, size_t 
 	return false;
 }
 
+static bool first_digits_value(const char *response, size_t minimum, size_t maximum,
+	char *destination, size_t capacity)
+{
+	const char *cursor = response;
+
+	while (cursor != NULL && *cursor != '\0') {
+		const char *start = cursor;
+		size_t length;
+
+		while (*start != '\0' && !isdigit((unsigned char)*start))
+			++start;
+		if (*start == '\0')
+			break;
+		cursor = start;
+		while (isdigit((unsigned char)*cursor))
+			++cursor;
+		length = (size_t)(cursor - start);
+		if (length >= minimum && length <= maximum && length < capacity) {
+			memcpy(destination, start, length);
+			destination[length] = '\0';
+			return true;
+		}
+	}
+	return false;
+}
+
 static void write_value(FILE *status, const char *key, const char *value)
 {
 	const char *cursor = value != NULL ? value : "";
@@ -687,7 +860,9 @@ static void parse_registration(FILE *status, const char *prefix, const char *res
 	}
 	snprintf(number, sizeof(number), "%d", registration);
 	write_value(status, key, number);
-	if (strcmp(key, "cereg_status") == 0) {
+	if (strcmp(key, "registration_status") == 0 ||
+		strcmp(key, "cereg_status") == 0 || strcmp(key, "creg_status") == 0 ||
+		strcmp(key, "cgreg_status") == 0) {
 		write_value(status, "registration_status", number);
 		write_value(status, "registered", (registration == 1 || registration == 5) ? "1" : "0");
 	}
@@ -730,7 +905,7 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 		if (first_numeric_value(result->response, text, sizeof(text)))
 			write_value(status, label, text);
 	} else if (strcmp(label, "iccid") == 0) {
-		if (value_after_prefix(result->response, "+QCCID:", text, sizeof(text)))
+		if (first_digits_value(result->response, 18U, 22U, text, sizeof(text)))
 			write_value(status, "iccid", text);
 		else
 			write_response_value(status, "iccid", result);
@@ -751,13 +926,14 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 				state = "6";
 			write_value(status, "sim_state", state);
 		}
-	} else if (strcmp(label, "cereg") == 0) {
-		parse_registration(status, "+CEREG:", result->response, "cereg_status");
-	} else if (strcmp(label, "creg") == 0) {
-		parse_registration(status, "+CREG:", result->response, "creg_status");
-	} else if (strcmp(label, "cgreg") == 0) {
-		parse_registration(status, "+CGREG:", result->response, "cgreg_status");
-	} else if (strcmp(label, "csq") == 0) {
+	} else if (strcmp(label, "registration") == 0) {
+		if (strstr(result->response, "+CEREG:") != NULL)
+			parse_registration(status, "+CEREG:", result->response, "cereg_status");
+		else if (strstr(result->response, "+CREG:") != NULL)
+			parse_registration(status, "+CREG:", result->response, "creg_status");
+		else
+			parse_registration(status, "+CGREG:", result->response, "cgreg_status");
+	} else if (strcmp(label, "signal") == 0) {
 		value = strstr(result->response, "+CSQ:");
 		if (value != NULL && sscanf(value, "+CSQ: %d,%d", &first, &second) == 2) {
 			snprintf(number, sizeof(number), "%d", first);
@@ -770,12 +946,7 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 				snprintf(number, sizeof(number), "%d", first * 100 / 31);
 				write_value(status, "signal_percent", number);
 			}
-		}
-	} else if (strcmp(label, "cesq") == 0) {
-		write_response_value(status, "cesq", result);
-	} else if (strcmp(label, "qcsq") == 0) {
-		value = strstr(result->response, "+QCSQ:");
-		if (value != NULL) {
+		} else if ((value = strstr(result->response, "+QCSQ:")) != NULL) {
 			char network[32] = "";
 			int rssi = -1;
 			int rsrp = -1;
@@ -793,7 +964,64 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 				snprintf(number, sizeof(number), "%d", sinr);
 				write_value(status, "sinr_db", number);
 			}
+		} else if ((value = strstr(result->response, "+CESQ:")) != NULL) {
+			int rxlev = -1;
+			int ber = -1;
+			int rsrq = -1;
+			int rsrp = -1;
+			int sinr = -1;
+
+			write_response_value(status, "cesq", result);
+			if (sscanf(value, "+CESQ: %d,%d,%d,%d,%d", &rxlev, &ber, &rsrq, &rsrp, &sinr) >= 2) {
+				if (rxlev >= 0 && rxlev <= 31) {
+					snprintf(number, sizeof(number), "%d", rxlev);
+					write_value(status, "csq", number);
+					snprintf(number, sizeof(number), "%d", -113 + rxlev * 2);
+					write_value(status, "rssi_dbm", number);
+					snprintf(number, sizeof(number), "%d", rxlev * 100 / 31);
+					write_value(status, "signal_percent", number);
+				}
+				if (rsrq >= 0 && rsrq <= 34) {
+					snprintf(number, sizeof(number), "%d", rsrq);
+					write_value(status, "cesq_rsrq", number);
+				}
+				if (rsrp >= 0 && rsrp <= 97) {
+					snprintf(number, sizeof(number), "%d", rsrp);
+					write_value(status, "cesq_rsrp", number);
+				}
+				if (sinr >= 0 && sinr <= 127) {
+					snprintf(number, sizeof(number), "%d", sinr);
+					write_value(status, "cesq_sinr", number);
+				}
+			}
 		}
+	} else if (strcmp(label, "network_info") == 0) {
+		value = strstr(result->response, "+QNWINFO:");
+		if (value != NULL) {
+			char mode[32] = "";
+			char plmn[32] = "";
+			char band[64] = "";
+			int channel = -1;
+			int parsed;
+
+			parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",\"%31[^\"]\",\"%63[^\"]\",%d", mode, plmn, band, &channel);
+			if (parsed < 3) {
+				char plmn_field[32] = "";
+
+				parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",%31[^,],\"%63[^\"]\",%d", mode, plmn_field, band, &channel);
+				trim_copy(plmn, sizeof(plmn), plmn_field, strlen(plmn_field));
+			}
+			if (parsed >= 3) {
+				write_value(status, "network_mode", mode);
+				write_value(status, "plmn", plmn);
+				write_value(status, "band", band);
+				if (channel >= 0) {
+					snprintf(number, sizeof(number), "%d", channel);
+					write_value(status, "channel", number);
+				}
+			}
+		}
+		write_response_value(status, "network_info_raw", result);
 	} else if (strcmp(label, "qnwinfo") == 0) {
 		value = strstr(result->response, "+QNWINFO:");
 		if (value != NULL) {
@@ -1018,6 +1246,7 @@ static void write_network_state(FILE *status, const struct modem_profile *profil
 
 static void write_unavailable_status(const struct modem_profile *profile)
 {
+	const struct modem_at_profile *at_profile = find_at_profile(profile->at_profile);
 	FILE *status;
 
 	if (mkdir(DETAIL_DIR, 0700) != 0 && errno != EEXIST)
@@ -1027,6 +1256,7 @@ static void write_unavailable_status(const struct modem_profile *profile)
 		return;
 	(void)chmod(DETAIL_STATUS_TMP, 0600);
 	write_value(status, "at_port", profile->port);
+	write_value(status, "at_profile", at_profile->name);
 	write_value(status, "available", "0");
 	write_value(status, "probe_ok", "0");
 	write_value(status, "registered", "0");
@@ -1045,54 +1275,62 @@ static void write_unavailable_status(const struct modem_profile *profile)
 		(void)rename(DETAIL_STATUS_TMP, DETAIL_STATUS);
 }
 
+static void add_probe_command(struct probe_command *commands, size_t capacity,
+	size_t *count, const char *label, const char *const *variants,
+	size_t variant_count, int timeout_ms, bool required)
+{
+	if (*count >= capacity || variants == NULL || variant_count == 0U)
+		return;
+	commands[*count].label = label;
+	commands[*count].commands = variants;
+	commands[*count].command_count = variant_count;
+	commands[*count].timeout_ms = timeout_ms;
+	commands[*count].required = required;
+	++*count;
+}
+
 static bool probe_modem(const struct modem_profile *profile, int fd)
 {
-	static const struct probe_command commands[] = {
-		{ "at", "AT\r", AT_TIMEOUT_MS, true },
-		{ "manufacturer", "AT+CGMI\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "model", "AT+CGMM\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "firmware", "AT+CGMR\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "imei", "AT+GSN\r", AT_TIMEOUT_MS, true },
-		{ "imsi", "AT+CIMI\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "iccid", "AT+QCCID\r", AT_TIMEOUT_MS, true },
-		{ "sim", "AT+CPIN?\r", AT_TIMEOUT_MS, true },
-		{ "qsimstat", "AT+QSIMSTAT?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cereg", "AT+CEREG?\r", AT_TIMEOUT_MS, true },
-		{ "creg", "AT+CREG?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cgreg", "AT+CGREG?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "csq", "AT+CSQ\r", AT_TIMEOUT_MS, true },
-		{ "cesq", "AT+CESQ\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "qcsq", "AT+QCSQ\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cops", "AT+COPS?\r", AT_TIMEOUT_MS, false },
-		{ "qnwinfo", "AT+QNWINFO\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "qeng_serving", "AT+QENG=\"servingcell\"\r", AT_TIMEOUT_MS, false },
-		{ "qeng_neighbour", "AT+QENG=\"neighbourcell\"\r", AT_TIMEOUT_MS, false },
-		{ "qca_info", "AT+QCAINFO\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cfun", "AT+CFUN?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cbc", "AT+CBC\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cnum", "AT+CNUM\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cgdcont", "AT+CGDCONT?\r", AT_TIMEOUT_MS, false },
-		{ "cgauth", "AT+CGAUTH?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cgnapn", "AT+CGNAPN\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cgatt", "AT+CGATT?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cgact", "AT+CGACT?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cgpaddr", "AT+CGPADDR=1\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cgcontrdp", "AT+CGCONTRDP\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "qiact", "AT+QIACT?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cpms", "AT+CPMS?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cscs", "AT+CSCS?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cmgf", "AT+CMGF?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "cnmi", "AT+CNMI?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "qgps", "AT+QGPS?\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "qgpsloc", "AT+QGPSLOC?\r", AT_TIMEOUT_MS, false },
-		{ "qcfg_mode", "AT+QCFG=\"nwscanmode\"\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "qcfg_band", "AT+QCFG=\"band\"\r", AT_OPTIONAL_TIMEOUT_MS, false },
-		{ "qpref_mode", "AT+QNWPREFCFG=\"mode_pref\"\r", AT_OPTIONAL_TIMEOUT_MS, false }
-	};
+	const struct modem_at_profile *at_profile = find_at_profile(profile->at_profile);
+	struct probe_command commands[16];
 	FILE *status = NULL;
 	FILE *raw = NULL;
 	bool base_ok = true;
+	size_t command_count = 0U;
 	size_t index;
+
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "at",
+		at_basic, ARRAY_SIZE(at_basic), AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "manufacturer",
+		at_manufacturer, ARRAY_SIZE(at_manufacturer), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "model",
+		at_model, ARRAY_SIZE(at_model), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "firmware",
+		at_firmware, ARRAY_SIZE(at_firmware), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "imei",
+		at_profile->imei_commands, at_profile->imei_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "imsi",
+		at_imsi, ARRAY_SIZE(at_imsi), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "iccid",
+		at_profile->iccid_commands, at_profile->iccid_command_count, AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "sim",
+		at_profile->sim_commands, at_profile->sim_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "registration",
+		at_profile->registration_commands, at_profile->registration_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "signal",
+		at_profile->signal_commands, at_profile->signal_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "operator",
+		at_operator, ARRAY_SIZE(at_operator), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "apn",
+		at_profile->apn_query_commands, at_profile->apn_query_command_count, AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgatt",
+		at_cgatt, ARRAY_SIZE(at_cgatt), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgact",
+		at_cgact, ARRAY_SIZE(at_cgact), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgpaddr",
+		at_cgpaddr, ARRAY_SIZE(at_cgpaddr), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgcontrdp",
+		at_cgcontrdp, ARRAY_SIZE(at_cgcontrdp), AT_OPTIONAL_TIMEOUT_MS, false);
 
 	if (mkdir(DETAIL_DIR, 0700) != 0 && errno != EEXIST)
 		return false;
@@ -1103,6 +1341,7 @@ static bool probe_modem(const struct modem_profile *profile, int fd)
 	(void)chmod(DETAIL_STATUS_TMP, 0600);
 	(void)chmod(DETAIL_RAW ".tmp", 0600);
 	write_value(status, "at_port", profile->port);
+	write_value(status, "at_profile", at_profile->name);
 	write_value(status, "registered", "0");
 	write_value(status, "registration_status", "-1");
 	write_value(status, "imei", "");
@@ -1114,17 +1353,27 @@ static bool probe_modem(const struct modem_profile *profile, int fd)
 	write_network_state(status, profile);
 	write_value(status, "updated_at", "0");
 	fprintf(raw, "4G AT probe; one command per transaction\n\n");
-	for (index = 0U; index < sizeof(commands) / sizeof(commands[0]); ++index) {
+	for (index = 0U; index < command_count; ++index) {
 		struct at_result result;
+		const char *used_command = commands[index].commands[0];
+		bool command_ok = false;
+		size_t candidate;
 
-		if (!run_at_command(fd, commands[index].command, commands[index].timeout_ms, &result)) {
-			fprintf(raw, "[%s] %s\n<unsupported or timeout>\n\n", commands[index].label, commands[index].command);
+		for (candidate = 0U; candidate < commands[index].command_count; ++candidate) {
+			used_command = commands[index].commands[candidate];
+			if (run_at_command(fd, used_command, commands[index].timeout_ms, &result)) {
+				command_ok = true;
+				break;
+			}
+		}
+		if (!command_ok) {
+			fprintf(raw, "[%s] %s\n<unsupported or timeout>\n\n", commands[index].label, used_command);
 			write_value(status, commands[index].label, "unsupported");
 			if (commands[index].required)
 				base_ok = false;
 			continue;
 		}
-		fprintf(raw, "[%s] %s\n%s\n", commands[index].label, commands[index].command, result.response);
+		fprintf(raw, "[%s] %s\n%s\n", commands[index].label, used_command, result.response);
 		parse_probe_result(status, commands[index].label, &result);
 	}
 	{
@@ -1158,11 +1407,22 @@ fail_closed:
 	return false;
 }
 
+static unsigned cstt_auth_number(const char *auth_type)
+{
+	if (strcmp(auth_type, "pap") == 0)
+		return 2U;
+	if (strcmp(auth_type, "chap") == 0)
+		return 3U;
+	return 0U;
+}
+
 static bool execute_profile(const struct modem_profile *profile, int fd)
 {
+	const struct modem_at_profile *at_profile = find_at_profile(profile->at_profile);
 	struct at_result result;
 	char command[384];
 	unsigned auth;
+	bool apn_configured_with_cstt = false;
 
 	if (profile->pin_code[0] != '\0') {
 		snprintf(command, sizeof(command), "AT+CPIN=\"%s\"\r", profile->pin_code);
@@ -1172,13 +1432,28 @@ static bool execute_profile(const struct modem_profile *profile, int fd)
 		}
 	}
 	if (!profile->automatic_apn) {
-		snprintf(command, sizeof(command), "AT+CGDCONT=1,\"%s\",\"%s\"\r", pdp_name(profile->pdp_type), profile->apn);
-		if (!run_at_command(fd, command, AT_TIMEOUT_MS, &result)) {
+		if (at_profile->uses_cstt) {
+			if (strcmp(profile->auth_type, "pap_or_chap") == 0) {
+				fprintf(stderr, "IT-694 CSTT does not support PAP-or-CHAP authentication\n");
+				return false;
+			}
+			snprintf(command, sizeof(command), "AT+CSTT=\"%s\",\"%s\",\"%s\",%u\r",
+				profile->apn, profile->username, profile->password,
+				cstt_auth_number(profile->auth_type));
+			apn_configured_with_cstt = run_at_command(fd, command, AT_TIMEOUT_MS, &result);
+			if (!apn_configured_with_cstt)
+				snprintf(command, sizeof(command), "AT+CGDCONT=1,\"IP\",\"%s\"\r",
+					profile->apn);
+		} else {
+			snprintf(command, sizeof(command), "AT+CGDCONT=1,\"%s\",\"%s\"\r",
+				pdp_name(profile->pdp_type), profile->apn);
+		}
+		if ((!apn_configured_with_cstt && !run_at_command(fd, command, AT_TIMEOUT_MS, &result))) {
 			fprintf(stderr, "AT transaction failed at PDP/APN\n");
 			return false;
 		}
 	}
-	if (strcmp(profile->auth_type, "none") != 0) {
+	if (strcmp(profile->auth_type, "none") != 0 && !apn_configured_with_cstt) {
 		auth = auth_number(profile->auth_type);
 		snprintf(command, sizeof(command), "AT+CGAUTH=1,%u,\"%s\",\"%s\"\r", auth, profile->username, profile->password);
 		if (!run_at_command(fd, command, AT_TIMEOUT_MS, &result)) {
@@ -1253,8 +1528,8 @@ static bool execute_command(const struct modem_profile *profile, const char *act
 	}
 	if (strcmp(action, "probe") == 0) {
 		success = probe_modem(profile, fd);
-		if (success)
-			(void)sync_identity_from_status();
+		/* A valid IMEI is useful even when an optional command is unsupported. */
+		(void)sync_identity_from_status();
 		printf(success ? "complete 4G probe succeeded on %s\n" : "4G probe completed with required AT failures on %s\n", profile->port);
 	} else if (strcmp(action, "redial") == 0) {
 		success = run_at_command(fd, "AT+CFUN=1,1\r", AT_TIMEOUT_MS, &result);

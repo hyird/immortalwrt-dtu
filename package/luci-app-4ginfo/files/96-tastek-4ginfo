@@ -32,6 +32,7 @@ set_if_needed 4ginfo.modem.monitor_interval 30
 case "$board" in
 	tastek,it692)
 		# IT-692 uses the legacy modem USB identity and its RNDIS interface.
+		set_if_needed 4ginfo.modem.at_profile it692
 		set_if_needed edgenode.modem.usb_vendor 3505
 		set_if_needed edgenode.modem.usb_product 0003
 		set_if_needed 4ginfo.modem.network_interface eth1
@@ -40,6 +41,7 @@ case "$board" in
 	tastek,it694)
 		# IT-694 uses the Marvell composite identity, usb0, and a named
 		# modem-power GPIO exported by its DTS.
+		set_if_needed 4ginfo.modem.at_profile it694
 		set_if_needed edgenode.modem.usb_vendor 1286
 		set_if_needed edgenode.modem.usb_product 4e3c
 		set_if_needed 4ginfo.modem.network_interface usb0

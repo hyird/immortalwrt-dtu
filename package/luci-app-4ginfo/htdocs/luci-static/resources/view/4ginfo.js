@@ -8,7 +8,6 @@
 'require view';
 
 var detailStatusPath = '/tmp/4ginfo/modem.status';
-var detailRawPath = '/tmp/4ginfo/modem.raw';
 var legacyStatusPath = '/tmp/edgenode/modem.status';
 var initialProbe = true;
 
@@ -49,10 +48,6 @@ function text(value) {
 
 function boolText(value, yes, no) {
 	return value === '1' ? yes : value === '0' ? no : text(value);
-}
-
-function enumText(value, values) {
-	return Object.prototype.hasOwnProperty.call(values, value) ? values[value] : text(value);
 }
 
 function formatTimestamp(value) {
@@ -177,10 +172,10 @@ function removePageActions(node) {
 function statusRows(status) {
 	return [
 		row('模块可用', boolText(status.available, '已发现', '未发现')),
-		row('完整 AT 探测', boolText(status.probe_ok, '已完成', '基础命令失败')),
 		row('网络连接', boolText(status.connected, '已连接', '未连接')),
 		row('网络注册', boolText(status.registered, '已注册', '未注册')),
 		row('AT 端口', text(status.at_port)),
+		row('SIM 状态', text(status.sim_state_name)),
 		row('最后更新', formatTimestamp(status.updated_at))
 	];
 }
@@ -192,40 +187,15 @@ function identityRows(status) {
 		row('固件版本', text(status.firmware)),
 		row('模块 IMEI', text(status.imei)),
 		row('SIM IMSI', text(status.imsi)),
-		row('SIM ICCID', text(status.iccid)),
-		row('本机号码（MSISDN）', text(status.msisdn)),
-		row('SIM 状态', enumText(status.sim_state, {
-			'0': '未指定', '1': '未知', '2': '就绪', '3': '未插入',
-			'4': '需要 PIN', '5': '需要 PUK', '6': '已锁定'
-		})),
-		row('SIM 状态文本', text(status.sim_state_name)),
-		row('SIM 卡检测', text(status.sim_presence))
+		row('SIM ICCID', text(status.iccid))
 	];
 }
 
 function registrationRows(status) {
 	return [
-		row('CEREG 注册状态', enumText(status.cereg_status, {
-			'0': '未注册', '1': '已注册（本地）', '2': '搜索中',
-			'3': '注册被拒绝', '4': '未知', '5': '已注册（漫游）'
-		})),
-		row('CREG 电路域注册', text(status.creg_status)),
-		row('CGREG 分组域注册', text(status.cgreg_status)),
-		row('注册模式', text(status.registration_mode)),
-		row('运营商 PLMN', text(status.plmn)),
-		row('运营商名称', text(status.operator_name || status.mobile_operator)),
-		row('网络制式', text(status.network_mode || status.network_type)),
-		row('接入技术码', text(status.access_technology || status.registration_act)),
-		row('网络信息原始值', text(status.network_info_raw)),
-		row('服务小区状态', text(status.serving_state)),
-		row('服务小区 RAT', text(status.serving_rat)),
-		row('双工模式', text(status.serving_duplex)),
-		row('小区 MCC', text(status.mcc)),
-		row('小区 MNC', text(status.mnc)),
-		row('位置区/跟踪区', text(status.location_area_code)),
-		row('跟踪区代码（TAC）', text(status.tracking_area_code || status.location_area_code)),
-		row('小区 ID', text(status.cell_id)),
-		row('物理小区 ID（PCI）', text(status.pci))
+		row('注册状态', text(status.registration_status)),
+		row('运营商', text(status.operator_name || status.mobile_operator)),
+		row('接入技术码', text(status.access_technology || status.registration_act))
 	];
 }
 
@@ -233,18 +203,7 @@ function signalRows(status) {
 	return [
 		row('信号质量（CSQ）', status.csq === '99' ? '未知' : withUnit(status.csq, ' / 31')),
 		row('接收信号（RSSI）', withUnit(status.rssi_dbm, ' dBm')),
-		row('信号百分比', withUnit(status.signal_percent, '%')),
-		row('误码率（BER）', text(status.ber)),
-		row('扩展 RSRP', withUnit(status.rsrp_dbm, ' dBm')),
-		row('扩展 RSRQ', withUnit(status.rsrq_db, ' dB')),
-		row('扩展 SINR', withUnit(status.sinr_db, ' dB')),
-		row('QCSQ 原始指标', text(status.qcsq_rssi) + ' / ' + text(status.rsrp_dbm) + ' / ' + text(status.rsrq_db) + ' / ' + text(status.sinr_db)),
-		row('CESQ 原始指标', text(status.cesq)),
-		row('当前频段', text(status.band)),
-		row('服务小区频段码', text(status.serving_band)),
-		row('信道/EARFCN', text(status.channel || status.earfcn)),
-		row('上行带宽码', text(status.uplink_bandwidth)),
-		row('下行带宽码', text(status.downlink_bandwidth))
+		row('信号百分比', withUnit(status.signal_percent, '%'))
 	];
 }
 
@@ -255,46 +214,7 @@ function dataRows(status) {
 		row('PDP 类型', text(status.pdp_type)),
 		row('APN', text(status.apn)),
 		row('PDP 地址', text(status.pdp_address || status.mobile_ipv4)),
-		row('移动 IPv4', text(status.mobile_ipv4)),
-		row('移动 IPv6', text(status.mobile_ipv6)),
-		row('PDP 配置原始值', text(status.pdp_config)),
-		row('网关/DNS 原始信息', text(status.cgcontrdp)),
-		row('Quectel 数据会话', text(status.qiact)),
-		row('自动 APN 查询', text(status.cgnapn)),
-		row('载波聚合信息', text(status.qca_info))
-	];
-}
-
-function ancillaryRows(status) {
-	return [
-		row('射频功能状态（CFUN）', enumText(status.radio_function, {
-			'0': '最小功能', '1': '全功能', '4': '飞行/离线模式'
-		})),
-		row('电池状态', text(status.battery_status)),
-		row('电池电量', withUnit(status.battery_percent, '%')),
-		row('电池电压', withUnit(status.battery_voltage_mv, ' mV')),
-		row('短信存储（CPMS）', text(status.cpms)),
-		row('字符集（CSCS）', text(status.cscs)),
-		row('短信格式（CMGF）', text(status.cmgf)),
-		row('短信通知（CNMI）', text(status.cnmi)),
-		row('GPS 状态', text(status.gps_status)),
-		row('GPS 定位结果', text(status.gps_location)),
-		row('首选网络模式', text(status.preferred_mode)),
-		row('首选频段', text(status.preferred_band))
-	];
-}
-
-function configRows(config) {
-	return [
-		row('USB 厂商 ID', text(config.usbVendor)),
-		row('USB 产品 ID', text(config.usbProduct)),
-		row('AT 通信端口', text(config.atPort)),
-		row('4G 网络接口', text(config.networkInterface)),
-		row('EdgeNode 状态文件', text(config.statusPath)),
-		row('完整信息文件', detailStatusPath),
-		row('监测间隔', config.monitorInterval ? withUnit(config.monitorInterval, ' 秒') : '-'),
-		row('UCI 保存的 IMEI', text(config.configuredImei)),
-		row('UCI 保存的 ICCID', text(config.configuredIccid))
+		row('移动 IPv4', text(status.mobile_ipv4))
 	];
 }
 
@@ -319,37 +239,16 @@ function runCommand(map, command, args, fallback) {
 
 function addConnectionMap() {
 	var m = new form.Map('4ginfo', '4G连接配置',
-		'这里可以真正修改 4G 模块的连接和选网参数；保存只是写入 UCI，点击应用后才逐条发送 AT 命令。');
-	var s = m.section(form.NamedSection, 'modem', 'modem', '连接与选网');
+		'这里只保留 4G 连接所需的 APN、认证和 SIM 参数。保存后点击应用，模块会按对应型号下发适配的 AT 命令。');
+	var s = m.section(form.NamedSection, 'modem', 'modem', 'APN 与 SIM');
 	var o;
 
 	s.addremove = false;
 
-	o = s.option(form.ListValue, 'radio_function', '射频功能');
-	o.value('full', '全功能/在线');
-	o.value('minimum', '最小功能');
-	o.value('offline', '离线/飞行模式');
-	o.default = 'full';
-	o.rmempty = false;
-	o.description = '对应标准 AT+CFUN；切换为最小或离线功能可能断开 4G。';
-
-	o = s.option(form.ListValue, 'operator_mode', '运营商选择');
-	o.value('auto', '自动选网');
-	o.value('manual', '手动指定 PLMN');
-	o.default = 'auto';
-	o.rmempty = false;
-
-	o = s.option(form.Value, 'operator_mccmnc', '手动 PLMN（MCCMNC）');
-	o.maxlength = 6;
-	o.depends('operator_mode', 'manual');
-	o.validate = function(section_id, value) {
-		return /^\d{5,6}$/.test(value) || 'PLMN 必须是 5 至 6 位数字';
-	};
-
 	o = s.option(form.Flag, 'automatic_apn', '自动 APN');
 	o.default = '1';
 	o.rmempty = false;
-	o.description = '启用后由运营商或模块自动选择 APN；关闭后必须填写 APN。';
+	o.description = '启用后不主动写入 APN；关闭后按当前模块型号下发 APN 设置。';
 
 	o = s.option(form.Value, 'apn', 'APN');
 	o.maxlength = 100;
@@ -401,53 +300,12 @@ function addConnectionMap() {
 		return value === '' || /^\d{4,8}$/.test(value) || 'SIM PIN 必须为空或 4 至 8 位数字';
 	};
 
-	o = s.option(form.Flag, 'redial_after_apply', '应用后重拨');
-	o.default = '0';
-	o.description = '应用连接参数后执行模块重启，可能短暂中断网络。';
-
 	o = s.option(form.Button, '_apply', '应用连接配置');
 	o.inputtitle = '应用';
 	o.inputstyle = 'apply';
-	o.description = '按 SIM PIN、PDP/APN、认证、选网、射频功能的顺序逐条等待 AT 最终响应。';
+	o.description = '按模块型号选择 APN 指令：694 使用 AT+CSTT，692 使用其旧版 PDP 配置方式。';
 	o.onclick = function() {
 		return runCommand(m, '/usr/sbin/4ginfo-modemctl', [ 'apply' ], '4G 连接配置已应用');
-	};
-
-	o = s.option(form.Button, '_redial', '重拨模块');
-	o.inputtitle = '重拨';
-	o.inputstyle = 'warning';
-	o.description = '执行 AT+CFUN=1,1；网络会短暂中断。';
-	o.onclick = function() {
-		return fs.exec('/usr/sbin/4ginfo-modemctl', [ 'redial' ]).then(function(result) {
-			notifyCommand(result, '模块正在重拨', 'info');
-		}).catch(function(error) {
-			notifyCommand(error, error.message || '模块重拨失败', 'error');
-		});
-	};
-
-	s = m.section(form.NamedSection, 'modem', 'modem', '单条 AT 事务');
-	s.addremove = false;
-	o = s.option(form.Value, 'custom_at', 'AT 命令');
-	o.maxlength = 256;
-	o.placeholder = '例如：AT+QENG="servingcell"';
-	o.description = '用于执行模块厂商特有功能。每次只发送一条命令，并等待 OK/ERROR 最终响应；不要输入回车。';
-	o.validate = function(section_id, value) {
-		return /^AT[^\r\n\x00-\x1f\x7f]*$/.test(value) || '命令必须以 AT 开头且不能包含控制字符';
-	};
-	o = s.option(form.Button, '_at', '执行单条 AT');
-	o.inputtitle = '发送并显示响应';
-	o.inputstyle = 'button';
-	o.onclick = function() {
-		return m.save(null, true).then(function() {
-			var command = uci.get('4ginfo', 'modem', 'custom_at') || '';
-
-			return fs.exec('/usr/sbin/4ginfo-modemctl', [ 'at', command ]);
-		}).then(function(result) {
-			notifyCommand(result, 'AT 事务完成', 'info');
-			return m.reset();
-		}).catch(function(error) {
-			notifyCommand(error, error.message || 'AT 事务失败', 'error');
-		});
 	};
 
 	return m;
@@ -463,24 +321,10 @@ return view.extend({
 			uci.load('4ginfo'),
 			probe,
 			L.resolveDefault(fs.read(detailStatusPath), ''),
-			L.resolveDefault(fs.read(legacyStatusPath), ''),
-			L.resolveDefault(fs.read(detailRawPath), '')
+			L.resolveDefault(fs.read(legacyStatusPath), '')
 		]).then(function(values) {
-			var config = {
-				usbVendor: uci.get('edgenode', 'modem', 'usb_vendor'),
-				usbProduct: uci.get('edgenode', 'modem', 'usb_product'),
-				atPort: uci.get('4ginfo', 'modem', 'at_port') || uci.get('edgenode', 'modem', 'at_port'),
-				statusPath: detailStatusPath,
-				monitorInterval: uci.get('4ginfo', 'modem', 'monitor_interval') || '30',
-				networkInterface: uci.get('4ginfo', 'modem', 'network_interface') || 'usb0',
-				configuredImei: uci.get('edgenode', 'modem', 'imei'),
-				configuredIccid: uci.get('edgenode', 'modem', 'iccid')
-			};
-
 			return {
-				config: config,
 				status: mergeStatus(parseStatus(values[3]), parseStatus(values[4])),
-				raw: values[5] || '',
 				hasStatus: values[3] !== '' || values[4] !== ''
 			};
 		});
@@ -489,13 +333,13 @@ return view.extend({
 	refreshStatus: function(container) {
 		var self = this;
 
-		return fs.exec('/usr/sbin/4ginfo-modemctl', [ 'probe' ]).then(function(result) {
-			notifyCommand(result, '完整 4G信息已刷新', 'info');
+	return fs.exec('/usr/sbin/4ginfo-modemctl', [ 'probe' ]).then(function(result) {
+			notifyCommand(result, '必要 4G 信息已刷新', 'info');
 			return self.load();
 		}).then(function(data) {
 			dom.content(container, self.renderStatus(data));
 		}).catch(function(error) {
-			notifyCommand(error, error.message || '完整 4G信息刷新失败', 'error');
+			notifyCommand(error, error.message || '必要 4G 信息刷新失败', 'error');
 		});
 	},
 
@@ -503,10 +347,10 @@ return view.extend({
 		var refresh = E('button', {
 			'class': 'cbi-button cbi-button-action',
 			'type': 'button'
-		}, '刷新全部 4G信息');
+		}, '刷新 4G 信息');
 		var content = [
 			E('div', { 'class': 'cbi-section-descr' },
-				'本页会显示模块支持的所有已知 AT 项；设备不支持的厂商扩展会明确显示。点击刷新会逐条执行探测，每条命令都等待最终响应。')
+				'按当前模块型号读取必要的身份、SIM、注册、信号和移动数据状态；不支持的厂商扩展不会阻塞上报。')
 		];
 		var self = this;
 
@@ -520,25 +364,13 @@ return view.extend({
 
 		if (!data.hasStatus)
 			content.push(E('div', { 'class': 'alert-message warning' },
-				'暂时无法读取 4G 状态，请检查 EdgeNode 服务、AT 端口和权限。'));
+				'暂时无法读取 4G 状态，请检查 4ginfo 服务、AT 端口和权限。'));
 
-		var activeTab = data.statusContainer && data.statusContainer._activeTab || 'overview';
-		content.push(tabbedPanels([
-			{ id: 'overview', label: '概览', content: section('运行状态', statusRows(data.status)) },
-			{ id: 'identity', label: '模块/SIM', content: section('模块身份与 SIM', identityRows(data.status)) },
-			{ id: 'network', label: '网络注册', content: section('注册与运营商', registrationRows(data.status)) },
-			{ id: 'signal', label: '信号/小区', content: section('无线信号与小区', signalRows(data.status)) },
-			{ id: 'data', label: '数据/PDP', content: section('移动数据与 PDP', dataRows(data.status)) },
-			{ id: 'ancillary', label: '射频/短信/GPS', content: section('射频、电池、短信与定位', ancillaryRows(data.status)) },
-			{ id: 'raw', label: '原始 AT', content: E('div', { 'class': 'cbi-section' }, [
-				E('h3', { 'class': 'cbi-section-title' }, '逐条 AT 原始响应'),
-				E('pre', { 'style': 'max-height: 32rem; overflow: auto; white-space: pre-wrap;' },
-					data.raw || '尚未生成原始响应；请点击“刷新全部 4G信息”。')
-			]) }
-		], activeTab, function(tab) {
-			if (data.statusContainer)
-				data.statusContainer._activeTab = tab;
-		}));
+		content.push(section('运行状态', statusRows(data.status)));
+		content.push(section('模块与 SIM', identityRows(data.status)));
+		content.push(section('网络', registrationRows(data.status)));
+		content.push(section('信号', signalRows(data.status)));
+		content.push(section('移动数据', dataRows(data.status)));
 
 		return content;
 	},
@@ -548,11 +380,6 @@ return view.extend({
 		var connectionContainer = E('div');
 		var self = this;
 		var connectionMap = addConnectionMap();
-		var devicePanel = E('div', {}, [
-			E('div', { 'class': 'cbi-section-descr' },
-				'这里仅展示 EdgeNode 当前使用的 4G 设备接入参数，不提供修改、保存或重启操作。设备接入配置仍由 luci-app-edgenode 负责。'),
-			section('4G设备接入配置', configRows(data.config))
-		]);
 
 		data.statusContainer = statusContainer;
 		dom.content(statusContainer, this.renderStatus(data));
@@ -569,15 +396,14 @@ return view.extend({
 
 			var topTabs = tabbedPanels([
 				{ id: 'status', label: '4G信息', content: statusContainer },
-				{ id: 'connection', label: '4G连接配置', content: connectionContainer },
-				{ id: 'device', label: '设备接入', content: devicePanel }
+				{ id: 'connection', label: 'APN设置', content: connectionContainer }
 			], 'status');
 
 			return E('div', { 'class': 'cbi-map' }, [
 				tabStyles(),
 				E('h2', { 'class': 'cbi-map-title' }, '4G信息'),
 				E('div', { 'class': 'cbi-map-descr' },
-					'完整显示 4G 模块信息，并提供连接、选网、射频和逐条 AT 配置能力；设备接入参数仅展示。'),
+					'显示必要的 4G 模块状态，并提供按模块型号适配的 APN 设置。'),
 				topTabs
 			]);
 		});
