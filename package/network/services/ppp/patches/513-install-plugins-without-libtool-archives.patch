@@ -18,13 +18,13 @@ misleading --finish reminder for the DESTDIR staging path.
 
 --- a/pppd/plugins/pppoe/Makefile.am
 +++ b/pppd/plugins/pppoe/Makefile.am
-@@ -1,3 +1,9 @@
--pppd_plugin_LTLIBRARIES = pppoe.la 
+@@ -1,2 +1,9 @@
+--pppd_plugin_LTLIBRARIES = pppoe.la 
 +pppd_plugin_LIBS = pppoe.la
 +pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
 +noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
  pppd_plugindir = $(PPPD_PLUGIN_DIR)
- 
++
 +install-data-local:
 +	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
 +	$(INSTALL_PROGRAM) $(addprefix .libs/,$(pppd_plugin_SOS)) \
