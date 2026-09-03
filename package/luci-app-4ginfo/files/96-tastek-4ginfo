@@ -61,6 +61,10 @@ if [ "$board" = 'tastek,it694' ] && [ -e /etc/config/network ]; then
 		uci -q delete network.wan6
 		changed_network=1
 	fi
+	if uci -q get network.wwan_4g6 >/dev/null 2>&1; then
+		uci -q delete network.wwan_4g6
+		changed_network=1
+	fi
 fi
 
 [ "$changed_edgenode" -eq 0 ] || uci -q commit edgenode

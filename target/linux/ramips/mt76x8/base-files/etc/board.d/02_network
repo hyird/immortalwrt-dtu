@@ -16,6 +16,7 @@ tastek,it694)
 	uci -q set network.wan.ipv6='0'
 	uci -q set network.wan.delegate='0'
 	uci -q delete network.wan6
+	uci -q delete network.wwan_4g6
 	ucidef_set_interface "wwan_4g" device "usb0" protocol "dhcp"
 	uci -q set network.wwan_4g.ipv6='0'
 	uci -q set network.wwan_4g.delegate='0'
