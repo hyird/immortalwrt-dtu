@@ -54,10 +54,20 @@ esac
 # mapping is defined separately in target/linux/ramips/mt76x8/base-files.
 if [ "$board" = 'tastek,it694' ] && [ -e /etc/config/network ]; then
 	# Preserve the board's physical binding: ports 1-4 are LAN and port 0 is WAN.
+	set_if_needed network.lan.device br-lan
 	set_if_needed network.wan.device eth0.2
 	if [ "$(uci -q get network.@device[0].name 2>/dev/null)" = 'br-lan' ]; then
 		set_if_needed network.@device[0].ports eth0.1
 	fi
+	switch_index=''
+	switch_vlan=''
+	for switch_index in 0 1 2 3 4 5 6 7; do
+		switch_vlan="$(uci -q get "network.@switch_vlan[$switch_index].vlan" 2>/dev/null)"
+		case "$switch_vlan" in
+			1) set_if_needed "network.@switch_vlan[$switch_index].ports" '1 2 3 4 6t' ;;
+			2) set_if_needed "network.@switch_vlan[$switch_index].ports" '0 6t' ;;
+		esac
+	done
 	set_if_needed network.wan.ipv6 0
 	set_if_needed network.wan.delegate 0
 	set_if_needed network.wwan_4g.ipv6 0
