@@ -87,12 +87,14 @@ define Package/edgenode/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/edgenode $(1)/usr/sbin/edgenode
 	$(INSTALL_BIN) $(CURDIR)/files/edgenode-start $(1)/usr/sbin/edgenode-start
+	$(INSTALL_BIN) $(CURDIR)/files/edgenode-modem-power $(1)/usr/sbin/edgenode-modem-power
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(CURDIR)/files/edgenode.init $(1)/etc/init.d/edgenode
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/edgenode.config $(1)/etc/config/edgenode
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) $(CURDIR)/files/95-edgenode-platform $(1)/etc/uci-defaults/95-edgenode-platform
+	$(INSTALL_BIN) $(CURDIR)/files/96-edgenode-it694 $(1)/etc/uci-defaults/96-edgenode-it694
 	$(INSTALL_DIR) $(1)/usr/share/edgenode
 	$(INSTALL_DATA) $(CURDIR)/files/NOTICE $(1)/usr/share/edgenode/NOTICE
 endef

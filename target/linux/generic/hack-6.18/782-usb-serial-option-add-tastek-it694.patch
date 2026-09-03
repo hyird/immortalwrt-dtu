@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ImmortalWrt DTU <firmware@example.invalid>
+Date: Thu, 3 Sep 2026 00:00:00 +0800
+Subject: [PATCH] usb: serial: option: support Tastek IT-694 modem
+
+The IT-694 modem exposes a Marvell composite device with USB ID
+1286:4e3c.  Its vendor-specific interfaces provide the AT and diagnostic
+ports and must be handled by the option driver.
+
+---
+ drivers/usb/serial/option.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+--- a/drivers/usb/serial/option.c
++++ b/drivers/usb/serial/option.c
+@@ -1170,6 +1170,8 @@ static const struct usb_device_id option
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(MEIGLINK_VENDOR_ID, MEIGLINK_PRODUCT_SLM828, USB_CLASS_VENDOR_SPEC, 0x10, 0x03) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(MEIGLINK_VENDOR_ID, MEIGLINK_PRODUCT_SLM828, USB_CLASS_VENDOR_SPEC, 0x10, 0x04) },
++	/* Tastek IT-694 / Marvell Mobile Composite Device Bus */
++	{ USB_DEVICE(0x1286, 0x4e3c) },
+ 	/* Quectel products using Qualcomm vendor ID */
+ 	{ USB_DEVICE(QUALCOMM_VENDOR_ID, QUECTEL_PRODUCT_UC15)},
+ 	{ USB_DEVICE(QUALCOMM_VENDOR_ID, QUECTEL_PRODUCT_UC20),

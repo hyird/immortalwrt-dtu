@@ -13,7 +13,12 @@ tastek,it692)
 tastek,it694)
 	ucidef_add_switch "switch0" \
 		"0:wan" "1:lan" "2:lan" "3:lan" "4:lan" "6@eth0"
+	uci -q set network.wan.ipv6='0'
+	uci -q set network.wan.delegate='0'
+	uci -q delete network.wan6
 	ucidef_set_interface "wwan_4g" device "usb0" protocol "dhcp"
+	uci -q set network.wwan_4g.ipv6='0'
+	uci -q set network.wwan_4g.delegate='0'
 	uci -q add_list firewall.@zone[1].network='wwan_4g'
 	;;
 esac

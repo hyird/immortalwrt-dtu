@@ -25,6 +25,17 @@
 		reg = <0x0 0x4000000>;
 	};
 
+	/* GPIO bank 1, pin 11 in the original firmware is global GPIO43. */
+	gpio-export {
+		compatible = "gpio-export";
+
+		modem-power {
+			gpio-export,name = "modem_power";
+			gpio-export,output = <1>;
+			gpios = <&gpio 43 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
 	keys {
 		compatible = "gpio-keys";
 

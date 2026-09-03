@@ -1,0 +1,56 @@
+#!/bin/sh
+
+# IT-694's original gpio_manager 1 11 maps to MT7628 global GPIO43.
+# The board DTS exports it by name so user space does not depend on a
+# global-numbering ABI.
+POWER_VALUE='/sys/class/gpio/modem_power/value'
+
+is_it694() {
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = 'tastek,it694' ]
+}
+
+set_power() {
+	[ -w "$POWER_VALUE" ] || return 1
+	echo "$1" >"$POWER_VALUE"
+}
+
+is_it694 || exit 0
+
+case "$1" in
+	--on)
+		set_power 1
+		exit $?
+		;;
+	--off)
+		set_power 0
+		exit $?
+		;;
+	--watch)
+		at_port="${2:-/dev/ttyUSB2}"
+		set_power 1 || exit 0
+		cleanup() {
+			set_power 0
+		}
+		trap 'cleanup; exit 0' INT TERM
+		trap cleanup EXIT
+		while :; do
+			if [ -e "$at_port" ]; then
+				sleep 5
+				continue
+			fi
+
+			# A partial ttyUSB enumeration is the same failure mode handled by
+			# the original firmware: power-cycle once and let USB enumerate again.
+			if [ -e /dev/ttyUSB0 ]; then
+				set_power 0
+				sleep 1
+				set_power 1
+			fi
+			sleep 5
+		done
+		;;
+	*)
+		echo "usage: $0 --on|--off|--watch [AT_PORT]" >&2
+		exit 2
+		;;
+esac

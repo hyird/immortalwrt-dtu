@@ -24,41 +24,36 @@ initialize_model() {
 	uci -q set edgenode.node.model="$detected" && uci -q commit edgenode
 }
 
-bind_modem_at_port() {
-	local usb_vendor="$1"
-	local usb_product="$2"
-	local at_port="$3"
-	local new_id='/sys/bus/usb-serial/drivers/option1/new_id'
-	local tries=0
-
-	[ -e "$at_port" ] && return 0
-	[ -n "$usb_vendor" ] && [ -n "$usb_product" ] && [ -w "$new_id" ] && \
-		echo "$usb_vendor $usb_product" >"$new_id" 2>/dev/null
-	while [ ! -e "$at_port" ] && [ "$tries" -lt 10 ]; do
-		sleep 1
-		tries=$((tries + 1))
-	done
-	[ -e "$at_port" ]
-}
-
 start_service() {
-	local usb_vendor usb_product at_port status_path monitor_interval wan_interface
+	local at_port status_path monitor_interval wan_interface board
 
 	config_load edgenode
 	initialize_model
-	config_get usb_vendor modem usb_vendor
-	config_get usb_product modem usb_product
 	config_get at_port modem at_port
 	config_get status_path modem status_path '/tmp/edgenode/modem.status'
 	config_get monitor_interval modem monitor_interval '30'
 	config_get wan_interface hardware wan_interface 'eth1'
 
-	if bind_modem_at_port "$usb_vendor" "$usb_product" "$at_port"; then
+	board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+	if [ "$board" = 'tastek,it694' ]; then
+		/usr/sbin/edgenode-modem-power --on >/dev/null 2>&1 || true
+	fi
+
+	if [ -e "$at_port" ]; then
 		/usr/sbin/edgenode --initialize-modem "$at_port" "$status_path" "$wan_interface" \
 			>/dev/null 2>&1 || \
 			logger -t edgenode 'modem identity is not available yet; monitor will retry'
 	else
 		logger -t edgenode "modem AT port $at_port is not available yet"
+	fi
+
+	if [ "$board" = 'tastek,it694' ]; then
+		procd_open_instance modem_power
+		procd_set_param command /usr/sbin/edgenode-modem-power --watch "$at_port"
+		procd_set_param respawn 3600 5 -1
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_close_instance
 	fi
 
 	procd_open_instance modem
@@ -78,6 +73,11 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+}
+
+stop_service() {
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = 'tastek,it694' ] || return 0
+	/usr/sbin/edgenode-modem-power --off >/dev/null 2>&1 || true
 }
 
 reload_service() {
