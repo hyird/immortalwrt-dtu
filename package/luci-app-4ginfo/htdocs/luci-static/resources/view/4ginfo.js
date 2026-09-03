@@ -50,15 +50,6 @@ function boolText(value, yes, no) {
 	return value === '1' ? yes : value === '0' ? no : text(value);
 }
 
-function formatTimestamp(value) {
-	var seconds = Number(value);
-
-	if (!Number.isFinite(seconds) || seconds <= 0)
-		return '-';
-
-	return new Date(seconds * 1000).toLocaleString();
-}
-
 function withUnit(value, unit) {
 	var display = text(value);
 
@@ -169,33 +160,15 @@ function removePageActions(node) {
 		});
 }
 
-function statusRows(status) {
+function moduleSimRows(status) {
 	return [
 		row('模块可用', boolText(status.available, '已发现', '未发现')),
-		row('网络连接', boolText(status.connected, '已连接', '未连接')),
-		row('网络注册', boolText(status.registered, '已注册', '未注册')),
-		row('AT 端口', text(status.at_port)),
-		row('SIM 状态', text(status.sim_state_name)),
-		row('最后更新', formatTimestamp(status.updated_at))
-	];
-}
-
-function identityRows(status) {
-	return [
 		row('模块厂商', text(status.manufacturer)),
 		row('模块型号', text(status.model)),
 		row('固件版本', text(status.firmware)),
 		row('模块 IMEI', text(status.imei)),
-		row('SIM IMSI', text(status.imsi)),
+		row('SIM 状态', text(status.sim_state_name)),
 		row('SIM ICCID', text(status.iccid))
-	];
-}
-
-function registrationRows(status) {
-	return [
-		row('注册状态', text(status.registration_status)),
-		row('运营商', text(status.operator_name || status.mobile_operator)),
-		row('接入技术码', text(status.access_technology || status.registration_act))
 	];
 }
 
@@ -204,17 +177,6 @@ function signalRows(status) {
 		row('信号质量（CSQ）', status.csq === '99' ? '未知' : withUnit(status.csq, ' / 31')),
 		row('接收信号（RSSI）', withUnit(status.rssi_dbm, ' dBm')),
 		row('信号百分比', withUnit(status.signal_percent, '%'))
-	];
-}
-
-function dataRows(status) {
-	return [
-		row('分组域附着', text(status.packet_attached)),
-		row('PDP 激活', text(status.pdp_active)),
-		row('PDP 类型', text(status.pdp_type)),
-		row('APN', text(status.apn)),
-		row('PDP 地址', text(status.pdp_address || status.mobile_ipv4)),
-		row('移动 IPv4', text(status.mobile_ipv4))
 	];
 }
 
@@ -348,9 +310,9 @@ return view.extend({
 			'class': 'cbi-button cbi-button-action',
 			'type': 'button'
 		}, '刷新 4G 信息');
-		var content = [
-			E('div', { 'class': 'cbi-section-descr' },
-				'按当前模块型号读取必要的身份、SIM、注册、信号和移动数据状态；不支持的厂商扩展不会阻塞上报。')
+	var content = [
+		E('div', { 'class': 'cbi-section-descr' },
+			'这里只显示模块、SIM 和信号信息；不支持的厂商扩展不会阻塞上报。')
 		];
 		var self = this;
 
@@ -366,11 +328,8 @@ return view.extend({
 			content.push(E('div', { 'class': 'alert-message warning' },
 				'暂时无法读取 4G 状态，请检查 4ginfo 服务、AT 端口和权限。'));
 
-		content.push(section('运行状态', statusRows(data.status)));
-		content.push(section('模块与 SIM', identityRows(data.status)));
-		content.push(section('网络', registrationRows(data.status)));
+		content.push(section('模块与 SIM', moduleSimRows(data.status)));
 		content.push(section('信号', signalRows(data.status)));
-		content.push(section('移动数据', dataRows(data.status)));
 
 		return content;
 	},

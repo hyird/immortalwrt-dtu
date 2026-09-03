@@ -80,7 +80,9 @@ function read_tasks(limit) {
 
 function service_status() {
 	let listed = ubus.call('service', 'list', { name: 'edgenode' });
+	let modem_listed = ubus.call('service', 'list', { name: '4ginfo' });
 	let service = listed?.edgenode;
+	let modem_service = modem_listed && modem_listed['4ginfo'];
 	let instances = {};
 
 	for (let name, value in (service?.instances || {})) {
@@ -88,6 +90,15 @@ function service_status() {
 			running: !!value.running,
 			pid: value.pid || null,
 			respawn: !!value.respawn,
+		};
+	}
+
+	let modem = modem_service && modem_service.instances && modem_service.instances.monitor;
+	if (modem) {
+		instances.modem = {
+			running: !!modem.running,
+			pid: modem.pid || null,
+			respawn: !!modem.respawn,
 		};
 	}
 
