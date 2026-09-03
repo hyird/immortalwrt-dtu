@@ -1,8 +1,3 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: OpenWrt maintainers <openwrt-devel@lists.openwrt.org>
-Date: Thu, 3 Sep 2026 12:00:00 +0800
-Subject: [PATCH] portability: guard counted_by attribute
-
 GCC versions without counted_by warn for every translation unit including
 apk_database.h. Keep the hardening annotation when the compiler supports it,
 while retaining the same structure layout on older toolchains.
@@ -11,8 +6,6 @@ while retaining the same structure layout on older toolchains.
  src/apk_database.h | 9 +++++++++
  1 file changed, 9 insertions(+)
 
-diff --git a/src/apk_database.h b/src/apk_database.h
-index 0000000..0000000 100644
 --- a/src/apk_database.h
 +++ b/src/apk_database.h
 @@ -24,6 +24,15 @@ APK_ARRAY(apk_name_array, struct apk_name *);
@@ -37,5 +30,3 @@ index 0000000..0000000 100644
  } __attribute__((packed));
  
  static inline apk_blob_t apk_acl_digest_blob(struct apk_db_acl *acl) {
--- 
-2.47.1
