@@ -19,7 +19,7 @@ misleading --finish reminder for the DESTDIR staging path.
 --- a/pppd/plugins/pppoe/Makefile.am
 +++ b/pppd/plugins/pppoe/Makefile.am
 @@ -1,2 +1,9 @@
---pppd_plugin_LTLIBRARIES = pppoe.la 
+-pppd_plugin_LTLIBRARIES = pppoe.la 
 +pppd_plugin_LIBS = pppoe.la
 +pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
 +noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
