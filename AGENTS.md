@@ -49,7 +49,8 @@
 - Run Git, feed, configuration, and build commands as the unprivileged
   `openwrtbuild` user.
 - Update the configured feeds, then run `scripts/install-tas-feeds.sh`. This
-  installs only `libev`, `libuwsc`, `openssh-sftp-server` and `luci-light` with their dependencies;
+  installs only `libev`, `libuwsc`, `openssh-sftp-server`, `luci-light`, and
+  `luci-proto-wireguard` with their dependencies;
   the helper pre-seeds the three source packages needed to keep the feeds scan
   warning-free. Do not use `feeds install -a`; this single-device tree
   intentionally omits dependencies of unused feed packages.

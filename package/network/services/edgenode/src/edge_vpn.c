@@ -1,4 +1,5 @@
 #include "edge_vpn.h"
+#include "edge_version.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -18,7 +19,7 @@
 #define EDGE_VPN_KEY_PATH "/etc/edgenode/vpn.key"
 #define EDGE_VPN_OVERLAY_CIDR "100.96.0.0/11"
 #define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC1F0000U /* 172.31.0.0/16 */
-#define EDGE_VPN_AGENT_VERSION "0.3.38"
+#define EDGE_VPN_AGENT_VERSION EDGE_SOFTWARE_VERSION
 #define EDGE_VPN_DSTNAT_INCLUDE \
     "/usr/share/nftables.d/chain-pre/dstnat/30-edgenode-vpn.nft"
 #define EDGE_VPN_FORWARD_INCLUDE \

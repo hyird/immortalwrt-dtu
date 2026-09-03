@@ -44,6 +44,7 @@ endef
 
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -Os -flto -D_FILE_OFFSET_BITS=64 \
+		-DEDGE_SOFTWARE_VERSION='"$(PKG_VERSION)"' \
 		-Wall -Wextra -Werror -Wno-strict-aliasing \
 		-ffunction-sections -fdata-sections -fno-unwind-tables \
 		-I$(PKG_BUILD_DIR) -I$(PKG_BUILD_DIR)/edge/src \

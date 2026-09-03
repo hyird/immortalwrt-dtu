@@ -24,3 +24,4 @@ ln -s ../../../feeds/luci/contrib/package/lucihttp package/feeds/luci/lucihttp
 ./scripts/feeds install -p packages -f libuwsc
 ./scripts/feeds install -p packages -f openssh-sftp-server
 ./scripts/feeds install -p luci -f luci-light
+./scripts/feeds install -p luci -f luci-proto-wireguard

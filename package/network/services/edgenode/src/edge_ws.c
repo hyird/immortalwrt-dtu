@@ -27,10 +27,10 @@
 #include "edge_status.h"
 #include "edge_terminal.h"
 #include "edge_url.h"
+#include "edge_version.h"
 #include "edge_vpn.h"
 #include "log.h"
 
-#define EDGE_SOFTWARE_VERSION "0.3.37"
 #define EDGE_OUTBOX_WINDOW 16U
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
