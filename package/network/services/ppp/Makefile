@@ -35,6 +35,7 @@ DISABLE_NLS:=
 
 CONFIGURE_ARGS += \
 	--disable-cbcp \
+	--disable-static \
 	--disable-eaptls \
 	--disable-mslanman \
 	--disable-openssl-engine \
