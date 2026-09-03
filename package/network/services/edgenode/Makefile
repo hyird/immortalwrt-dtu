@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.37
+PKG_VERSION:=0.3.38
 PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
@@ -21,7 +21,7 @@ define Package/edgenode
   TITLE:=Small multi-platform IoT edge node
   URL:=https://github.com/hyird/iot-engine
   DEPENDS:=+libev +libuci +libuwsc-mbedtls +libmbedtls +libustream-mbedtls +ca-bundle \
-    +kmod-wireguard
+    +kmod-wireguard +wireguard-tools
 endef
 
 define Package/edgenode/description

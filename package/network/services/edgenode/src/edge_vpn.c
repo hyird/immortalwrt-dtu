@@ -3,40 +3,33 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/genetlink.h>
-#include <linux/netlink.h>
-#include <linux/wireguard.h>
-#include <netdb.h>
-#include <net/if.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
+#include <uci.h>
 #include <unistd.h>
 
 #include "edge_process.h"
 
-#define EDGE_VPN_INTERFACE "wg-iot"
+#define EDGE_VPN_INTERFACE "wg"
+#define EDGE_VPN_PEER_SECTION "iot_server"
 #define EDGE_VPN_KEY_PATH "/etc/edgenode/vpn.key"
-#define EDGE_VPN_NFT_TABLE "edgenode_vpn"
 #define EDGE_VPN_OVERLAY_CIDR "100.96.0.0/11"
 #define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC1F0000U /* 172.31.0.0/16 */
-#define EDGE_VPN_AGENT_VERSION "0.3.37"
-#define EDGE_VPN_NETLINK_BUFFER_SIZE 8192U
+#define EDGE_VPN_AGENT_VERSION "0.3.38"
+#define EDGE_VPN_DSTNAT_INCLUDE \
+    "/usr/share/nftables.d/chain-pre/dstnat/30-edgenode-vpn.nft"
+#define EDGE_VPN_FORWARD_INCLUDE \
+    "/usr/share/nftables.d/chain-pre/forward/30-edgenode-vpn.nft"
+#define EDGE_VPN_SRCNAT_INCLUDE \
+    "/usr/share/nftables.d/chain-pre/srcnat/30-edgenode-vpn.nft"
 
 typedef struct {
     uint32_t network;
     uint8_t prefix;
 } edge_vpn_cidr;
-
-typedef struct {
-    uint8_t data[EDGE_VPN_NETLINK_BUFFER_SIZE];
-    size_t size;
-} edge_vpn_netlink_message;
-
-typedef bool (*edge_vpn_netlink_handler)(const struct nlmsghdr *header, void *context);
 
 static uint64_t applied_version;
 
@@ -66,243 +59,38 @@ static bool write_all(int fd, const void *data, size_t size) {
     return true;
 }
 
-static size_t align4(size_t value) {
-    return (value + 3U) & ~(size_t)3U;
-}
-
-static bool netlink_append(edge_vpn_netlink_message *message,
-                           const void *data, size_t size) {
-    if (message == NULL || data == NULL || size > sizeof(message->data) - message->size)
-        return false;
-    memcpy(message->data + message->size, data, size);
-    message->size += size;
-    return true;
-}
-
-static bool netlink_begin(edge_vpn_netlink_message *message, uint16_t type,
-                          uint16_t flags, uint32_t sequence) {
-    if (message == NULL)
-        return false;
-    memset(message, 0, sizeof(*message));
-    const struct nlmsghdr header = {
-        .nlmsg_len = NLMSG_HDRLEN,
-        .nlmsg_type = type,
-        .nlmsg_flags = flags,
-        .nlmsg_seq = sequence,
-    };
-    return netlink_append(message, &header, sizeof(header));
-}
-
-static bool netlink_attribute(edge_vpn_netlink_message *message, uint16_t type,
-                              const void *data, size_t size) {
-    if (message == NULL || size > UINT16_MAX - NLA_HDRLEN)
-        return false;
-    const struct nlattr attribute = {
-        .nla_len = (uint16_t)(NLA_HDRLEN + size),
-        .nla_type = type,
-    };
-    if (!netlink_append(message, &attribute, sizeof(attribute)) ||
-        (size != 0U && !netlink_append(message, data, size)))
-        return false;
-    const size_t aligned = align4(message->size);
-    if (aligned > sizeof(message->data))
-        return false;
-    memset(message->data + message->size, 0, aligned - message->size);
-    message->size = aligned;
-    return true;
-}
-
-static bool netlink_string_attribute(edge_vpn_netlink_message *message, uint16_t type,
-                                     const char *value) {
-    return value != NULL && netlink_attribute(message, type, value, strlen(value) + 1U);
-}
-
-static bool netlink_begin_nested(edge_vpn_netlink_message *message, uint16_t type,
-                                 size_t *offset) {
-    if (message == NULL || offset == NULL)
-        return false;
-    *offset = message->size;
-    const struct nlattr attribute = {
-        .nla_len = NLA_HDRLEN,
-        .nla_type = (uint16_t)(type | NLA_F_NESTED),
-    };
-    return netlink_append(message, &attribute, sizeof(attribute));
-}
-
-static bool netlink_end_nested(edge_vpn_netlink_message *message, size_t offset) {
-    if (message == NULL || offset > message->size ||
-        message->size - offset > UINT16_MAX || offset + NLA_HDRLEN > message->size)
-        return false;
-    struct nlattr *attribute = (struct nlattr *)(void *)(message->data + offset);
-    attribute->nla_len = (uint16_t)(message->size - offset);
-    const size_t aligned = align4(message->size);
-    if (aligned > sizeof(message->data))
-        return false;
-    memset(message->data + message->size, 0, aligned - message->size);
-    message->size = aligned;
-    return true;
-}
-
-static bool netlink_finish(edge_vpn_netlink_message *message) {
-    if (message == NULL || message->size < NLMSG_HDRLEN || message->size > UINT32_MAX)
-        return false;
-    ((struct nlmsghdr *)(void *)message->data)->nlmsg_len = (uint32_t)message->size;
-    return true;
-}
-
-static bool netlink_for_each_attribute(const uint8_t *data, size_t size,
-                                       bool (*handler)(uint16_t, const void *, size_t,
-                                                       void *),
-                                       void *context) {
-    if (data == NULL || handler == NULL)
-        return false;
-    size_t offset = 0U;
-    while (offset + NLA_HDRLEN <= size) {
-        const struct nlattr *attribute =
-            (const struct nlattr *)(const void *)(data + offset);
-        if (attribute->nla_len < NLA_HDRLEN || offset + attribute->nla_len > size)
-            return false;
-        if (!handler((uint16_t)(attribute->nla_type & NLA_TYPE_MASK),
-                     data + offset + NLA_HDRLEN,
-                     attribute->nla_len - NLA_HDRLEN, context))
-            return false;
-        offset += align4(attribute->nla_len);
-    }
-    return offset == size || (offset < size && size - offset < NLA_HDRLEN);
-}
-
-static bool netlink_request(int protocol, edge_vpn_netlink_message *message,
-                            edge_vpn_netlink_handler handler, void *context) {
-    if (!netlink_finish(message))
-        return false;
-    const int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, protocol);
-    if (fd < 0)
-        return false;
-    struct sockaddr_nl local = {.nl_family = AF_NETLINK};
-    if (bind(fd, (const struct sockaddr *)&local, sizeof(local)) != 0) {
-        close(fd);
-        return false;
-    }
-    const struct sockaddr_nl destination = {.nl_family = AF_NETLINK};
-    const struct iovec iov = {.iov_base = message->data, .iov_len = message->size};
-    const struct msghdr outgoing = {
-        .msg_name = (void *)&destination,
-        .msg_namelen = sizeof(destination),
-        .msg_iov = (struct iovec *)(void *)&iov,
-        .msg_iovlen = 1U,
-    };
-    if (sendmsg(fd, &outgoing, 0) < 0) {
-        close(fd);
-        return false;
-    }
-    const struct nlmsghdr *request_header =
-        (const struct nlmsghdr *)(const void *)message->data;
-    const uint32_t sequence = request_header->nlmsg_seq;
-    const bool dump = (request_header->nlmsg_flags & NLM_F_DUMP) != 0U;
-    uint8_t buffer[EDGE_VPN_NETLINK_BUFFER_SIZE];
-    for (;;) {
-        const ssize_t received = recv(fd, buffer, sizeof(buffer), 0);
-        if (received < 0 && errno == EINTR)
-            continue;
-        if (received <= 0) {
-            close(fd);
-            return false;
-        }
-        int remaining = (int)received;
-        for (struct nlmsghdr *header = (struct nlmsghdr *)(void *)buffer;
-             NLMSG_OK(header, remaining); header = NLMSG_NEXT(header, remaining)) {
-            if (header->nlmsg_seq != sequence)
-                continue;
-            if (header->nlmsg_type == NLMSG_ERROR) {
-                if (header->nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
-                    close(fd);
-                    return false;
-                }
-                const struct nlmsgerr *error =
-                    (const struct nlmsgerr *)NLMSG_DATA(header);
-                if (error->error != 0) {
-                    close(fd);
-                    return false;
-                }
-                if (!dump) {
-                    close(fd);
-                    return true;
-                }
-                continue;
-            }
-            if (header->nlmsg_type == NLMSG_DONE) {
-                close(fd);
-                return true;
-            }
-            if (handler != NULL && !handler(header, context)) {
-                close(fd);
-                return false;
-            }
-        }
-    }
-}
-
-static bool family_attribute(uint16_t type, const void *data, size_t size, void *context) {
-    if (type == CTRL_ATTR_FAMILY_ID && data != NULL && size >= sizeof(uint16_t))
-        memcpy(context, data, sizeof(uint16_t));
-    return true;
-}
-
-static bool family_message(const struct nlmsghdr *header, void *context) {
-    if (header == NULL || header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
-        return false;
-    const uint8_t *payload = (const uint8_t *)NLMSG_DATA(header) + GENL_HDRLEN;
-    const size_t size = header->nlmsg_len - NLMSG_HDRLEN - GENL_HDRLEN;
-    return netlink_for_each_attribute(payload, size, family_attribute, context);
-}
-
-static bool wireguard_family(uint16_t *family) {
-    if (family == NULL)
-        return false;
-    *family = 0U;
-    edge_vpn_netlink_message message;
-    const struct genlmsghdr generic = {
-        .cmd = CTRL_CMD_GETFAMILY,
-        .version = 1U,
-    };
-    if (!netlink_begin(&message, GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK, 1U) ||
-        !netlink_append(&message, &generic, sizeof(generic)) ||
-        !netlink_string_attribute(&message, CTRL_ATTR_FAMILY_NAME, WG_GENL_NAME) ||
-        !netlink_request(NETLINK_GENERIC, &message, family_message, family))
-        return false;
-    return *family != 0U;
-}
-
-static bool hex_byte(char high, char low, uint8_t *output) {
-    const char *digits = "0123456789abcdefABCDEF";
-    const char *first = strchr(digits, high);
-    const char *second = strchr(digits, low);
-    if (first == NULL || second == NULL || output == NULL)
-        return false;
-    const unsigned high_value = (unsigned)(first - digits) & 0x0fU;
-    const unsigned low_value = (unsigned)(second - digits) & 0x0fU;
-    *output = (uint8_t)((high_value << 4U) | low_value);
-    return true;
-}
-
-static void bytes_to_hex(const uint8_t *input, size_t size, char *output, size_t capacity) {
-    static const char digits[] = "0123456789abcdef";
-    if (output == NULL || capacity < size * 2U + 1U)
-        return;
-    for (size_t index = 0U; index < size; ++index) {
-        output[index * 2U] = digits[input[index] >> 4U];
-        output[index * 2U + 1U] = digits[input[index] & 0x0fU];
-    }
-    output[size * 2U] = '\0';
+static int hex_value(char value) {
+    if (value >= '0' && value <= '9')
+        return value - '0';
+    if (value >= 'a' && value <= 'f')
+        return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F')
+        return value - 'A' + 10;
+    return -1;
 }
 
 static bool hex_to_bytes(const char *input, uint8_t *output, size_t size) {
     if (input == NULL || output == NULL || strlen(input) != size * 2U)
         return false;
-    for (size_t index = 0U; index < size; ++index)
-        if (!hex_byte(input[index * 2U], input[index * 2U + 1U], &output[index]))
+    for (size_t index = 0U; index < size; ++index) {
+        const int high = hex_value(input[index * 2U]);
+        const int low = hex_value(input[index * 2U + 1U]);
+        if (high < 0 || low < 0)
             return false;
+        output[index] = (uint8_t)((high << 4U) | low);
+    }
     return true;
+}
+
+static void bytes_to_hex(const uint8_t *input, size_t size, char *output, size_t capacity) {
+    static const char alphabet[] = "0123456789abcdef";
+    if (input == NULL || output == NULL || capacity < size * 2U + 1U)
+        return;
+    for (size_t index = 0U; index < size; ++index) {
+        output[index * 2U] = alphabet[input[index] >> 4U];
+        output[index * 2U + 1U] = alphabet[input[index] & 0x0fU];
+    }
+    output[size * 2U] = '\0';
 }
 
 static int base64_value(char value) {
@@ -326,17 +114,15 @@ static bool base64_decode_key(const char *input, uint8_t output[32]) {
     for (size_t index = 0U; index < 44U; index += 4U) {
         const int first = base64_value(input[index]);
         const int second = base64_value(input[index + 1U]);
-        const int third = index + 2U == 43U ? 0 : base64_value(input[index + 2U]);
-        const int fourth = index + 3U == 43U ? 0 : base64_value(input[index + 3U]);
-        if (first < 0 || second < 0 || third < 0 || fourth < 0 ||
-            (index + 2U == 43U && input[index + 2U] != '=') ||
-            (index + 3U == 43U && input[index + 3U] != '='))
+        const int third = input[index + 2U] == '=' ? 0 : base64_value(input[index + 2U]);
+        const int fourth = input[index + 3U] == '=' ? 0 : base64_value(input[index + 3U]);
+        if (first < 0 || second < 0 || third < 0 || fourth < 0)
             return false;
         if (output_index < 32U)
             output[output_index++] = (uint8_t)((first << 2U) | (second >> 4U));
-        if (index + 2U < 43U && output_index < 32U)
+        if (input[index + 2U] != '=' && output_index < 32U)
             output[output_index++] = (uint8_t)((second << 4U) | (third >> 2U));
-        if (index + 3U < 43U && output_index < 32U)
+        if (input[index + 3U] != '=' && output_index < 32U)
             output[output_index++] = (uint8_t)((third << 6U) | fourth);
     }
     return output_index == 32U;
@@ -362,11 +148,6 @@ static bool base64_encode_key(const uint8_t input[32], char output[45]) {
     return out == 44U;
 }
 
-static bool valid_hex_key(const char *value) {
-    uint8_t bytes[32];
-    return hex_to_bytes(value, bytes, sizeof(bytes));
-}
-
 static bool load_or_create_private_key(char output[65]) {
     if (mkdir("/etc/edgenode", 0700) != 0 && errno != EEXIST)
         return false;
@@ -381,7 +162,8 @@ static bool load_or_create_private_key(char output[65]) {
         char *end = strpbrk(buffer, "\r\n \t");
         if (end != NULL)
             *end = '\0';
-        if (!valid_hex_key(buffer))
+        uint8_t key[32];
+        if (!hex_to_bytes(buffer, key, sizeof(key)))
             return false;
         safe_copy(output, 65U, buffer);
         return true;
@@ -398,7 +180,10 @@ static bool load_or_create_private_key(char output[65]) {
         return false;
     }
     close(random_fd);
-    char key[65];
+    random_bytes[0] &= 248U;
+    random_bytes[31] &= 127U;
+    random_bytes[31] |= 64U;
+    char key[65] = {0};
     bytes_to_hex(random_bytes, sizeof(random_bytes), key, sizeof(key));
     const int created = open(EDGE_VPN_KEY_PATH,
                              O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -417,92 +202,51 @@ static bool load_or_create_private_key(char output[65]) {
     return true;
 }
 
-static bool interface_exists(void) {
-    const char *const command[] = {"ip", "link", "show", "dev", EDGE_VPN_INTERFACE, NULL};
-    return edge_process_run(command, -1, -1) == 0;
+static bool private_key_base64(const char private_hex[65], char output[45]) {
+    uint8_t private_bytes[32];
+    return hex_to_bytes(private_hex, private_bytes, sizeof(private_bytes)) &&
+           base64_encode_key(private_bytes, output);
 }
 
-static bool add_interface(void) {
-    const char *const command[] = {"ip", "link", "add", "dev", EDGE_VPN_INTERFACE,
-                                   "type", "wireguard", NULL};
-    return edge_process_run(command, -1, -1) == 0;
-}
-
-static bool delete_interface(void) {
-    const char *const command[] = {"ip", "link", "del", "dev", EDGE_VPN_INTERFACE, NULL};
-    return edge_process_run(command, -1, -1) == 0 || !interface_exists();
-}
-
-static bool wireguard_begin(edge_vpn_netlink_message *message, uint16_t family,
-                            uint8_t command) {
-    const struct genlmsghdr generic = {
-        .cmd = command,
-        .version = WG_GENL_VERSION,
-    };
-    const uint16_t flags =
-        (uint16_t)(NLM_F_REQUEST | NLM_F_ACK |
-                   (command == WG_CMD_GET_DEVICE ? NLM_F_DUMP : 0U));
-    return netlink_begin(message, family, flags, 1U) &&
-           netlink_append(message, &generic, sizeof(generic)) &&
-           netlink_string_attribute(message, WGDEVICE_A_IFNAME, EDGE_VPN_INTERFACE);
-}
-
-static bool set_private_key(const char private_key[65]) {
-    uint8_t key[32];
-    uint16_t family = 0U;
-    edge_vpn_netlink_message message;
-    if (!hex_to_bytes(private_key, key, sizeof(key)) || !wireguard_family(&family) ||
-        !wireguard_begin(&message, family, WG_CMD_SET_DEVICE) ||
-        !netlink_attribute(&message, WGDEVICE_A_PRIVATE_KEY, key, sizeof(key)))
+static bool read_public_key(const char private_key[45], char output[45]) {
+    if (mkdir("/tmp/edgenode", 0700) != 0 && errno != EEXIST)
         return false;
-    return netlink_request(NETLINK_GENERIC, &message, NULL, NULL);
-}
-
-typedef struct {
-    uint8_t key[32];
-    bool found;
-} edge_vpn_public_key;
-
-static bool public_key_attribute(uint16_t type, const void *data, size_t size,
-                                 void *context) {
-    edge_vpn_public_key *result = context;
-    if (type == WGDEVICE_A_PUBLIC_KEY && data != NULL && size == sizeof(result->key)) {
-        memcpy(result->key, data, sizeof(result->key));
-        result->found = true;
+    char input_path[] = "/tmp/edgenode/wg-private.XXXXXX";
+    char output_path[] = "/tmp/edgenode/wg-public.XXXXXX";
+    const int input = mkstemp(input_path);
+    if (input < 0)
+        return false;
+    unlink(input_path);
+    const int result = mkstemp(output_path);
+    if (result < 0) {
+        close(input);
+        return false;
     }
-    return true;
-}
-
-static bool public_key_message(const struct nlmsghdr *header, void *context) {
-    if (header == NULL || header->nlmsg_len < NLMSG_LENGTH(GENL_HDRLEN))
-        return false;
-    const uint8_t *payload = (const uint8_t *)NLMSG_DATA(header) + GENL_HDRLEN;
-    const size_t size = header->nlmsg_len - NLMSG_HDRLEN - GENL_HDRLEN;
-    return netlink_for_each_attribute(payload, size, public_key_attribute, context);
-}
-
-static bool read_public_key(char output[65]) {
-    uint16_t family = 0U;
-    edge_vpn_netlink_message message;
-    edge_vpn_public_key result = {0};
-    if (!wireguard_family(&family) ||
-        !wireguard_begin(&message, family, WG_CMD_GET_DEVICE) ||
-        !netlink_request(NETLINK_GENERIC, &message, public_key_message, &result) ||
-        !result.found)
-        return false;
-    return base64_encode_key(result.key, (char *)output);
-}
-
-static bool ensure_interface(char private_key[65]) {
-    if (!load_or_create_private_key(private_key))
-        return false;
-    if (!interface_exists() && !add_interface())
-        return false;
-    if (set_private_key(private_key))
-        return true;
-    if (!delete_interface() || !add_interface())
-        return false;
-    return set_private_key(private_key);
+    unlink(output_path);
+    char private_line[46];
+    snprintf(private_line, sizeof(private_line), "%s\n", private_key);
+    bool success = write_all(input, private_line, strlen(private_line)) &&
+                   lseek(input, 0, SEEK_SET) == 0;
+    const char *const command[] = {"wg", "pubkey", NULL};
+    if (success)
+        success = edge_process_run(command, input, result) == 0 &&
+                  lseek(result, 0, SEEK_SET) == 0;
+    char public_line[64] = {0};
+    if (success) {
+        const ssize_t count = read(result, public_line, sizeof(public_line) - 1U);
+        success = count > 0;
+        if (success) {
+            public_line[count] = '\0';
+            public_line[strcspn(public_line, "\r\n \t")] = '\0';
+            uint8_t public_bytes[32];
+            success = base64_decode_key(public_line, public_bytes);
+        }
+    }
+    close(result);
+    close(input);
+    if (success)
+        safe_copy(output, 45U, public_line);
+    return success;
 }
 
 static bool parse_cidr(const char *value, edge_vpn_cidr *output) {
@@ -598,8 +342,7 @@ static bool split_endpoint(const char *input, unsigned fallback_port,
     } else {
         const char *last_colon = strrchr(input, ':');
         const char *first_colon = strchr(input, ':');
-        if (last_colon != NULL && first_colon == last_colon &&
-            last_colon[1] != '\0') {
+        if (last_colon != NULL && first_colon == last_colon && last_colon[1] != '\0') {
             if (strlen(last_colon + 1) >= 6U || !parse_port(last_colon + 1, &fallback_port))
                 return false;
             const size_t host_size = (size_t)(last_colon - input);
@@ -617,109 +360,245 @@ static bool split_endpoint(const char *input, unsigned fallback_port,
     return host[0] != '\0';
 }
 
-static bool resolve_endpoint(const char *input, unsigned fallback_port,
-                             struct sockaddr_storage *output, socklen_t *output_size) {
-    if (output == NULL || output_size == NULL)
+static bool set_uci_option(struct uci_context *context, struct uci_package *package,
+                           struct uci_section *section, const char *name,
+                           const char *value) {
+    struct uci_ptr pointer = {
+        .p = package,
+        .s = section,
+        .option = name,
+        .value = value,
+    };
+    return uci_set(context, &pointer) == UCI_OK;
+}
+
+static bool add_uci_list(struct uci_context *context, struct uci_package *package,
+                         struct uci_section *section, const char *name,
+                         const char *value) {
+    struct uci_ptr pointer = {
+        .p = package,
+        .s = section,
+        .option = name,
+        .value = value,
+    };
+    return uci_add_list(context, &pointer) == UCI_OK;
+}
+
+static bool delete_uci_section(struct uci_context *context, struct uci_package *package,
+                               struct uci_section *section) {
+    struct uci_ptr pointer = {.p = package, .s = section};
+    return uci_delete(context, &pointer) == UCI_OK;
+}
+
+static bool add_named_section(struct uci_context *context, struct uci_package *package,
+                              const char *type, const char *name,
+                              struct uci_section **output) {
+    struct uci_section *section = NULL;
+    if (uci_add_section(context, package, type, &section) != UCI_OK)
         return false;
-    char host[256] = {0};
-    char port[6] = {0};
-    if (!split_endpoint(input, fallback_port, host, port))
+    struct uci_ptr rename = {
+        .p = package,
+        .s = section,
+        .value = name,
+    };
+    if (uci_rename(context, &rename) != UCI_OK)
         return false;
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_family = AF_UNSPEC;
-    struct addrinfo *addresses = NULL;
-    if (getaddrinfo(host, port, &hints, &addresses) != 0 || addresses == NULL)
-        return false;
-    bool resolved = false;
-    for (const struct addrinfo *address = addresses; address != NULL && !resolved;
-         address = address->ai_next) {
-        if ((address->ai_family != AF_INET && address->ai_family != AF_INET6) ||
-            address->ai_addrlen > sizeof(*output))
-            continue;
-        memset(output, 0, sizeof(*output));
-        memcpy(output, address->ai_addr, address->ai_addrlen);
-        *output_size = (socklen_t)address->ai_addrlen;
-        resolved = true;
+    *output = section;
+    return true;
+}
+
+static bool remove_network_sections(struct uci_context *context,
+                                    struct uci_package *package, bool *changed) {
+    char names[32][64];
+    size_t count = 0U;
+    struct uci_element *element;
+    uci_foreach_element(&package->sections, element) {
+        const struct uci_section *section = uci_to_section(element);
+        if ((strcmp(section->e.name, EDGE_VPN_INTERFACE) == 0 ||
+             strcmp(section->type, "wireguard_" EDGE_VPN_INTERFACE) == 0) &&
+            count < 32U) {
+            safe_copy(names[count++], sizeof(names[0]), section->e.name);
+        }
     }
-    freeaddrinfo(addresses);
-    return resolved;
+    for (size_t index = 0U; index < count; ++index) {
+        struct uci_section *section = uci_lookup_section(context, package, names[index]);
+        if (section != NULL && !delete_uci_section(context, package, section))
+            return false;
+        if (section != NULL)
+            *changed = true;
+    }
+    return true;
 }
 
-static bool netlink_set_config(const char private_key[65], const char *hub_public_key,
-                               const struct sockaddr *endpoint, socklen_t endpoint_size) {
-    uint8_t private_key_bytes[32];
-    uint8_t hub_key[32];
-    uint16_t family = 0U;
-    edge_vpn_netlink_message message;
-    if (!hex_to_bytes(private_key, private_key_bytes, sizeof(private_key_bytes)) ||
-        !base64_decode_key(hub_public_key, hub_key) || endpoint == NULL ||
-        (endpoint->sa_family != AF_INET && endpoint->sa_family != AF_INET6) ||
-        (endpoint_size != sizeof(struct sockaddr_in) &&
-         endpoint_size != sizeof(struct sockaddr_in6)) ||
-        !wireguard_family(&family) ||
-        !wireguard_begin(&message, family, WG_CMD_SET_DEVICE) ||
-        !netlink_attribute(&message, WGDEVICE_A_PRIVATE_KEY,
-                           private_key_bytes, sizeof(private_key_bytes)))
+static bool configure_network(const char *private_key, const char *edge_address,
+                              const char *hub_public_key, const char *endpoint_host,
+                              const char *endpoint_port) {
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    if (context == NULL || uci_load(context, "network", &package) != UCI_OK) {
+        if (context != NULL)
+            uci_free_context(context);
         return false;
-    const uint32_t device_flags = WGDEVICE_F_REPLACE_PEERS;
-    const uint32_t peer_flags = WGPEER_F_REPLACE_ALLOWEDIPS;
-    const uint16_t keepalive = 25U;
-    const uint16_t address_family = AF_INET;
-    const uint8_t prefix = 11U;
-    struct in_addr allowed_address;
-    size_t peers_offset = 0U;
-    size_t peer_offset = 0U;
-    size_t allowed_ips_offset = 0U;
-    size_t allowed_ip_offset = 0U;
-    if (inet_pton(AF_INET, "100.96.0.0", &allowed_address) != 1 ||
-        !netlink_attribute(&message, WGDEVICE_A_FLAGS,
-                           &device_flags, sizeof(device_flags)) ||
-        !netlink_begin_nested(&message, WGDEVICE_A_PEERS, &peers_offset) ||
-        !netlink_begin_nested(&message, 0U, &peer_offset) ||
-        !netlink_attribute(&message, WGPEER_A_PUBLIC_KEY, hub_key, sizeof(hub_key)) ||
-        !netlink_attribute(&message, WGPEER_A_ENDPOINT, endpoint, endpoint_size) ||
-        !netlink_attribute(&message, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
-                           &keepalive, sizeof(keepalive)) ||
-        !netlink_attribute(&message, WGPEER_A_FLAGS, &peer_flags, sizeof(peer_flags)) ||
-        !netlink_begin_nested(&message, WGPEER_A_ALLOWEDIPS, &allowed_ips_offset) ||
-        !netlink_begin_nested(&message, 0U, &allowed_ip_offset) ||
-        !netlink_attribute(&message, WGALLOWEDIP_A_FAMILY,
-                           &address_family, sizeof(address_family)) ||
-        !netlink_attribute(&message, WGALLOWEDIP_A_IPADDR,
-                           &allowed_address, sizeof(allowed_address)) ||
-        !netlink_attribute(&message, WGALLOWEDIP_A_CIDR_MASK, &prefix, sizeof(prefix)) ||
-        !netlink_end_nested(&message, allowed_ip_offset) ||
-        !netlink_end_nested(&message, allowed_ips_offset) ||
-        !netlink_end_nested(&message, peer_offset) ||
-        !netlink_end_nested(&message, peers_offset))
+    }
+
+    bool changed = false;
+    bool success = remove_network_sections(context, package, &changed);
+    struct uci_section *interface = NULL;
+    struct uci_section *peer = NULL;
+    if (success)
+        success = add_named_section(context, package, "interface", EDGE_VPN_INTERFACE,
+                                    &interface);
+    if (success)
+        success = set_uci_option(context, package, interface, "proto", "wireguard") &&
+                  set_uci_option(context, package, interface, "private_key", private_key) &&
+                  add_uci_list(context, package, interface, "addresses", edge_address);
+    if (success)
+        success = add_named_section(context, package, "wireguard_" EDGE_VPN_INTERFACE,
+                                    EDGE_VPN_PEER_SECTION, &peer);
+    if (success)
+        success = set_uci_option(context, package, peer, "public_key", hub_public_key) &&
+                  set_uci_option(context, package, peer, "endpoint_host", endpoint_host) &&
+                  set_uci_option(context, package, peer, "endpoint_port", endpoint_port) &&
+                  set_uci_option(context, package, peer, "persistent_keepalive", "25") &&
+                  set_uci_option(context, package, peer, "route_allowed_ips", "1") &&
+                  add_uci_list(context, package, peer, "allowed_ips",
+                               EDGE_VPN_OVERLAY_CIDR);
+    if (success)
+        success = uci_save(context, package) == UCI_OK &&
+                  uci_commit(context, &package, false) == UCI_OK;
+    if (package != NULL)
+        uci_unload(context, package);
+    uci_free_context(context);
+    if (!success)
         return false;
-    return netlink_request(NETLINK_GENERIC, &message, NULL, NULL);
+    const char *const reload[] = {"ubus", "call", "network", "reload", NULL};
+    const char *const up[] = {"ifup", EDGE_VPN_INTERFACE, NULL};
+    return edge_process_run(reload, -1, -1) == 0 &&
+           edge_process_run(up, -1, -1) == 0;
 }
 
-static bool run_ip_address(const char *address) {
-    const char *const command[] = {"ip", "address", "replace", address, "dev",
-                                   EDGE_VPN_INTERFACE, NULL};
-    return edge_process_run(command, -1, -1) == 0;
-}
-
-static bool run_ip_up(void) {
-    const char *const command[] = {"ip", "link", "set", "up", "dev", EDGE_VPN_INTERFACE,
-                                   NULL};
-    return edge_process_run(command, -1, -1) == 0;
-}
-
-static bool run_ip_overlay_route(void) {
-    const char *const command[] = {"ip", "route", "replace", EDGE_VPN_OVERLAY_CIDR,
-                                   "dev", EDGE_VPN_INTERFACE, NULL};
-    return edge_process_run(command, -1, -1) == 0;
-}
-
-static bool append_script(char *script, size_t capacity, size_t *used, const char *format,
-                          const char *first, const char *second) {
-    if (script == NULL || used == NULL || format == NULL)
+static bool remove_network_configuration(void) {
+    const char *const down[] = {"ifdown", EDGE_VPN_INTERFACE, NULL};
+    (void)edge_process_run(down, -1, -1);
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    if (context == NULL || uci_load(context, "network", &package) != UCI_OK) {
+        if (context != NULL)
+            uci_free_context(context);
         return false;
+    }
+    bool changed = false;
+    bool success = remove_network_sections(context, package, &changed);
+    if (success && changed)
+        success = uci_save(context, package) == UCI_OK &&
+                  uci_commit(context, &package, false) == UCI_OK;
+    if (package != NULL)
+        uci_unload(context, package);
+    uci_free_context(context);
+    if (!success)
+        return false;
+    if (!changed)
+        return true;
+    const char *const reload[] = {"ubus", "call", "network", "reload", NULL};
+    return edge_process_run(reload, -1, -1) == 0;
+}
+
+static bool firewall_network_contains(struct uci_context *context,
+                                      struct uci_section *section,
+                                      const char *value) {
+    struct uci_option *option = uci_lookup_option(context, section, "network");
+    if (option == NULL)
+        return false;
+    if (option->type == UCI_TYPE_STRING)
+        return strcmp(option->v.string, value) == 0;
+    if (option->type != UCI_TYPE_LIST)
+        return false;
+    struct uci_element *element;
+    uci_foreach_element(&option->v.list, element) {
+        if (strcmp(element->name, value) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool configure_lan_membership(bool enabled) {
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    if (context == NULL || uci_load(context, "firewall", &package) != UCI_OK) {
+        if (context != NULL)
+            uci_free_context(context);
+        return false;
+    }
+    struct uci_section *lan = NULL;
+    struct uci_element *element;
+    uci_foreach_element(&package->sections, element) {
+        struct uci_section *section = uci_to_section(element);
+        const char *name = uci_lookup_option_string(context, section, "name");
+        if (strcmp(section->type, "zone") == 0 && name != NULL &&
+            strcmp(name, "lan") == 0) {
+            lan = section;
+            break;
+        }
+    }
+    bool success = lan != NULL;
+    bool changed = false;
+    const bool contains = success && firewall_network_contains(context, lan,
+                                                               EDGE_VPN_INTERFACE);
+    if (success && enabled && !contains) {
+        success = add_uci_list(context, package, lan, "network", EDGE_VPN_INTERFACE);
+        changed = success;
+    } else if (success && !enabled && contains) {
+        struct uci_ptr pointer = {
+            .p = package,
+            .s = lan,
+            .option = "network",
+            .value = EDGE_VPN_INTERFACE,
+        };
+        success = uci_del_list(context, &pointer) == UCI_OK;
+        changed = success;
+    }
+    if (success && changed)
+        success = uci_save(context, package) == UCI_OK &&
+                  uci_commit(context, &package, false) == UCI_OK;
+    if (package != NULL)
+        uci_unload(context, package);
+    uci_free_context(context);
+    return success;
+}
+
+static bool ensure_firewall_directories(void) {
+    const char *const directories[] = {
+        "/usr/share/nftables.d",
+        "/usr/share/nftables.d/chain-pre",
+        "/usr/share/nftables.d/chain-pre/dstnat",
+        "/usr/share/nftables.d/chain-pre/forward",
+        "/usr/share/nftables.d/chain-pre/srcnat",
+    };
+    for (size_t index = 0U; index < sizeof(directories) / sizeof(directories[0]); ++index)
+        if (mkdir(directories[index], 0755) != 0 && errno != EEXIST)
+            return false;
+    return true;
+}
+
+static bool write_atomic(const char *path, const char *content) {
+    char temporary[256];
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path, (long)getpid()) >=
+        (int)sizeof(temporary))
+        return false;
+    const int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    const bool written = write_all(fd, content, strlen(content)) && fsync(fd) == 0;
+    close(fd);
+    if (!written || rename(temporary, path) != 0) {
+        unlink(temporary);
+        return false;
+    }
+    return true;
+}
+
+static bool append_rule(char *script, size_t capacity, size_t *used,
+                        const char *format, const char *first, const char *second) {
     const int written = snprintf(script + *used, capacity - *used, format,
                                  first != NULL ? first : "", second != NULL ? second : "");
     if (written < 0 || (size_t)written >= capacity - *used)
@@ -728,45 +607,16 @@ static bool append_script(char *script, size_t capacity, size_t *used, const cha
     return true;
 }
 
-static bool run_nft_script(const char *script) {
-    if (script == NULL ||
-        (mkdir("/tmp/edgenode", 0700) != 0 && errno != EEXIST))
+static bool configure_firewall(const iot_edge_v1_VpnConfigRequest *request) {
+    if (!ensure_firewall_directories())
         return false;
-    const char *const remove_table[] = {"nft", "delete", "table", "inet", EDGE_VPN_NFT_TABLE,
-                                        NULL};
-    (void)edge_process_run(remove_table, -1, -1);
-    char path[128];
-    if (snprintf(path, sizeof(path), "/tmp/edgenode/vpn.%ld.nft", (long)getpid()) >=
-        (int)sizeof(path))
-        return false;
-    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0)
-        return false;
-    const bool written = write_all(fd, script, strlen(script));
-    close(fd);
-    if (!written) {
-        unlink(path);
-        return false;
-    }
-    const char *const command[] = {"nft", "-f", path, NULL};
-    const bool success = edge_process_run(command, -1, -1) == 0;
-    unlink(path);
-    return success;
-}
-
-static bool apply_firewall(const iot_edge_v1_VpnConfigRequest *request) {
-    char script[16384];
-    size_t used = 0U;
-    const char *header =
-        "add table inet " EDGE_VPN_NFT_TABLE "\n"
-        "add chain inet " EDGE_VPN_NFT_TABLE " prerouting { type nat hook prerouting priority -100; policy accept; }\n"
-        "add chain inet " EDGE_VPN_NFT_TABLE " postrouting { type nat hook postrouting priority 100; policy accept; }\n"
-        "add chain inet " EDGE_VPN_NFT_TABLE " forward { type filter hook forward priority 0; policy accept; }\n";
-    if (snprintf(script, sizeof(script), "%s", header) >= (int)sizeof(script))
-        return false;
-    used = strlen(script);
+    char dstnat[8192] = {0};
+    char forward[8192] = {0};
+    char srcnat[512] = {0};
+    size_t dstnat_used = 0U;
+    size_t forward_used = 0U;
+    size_t srcnat_used = 0U;
     bool have_nat = false;
-    bool have_route = false;
     for (pb_size_t index = 0U; index < request->routes_count; ++index) {
         const iot_edge_v1_VpnRoute *route = &request->routes[index];
         if (!route->enabled)
@@ -780,43 +630,39 @@ static bool apply_firewall(const iot_edge_v1_VpnConfigRequest *request) {
         format_cidr(&virtual_cidr, virtual_text);
         format_cidr(&target_cidr, target_text);
         if (strcmp(route->mode, "nat") == 0) {
-            if (!append_script(script, sizeof(script), &used,
-                               "add rule inet " EDGE_VPN_NFT_TABLE
-                               " prerouting iifname \"" EDGE_VPN_INTERFACE
-                               "\" ip daddr %s dnat to %s\n",
-                               virtual_text, target_text))
+            if (!append_rule(dstnat, sizeof(dstnat), &dstnat_used,
+                             "iifname \"" EDGE_VPN_INTERFACE
+                             "\" ip daddr %s dnat to %s\n",
+                             virtual_text, target_text) ||
+                !append_rule(forward, sizeof(forward), &forward_used,
+                             "iifname \"" EDGE_VPN_INTERFACE
+                             "\" ip daddr %s accept\n",
+                             target_text, NULL))
                 return false;
             have_nat = true;
-            if (!append_script(script, sizeof(script), &used,
-                               "add rule inet " EDGE_VPN_NFT_TABLE
-                               " forward iifname \"" EDGE_VPN_INTERFACE
-                               "\" ip daddr %s accept\n",
-                               target_text, NULL))
-                return false;
-        } else if (!append_script(script, sizeof(script), &used,
-                                  "add rule inet " EDGE_VPN_NFT_TABLE
-                                  " forward iifname \"" EDGE_VPN_INTERFACE
-                                  "\" ip daddr %s accept\n",
-                                  virtual_text, NULL)) {
+        } else if (!append_rule(forward, sizeof(forward), &forward_used,
+                                "iifname \"" EDGE_VPN_INTERFACE
+                                "\" ip daddr %s accept\n",
+                                virtual_text, NULL)) {
             return false;
         }
-        have_route = true;
     }
+    if (!append_rule(forward, sizeof(forward), &forward_used,
+                     "iifname \"" EDGE_VPN_INTERFACE "\" drop\n", NULL, NULL))
+        return false;
     if (have_nat &&
-        !append_script(script, sizeof(script), &used,
-                       "add rule inet " EDGE_VPN_NFT_TABLE
-                       " postrouting oifname != \"" EDGE_VPN_INTERFACE
-                       "\" ip saddr " EDGE_VPN_OVERLAY_CIDR " masquerade\n",
-                       NULL, NULL))
+        !append_rule(srcnat, sizeof(srcnat), &srcnat_used,
+                     "oifname != \"" EDGE_VPN_INTERFACE "\" ip saddr "
+                     EDGE_VPN_OVERLAY_CIDR " masquerade\n",
+                     NULL, NULL))
         return false;
-    if (have_route &&
-        !append_script(script, sizeof(script), &used,
-                       "add rule inet " EDGE_VPN_NFT_TABLE
-                       " forward oifname \"" EDGE_VPN_INTERFACE
-                       "\" ct state established,related accept\n",
-                       NULL, NULL))
+    if (!write_atomic(EDGE_VPN_DSTNAT_INCLUDE, dstnat) ||
+        !write_atomic(EDGE_VPN_FORWARD_INCLUDE, forward) ||
+        !write_atomic(EDGE_VPN_SRCNAT_INCLUDE, srcnat) ||
+        !configure_lan_membership(true))
         return false;
-    return run_nft_script(script);
+    const char *const reload[] = {"/etc/init.d/firewall", "reload", NULL};
+    return edge_process_run(reload, -1, -1) == 0;
 }
 
 static bool parse_edge_address(const char *value, char canonical[20]) {
@@ -836,25 +682,16 @@ bool edge_vpn_collect_capability(iot_edge_v1_VpnCapabilities *capability) {
     if (capability == NULL)
         return false;
     memset(capability, 0, sizeof(*capability));
-    char private_key[65];
-    if (!ensure_interface(private_key))
-        return false;
-    char public_key[65];
-    if (!read_public_key(public_key))
+    char private_hex[65];
+    char private_key[45];
+    char public_key[45];
+    if (!load_or_create_private_key(private_hex) ||
+        !private_key_base64(private_hex, private_key) ||
+        !read_public_key(private_key, public_key))
         return false;
     capability->supports_vpn = true;
-    safe_copy(capability->wireguard_version, sizeof(capability->wireguard_version), "kernel");
-    FILE *version = fopen("/sys/module/wireguard/version", "r");
-    if (version != NULL) {
-        char value[33] = {0};
-        if (fgets(value, sizeof(value), version) != NULL) {
-            value[strcspn(value, "\r\n")] = '\0';
-            if (value[0] != '\0')
-                safe_copy(capability->wireguard_version,
-                          sizeof(capability->wireguard_version), value);
-        }
-        fclose(version);
-    }
+    safe_copy(capability->wireguard_version, sizeof(capability->wireguard_version),
+              "netifd");
     safe_copy(capability->agent_version, sizeof(capability->agent_version),
               EDGE_VPN_AGENT_VERSION);
     safe_copy(capability->public_key, sizeof(capability->public_key), public_key);
@@ -885,17 +722,17 @@ bool edge_vpn_apply(const iot_edge_v1_VpnConfigRequest *request,
         return true;
     }
     char edge_address[20];
-    if (!parse_edge_address(request->edge_address, edge_address)) {
-        set_error(error, error_size, "invalid VPN edge address");
-        return false;
-    }
     uint8_t hub_key[32];
-    if (request->hub_listen_port == 0U || request->hub_listen_port > 65535U ||
-        !base64_decode_key(request->hub_public_key, hub_key)) {
-        set_error(error, error_size, "invalid VPN hub key or port");
+    char endpoint_host[256] = {0};
+    char endpoint_port[6] = {0};
+    if (!parse_edge_address(request->edge_address, edge_address) ||
+        request->hub_listen_port == 0U || request->hub_listen_port > 65535U ||
+        !base64_decode_key(request->hub_public_key, hub_key) ||
+        !split_endpoint(request->hub_endpoint, request->hub_listen_port,
+                        endpoint_host, endpoint_port)) {
+        set_error(error, error_size, "invalid VPN network configuration");
         return false;
     }
-    bool have_nat = false;
     for (pb_size_t index = 0U; index < request->routes_count; ++index) {
         const iot_edge_v1_VpnRoute *route = &request->routes[index];
         if (!route->enabled)
@@ -906,14 +743,13 @@ bool edge_vpn_apply(const iot_edge_v1_VpnConfigRequest *request,
             set_error(error, error_size, "invalid VPN route mapping");
             return false;
         }
-        if (strcmp(route->mode, "nat") == 0)
-            have_nat = true;
         for (pb_size_t previous = 0U; previous < index; ++previous) {
             if (!request->routes[previous].enabled)
                 continue;
             edge_vpn_cidr previous_virtual;
             edge_vpn_cidr previous_target;
-            if (route_valid(&request->routes[previous], &previous_virtual, &previous_target) &&
+            if (route_valid(&request->routes[previous], &previous_virtual,
+                            &previous_target) &&
                 previous_virtual.network == virtual_cidr.network &&
                 previous_virtual.prefix == virtual_cidr.prefix) {
                 set_error(error, error_size, "duplicate VPN route mapping");
@@ -925,23 +761,17 @@ bool edge_vpn_apply(const iot_edge_v1_VpnConfigRequest *request,
         set_error(error, error_size, "too many VPN route mappings");
         return false;
     }
-    struct sockaddr_storage endpoint;
-    socklen_t endpoint_size = 0;
-    if (!resolve_endpoint(request->hub_endpoint, request->hub_listen_port,
-                          &endpoint, &endpoint_size)) {
-        set_error(error, error_size, "cannot resolve VPN hub endpoint");
-        return false;
-    }
-    char private_key[65];
-    if (!ensure_interface(private_key) ||
-        !netlink_set_config(private_key, request->hub_public_key,
-                            (const struct sockaddr *)&endpoint, endpoint_size) ||
-        !run_ip_address(edge_address) || !run_ip_up() || !run_ip_overlay_route() ||
-        !apply_firewall(request)) {
+
+    char private_hex[65];
+    char private_key[45];
+    if (!load_or_create_private_key(private_hex) ||
+        !private_key_base64(private_hex, private_key) ||
+        !configure_network(private_key, edge_address, request->hub_public_key,
+                           endpoint_host, endpoint_port) ||
+        !configure_firewall(request)) {
         edge_vpn_shutdown();
         set_error(error, error_size,
-                  have_nat ? "cannot apply WireGuard or nftables NAT configuration"
-                            : "cannot apply WireGuard or nftables configuration");
+                  "cannot apply OpenWrt WireGuard or firewall4 configuration");
         return false;
     }
     applied_version = request->config_version;
@@ -951,9 +781,12 @@ bool edge_vpn_apply(const iot_edge_v1_VpnConfigRequest *request,
 
 void edge_vpn_shutdown(void) {
 #if defined(__linux__)
-    const char *const remove_table[] = {"nft", "delete", "table", "inet", EDGE_VPN_NFT_TABLE,
-                                        NULL};
-    (void)edge_process_run(remove_table, -1, -1);
-    (void)delete_interface();
+    unlink(EDGE_VPN_DSTNAT_INCLUDE);
+    unlink(EDGE_VPN_FORWARD_INCLUDE);
+    unlink(EDGE_VPN_SRCNAT_INCLUDE);
+    (void)configure_lan_membership(false);
+    const char *const firewall_reload[] = {"/etc/init.d/firewall", "reload", NULL};
+    (void)edge_process_run(firewall_reload, -1, -1);
+    (void)remove_network_configuration();
 #endif
 }

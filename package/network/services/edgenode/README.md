@@ -68,15 +68,16 @@ only new builds advertising WS firmware streaming use this transfer path.
 ## Edge VPN
 
 The VPN control messages are additive protobuf fields, so older platforms and nodes
-continue to use the existing payloads. A capable node creates `wg-iot` with
-`ip link`, configures the kernel WireGuard UAPI, assigns its `/32` overlay address,
-and installs one nftables table named `edgenode_vpn`. Only enabled, equal-prefix
+continue to use the existing payloads. A capable node creates the `wg` logical
+interface and its `iot_server` peer through OpenWrt UCI/netifd, assigns its `/32`
+overlay address, adds the `wg` network to the existing `lan` firewall zone, and
+loads the subnet mapping rules through firewall4 nftables includes. Only enabled, equal-prefix
 private-LAN mappings are accepted; no `0.0.0.0/0` route or inner packet is sent over
 the WebSocket. The device private key is generated from `/dev/urandom`, stored with
 mode `0600`, and never included in protobuf or logs.
 
-The package depends on `kmod-wireguard` and `nftables-nojson`. It does not install
-`wireguard-go`, `wg-quick`, a VPN daemon, or a separate LuCI VPN page; VPN controls
+The package depends on `kmod-wireguard` and `wireguard-tools`. It does not install
+`wireguard-go`, `wg-quick`, a second VPN daemon, or a separate LuCI VPN page; VPN controls
 remain on the Edge Node page in the platform UI.
 
 ## Runtime observability

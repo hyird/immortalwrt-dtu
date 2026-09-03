@@ -91,6 +91,11 @@ add_executable(edge_firmware_policy_test edge_firmware_policy_test.c)
 target_include_directories(edge_firmware_policy_test PRIVATE "${EDGENODE_ROOT}/src")
 add_test(NAME edge_firmware_policy COMMAND edge_firmware_policy_test)
 
+add_executable(edge_vpn_config_test edge_vpn_config_test.c)
+target_compile_definitions(edge_vpn_config_test PRIVATE
+    EDGENODE_VPN_SOURCE="${EDGENODE_ROOT}/src/edge_vpn.c")
+add_test(NAME edge_vpn_config COMMAND edge_vpn_config_test)
+
 add_executable(edge_firmware_stream_test
     edge_firmware_stream_test.c
     "${EDGENODE_ROOT}/src/edge_firmware_stream.c")
