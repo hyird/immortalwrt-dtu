@@ -23,7 +23,7 @@ Signed-off-by: Felix Fietkau <nbd@nbd.name>
  
  /* What your module does. */
 -#define MODULE_DESCRIPTION(_description) MODULE_INFO(description, _description)
-+#define MODULE_DESCRIPTION(_description) MODULE_INFO_STRIP(description, _description)
++#define MODULE_DESCRIPTION(_description) MODULE_INFO(description, _description)
  
  /*
   * Format: __mod_device_table__kmod_<modname>__<type>__<name>

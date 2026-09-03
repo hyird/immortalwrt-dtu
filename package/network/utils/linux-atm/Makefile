@@ -20,7 +20,9 @@ PKG_INSTALL:=1
 PKG_BUILD_PARALLEL:=1
 PKG_LICENSE:=GPL-2.0+
 PKG_CPE_ID:=cpe:/a:linux-atm:linux-atm
-PKG_FIXUP:=autoreconf
+# The release tarball includes a complete configure script and generated
+# Makefile.in files. Regenerating them with current autotools only emits
+# compatibility warnings from this legacy source tree.
 PKG_FLAGS:=nonshared
 
 include $(INCLUDE_DIR)/package.mk

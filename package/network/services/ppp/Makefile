@@ -28,6 +28,11 @@ PKG_FIXUP:=autoreconf
 PKG_INSTALL:=1
 
 include $(INCLUDE_DIR)/package.mk
+
+# PPPoA is the only consumer of libatm. Do not make every PPP build pull the
+# obsolete linux-atm source tree into the build graph when PPPoA is disabled.
+DISABLE_NLS:=
+
 CONFIGURE_ARGS += \
 	--disable-cbcp \
 	--disable-eaptls \
@@ -38,8 +43,6 @@ CONFIGURE_ARGS += \
 	--enable-ipv6cp \
 	--enable-microsoft-extensions \
 	--enable-plugins \
-	--with-atm \
-	--with-static-pcap \
 	--without-openssl \
 	--without-pam \
 	--without-pcap \
@@ -81,7 +84,7 @@ endef
 
 define Package/ppp-mod-pppoa
 $(call Package/ppp/Default)
-  DEPENDS:=@(PACKAGE_ppp||PACKAGE_ppp-multilink) +linux-atm +kmod-pppoa
+  DEPENDS:=@(PACKAGE_ppp||PACKAGE_ppp-multilink) +PACKAGE_ppp-mod-pppoa:linux-atm +kmod-pppoa
   TITLE:=PPPoA plugin
 endef
 
@@ -190,6 +193,12 @@ endef
 ifeq ($(BUILD_VARIANT),multilink)
   CONFIGURE_ARGS += \
 	--enable-multilink
+endif
+
+ifneq ($(CONFIG_PACKAGE_ppp-mod-pppoa),)
+  CONFIGURE_ARGS += --with-atm
+else
+  CONFIGURE_ARGS += --without-atm
 endif
 
 define Build/InstallDev
