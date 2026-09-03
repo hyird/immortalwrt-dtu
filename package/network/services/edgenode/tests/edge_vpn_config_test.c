@@ -33,12 +33,16 @@ int main(void) {
             "wg is not managed by the native netifd WireGuard protocol");
     require(strstr(source, "\"wireguard_\" EDGE_VPN_INTERFACE") != NULL,
             "native netifd peer section is missing");
-    require(strstr(source, "configure_lan_membership(true)") != NULL,
-            "wg is not added to the LAN firewall zone");
-    require(strstr(source, "/usr/share/nftables.d/chain-pre/dstnat/") != NULL &&
-                strstr(source, "/usr/share/nftables.d/chain-pre/forward/") != NULL &&
-                strstr(source, "/usr/share/nftables.d/chain-pre/srcnat/") != NULL,
-            "VPN mapping is not integrated with firewall4 includes");
+    require(strstr(source, "configure_firewall_uci(true)") != NULL,
+            "wg and VPN rules are not managed through firewall UCI");
+    require(strstr(source, "\"type\", \"nftables\"") != NULL &&
+                strstr(source, "\"position\", \"chain-prepend\"") != NULL &&
+                strstr(source, "\"chain\"") != NULL,
+            "VPN mapping is not registered as firewall4 UCI includes");
+    require(strstr(source, "EDGE_VPN_FIREWALL_DIRECTORY \"/vpn-dstnat.nft\"") != NULL &&
+                strstr(source, "EDGE_VPN_FIREWALL_DIRECTORY \"/vpn-forward.nft\"") != NULL &&
+                strstr(source, "EDGE_VPN_FIREWALL_DIRECTORY \"/vpn-srcnat.nft\"") != NULL,
+            "VPN firewall include paths are not runtime-managed");
     require(strstr(source, "dnat ip prefix to ip daddr map") != NULL,
             "VPN NAT does not preserve host bits across mapped prefixes");
     require(strstr(source, "ip\", \"link\", \"add") == NULL &&

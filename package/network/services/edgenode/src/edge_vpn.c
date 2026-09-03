@@ -20,17 +20,33 @@
 #define EDGE_VPN_OVERLAY_CIDR "100.96.0.0/11"
 #define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC1F0000U /* 172.31.0.0/16 */
 #define EDGE_VPN_AGENT_VERSION EDGE_SOFTWARE_VERSION
-#define EDGE_VPN_DSTNAT_INCLUDE \
+#define EDGE_VPN_FIREWALL_DIRECTORY "/tmp/edgenode"
+#define EDGE_VPN_DSTNAT_INCLUDE EDGE_VPN_FIREWALL_DIRECTORY "/vpn-dstnat.nft"
+#define EDGE_VPN_FORWARD_INCLUDE EDGE_VPN_FIREWALL_DIRECTORY "/vpn-forward.nft"
+#define EDGE_VPN_SRCNAT_INCLUDE EDGE_VPN_FIREWALL_DIRECTORY "/vpn-srcnat.nft"
+#define EDGE_VPN_LEGACY_DSTNAT_INCLUDE \
     "/usr/share/nftables.d/chain-pre/dstnat/30-edgenode-vpn.nft"
-#define EDGE_VPN_FORWARD_INCLUDE \
+#define EDGE_VPN_LEGACY_FORWARD_INCLUDE \
     "/usr/share/nftables.d/chain-pre/forward/30-edgenode-vpn.nft"
-#define EDGE_VPN_SRCNAT_INCLUDE \
+#define EDGE_VPN_LEGACY_SRCNAT_INCLUDE \
     "/usr/share/nftables.d/chain-pre/srcnat/30-edgenode-vpn.nft"
 
 typedef struct {
     uint32_t network;
     uint8_t prefix;
 } edge_vpn_cidr;
+
+typedef struct {
+    const char *section;
+    const char *path;
+    const char *chain;
+} edge_vpn_firewall_include;
+
+static const edge_vpn_firewall_include firewall_includes[] = {
+    {"edgenode_vpn_dstnat", EDGE_VPN_DSTNAT_INCLUDE, "dstnat"},
+    {"edgenode_vpn_forward", EDGE_VPN_FORWARD_INCLUDE, "forward"},
+    {"edgenode_vpn_srcnat", EDGE_VPN_SRCNAT_INCLUDE, "srcnat"},
+};
 
 static uint64_t applied_version;
 
@@ -522,7 +538,41 @@ static bool firewall_network_contains(struct uci_context *context,
     return false;
 }
 
-static bool configure_lan_membership(bool enabled) {
+static bool remove_firewall_include_sections(struct uci_context *context,
+                                             struct uci_package *package,
+                                             bool *changed) {
+    for (size_t index = 0U;
+         index < sizeof(firewall_includes) / sizeof(firewall_includes[0]); ++index) {
+        struct uci_section *section =
+            uci_lookup_section(context, package, firewall_includes[index].section);
+        if (section == NULL)
+            continue;
+        if (!delete_uci_section(context, package, section))
+            return false;
+        *changed = true;
+    }
+    return true;
+}
+
+static bool add_firewall_include_sections(struct uci_context *context,
+                                          struct uci_package *package) {
+    for (size_t index = 0U;
+         index < sizeof(firewall_includes) / sizeof(firewall_includes[0]); ++index) {
+        struct uci_section *section = NULL;
+        if (!add_named_section(context, package, "include",
+                               firewall_includes[index].section, &section) ||
+            !set_uci_option(context, package, section, "type", "nftables") ||
+            !set_uci_option(context, package, section, "path",
+                            firewall_includes[index].path) ||
+            !set_uci_option(context, package, section, "position", "chain-prepend") ||
+            !set_uci_option(context, package, section, "chain",
+                            firewall_includes[index].chain))
+            return false;
+    }
+    return true;
+}
+
+static bool configure_firewall_uci(bool enabled) {
     struct uci_context *context = uci_alloc_context();
     struct uci_package *package = NULL;
     if (context == NULL || uci_load(context, "firewall", &package) != UCI_OK) {
@@ -543,6 +593,8 @@ static bool configure_lan_membership(bool enabled) {
     }
     bool success = lan != NULL;
     bool changed = false;
+    if (success)
+        success = remove_firewall_include_sections(context, package, &changed);
     const bool contains = success && firewall_network_contains(context, lan,
                                                                EDGE_VPN_INTERFACE);
     if (success && enabled && !contains) {
@@ -558,6 +610,10 @@ static bool configure_lan_membership(bool enabled) {
         success = uci_del_list(context, &pointer) == UCI_OK;
         changed = success;
     }
+    if (success && enabled) {
+        success = add_firewall_include_sections(context, package);
+        changed = success;
+    }
     if (success && changed)
         success = uci_save(context, package) == UCI_OK &&
                   uci_commit(context, &package, false) == UCI_OK;
@@ -568,17 +624,7 @@ static bool configure_lan_membership(bool enabled) {
 }
 
 static bool ensure_firewall_directories(void) {
-    const char *const directories[] = {
-        "/usr/share/nftables.d",
-        "/usr/share/nftables.d/chain-pre",
-        "/usr/share/nftables.d/chain-pre/dstnat",
-        "/usr/share/nftables.d/chain-pre/forward",
-        "/usr/share/nftables.d/chain-pre/srcnat",
-    };
-    for (size_t index = 0U; index < sizeof(directories) / sizeof(directories[0]); ++index)
-        if (mkdir(directories[index], 0755) != 0 && errno != EEXIST)
-            return false;
-    return true;
+    return mkdir(EDGE_VPN_FIREWALL_DIRECTORY, 0755) == 0 || errno == EEXIST;
 }
 
 static bool write_atomic(const char *path, const char *content) {
@@ -662,8 +708,11 @@ static bool configure_firewall(const iot_edge_v1_VpnConfigRequest *request) {
     if (!write_atomic(EDGE_VPN_DSTNAT_INCLUDE, dstnat) ||
         !write_atomic(EDGE_VPN_FORWARD_INCLUDE, forward) ||
         !write_atomic(EDGE_VPN_SRCNAT_INCLUDE, srcnat) ||
-        !configure_lan_membership(true))
+        !configure_firewall_uci(true))
         return false;
+    unlink(EDGE_VPN_LEGACY_DSTNAT_INCLUDE);
+    unlink(EDGE_VPN_LEGACY_FORWARD_INCLUDE);
+    unlink(EDGE_VPN_LEGACY_SRCNAT_INCLUDE);
     const char *const reload[] = {"/etc/init.d/firewall", "reload", NULL};
     return edge_process_run(reload, -1, -1) == 0;
 }
@@ -787,7 +836,10 @@ void edge_vpn_shutdown(void) {
     unlink(EDGE_VPN_DSTNAT_INCLUDE);
     unlink(EDGE_VPN_FORWARD_INCLUDE);
     unlink(EDGE_VPN_SRCNAT_INCLUDE);
-    (void)configure_lan_membership(false);
+    unlink(EDGE_VPN_LEGACY_DSTNAT_INCLUDE);
+    unlink(EDGE_VPN_LEGACY_FORWARD_INCLUDE);
+    unlink(EDGE_VPN_LEGACY_SRCNAT_INCLUDE);
+    (void)configure_firewall_uci(false);
     const char *const firewall_reload[] = {"/etc/init.d/firewall", "reload", NULL};
     (void)edge_process_run(firewall_reload, -1, -1);
     (void)remove_network_configuration();
