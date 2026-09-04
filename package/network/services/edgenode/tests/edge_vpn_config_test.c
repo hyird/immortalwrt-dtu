@@ -29,6 +29,11 @@ int main(void) {
     char *source = read_source();
     require(strstr(source, "#define EDGE_VPN_INTERFACE \"wg\"") != NULL,
             "managed interface is not named wg");
+    require(strstr(source,
+                   "#define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC000000U") != NULL &&
+                strstr(source,
+                       "#define EDGE_VPN_VIRTUAL_POOL_MASK 0xFF000000U") != NULL,
+            "virtual LAN pool is not 172.0.0.0/8");
     require(strstr(source, "\"proto\", \"wireguard\"") != NULL,
             "wg is not managed by the native netifd WireGuard protocol");
     require(strstr(source, "\"wireguard_\" EDGE_VPN_INTERFACE") != NULL,

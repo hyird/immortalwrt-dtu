@@ -18,7 +18,8 @@
 #define EDGE_VPN_PEER_SECTION "iot_server"
 #define EDGE_VPN_KEY_PATH "/etc/edgenode/vpn.key"
 #define EDGE_VPN_OVERLAY_CIDR "100.96.0.0/11"
-#define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC1F0000U /* 172.31.0.0/16 */
+#define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC000000U /* 172.0.0.0/8 */
+#define EDGE_VPN_VIRTUAL_POOL_MASK 0xFF000000U
 #define EDGE_VPN_AGENT_VERSION EDGE_SOFTWARE_VERSION
 #define EDGE_VPN_FIREWALL_DIRECTORY "/tmp/edgenode"
 #define EDGE_VPN_DSTNAT_INCLUDE EDGE_VPN_FIREWALL_DIRECTORY "/vpn-dstnat.nft"
@@ -316,7 +317,8 @@ static bool route_valid(const iot_edge_v1_VpnRoute *route, edge_vpn_cidr *virtua
         !parse_cidr(route->virtual_cidr, virtual_cidr) ||
         !parse_cidr(route->target_cidr, target_cidr) ||
         virtual_cidr->prefix != target_cidr->prefix ||
-        (virtual_cidr->network & 0xffff0000U) != EDGE_VPN_VIRTUAL_POOL_NETWORK ||
+        (virtual_cidr->network & EDGE_VPN_VIRTUAL_POOL_MASK) !=
+            EDGE_VPN_VIRTUAL_POOL_NETWORK ||
         !private_network(target_cidr->network))
         return false;
     if (strcmp(route->mode, "nat") == 0)

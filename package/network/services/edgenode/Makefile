@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.38
-PKG_RELEASE:=4
+PKG_VERSION:=0.3.39
+PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
 PKG_SOURCE:=nanopb-$(NANOPB_VERSION).tar.gz
