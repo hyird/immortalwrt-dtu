@@ -67,6 +67,60 @@ static void test_modbus(void) {
     require_true(size == 8U && edge_modbus_crc16(frame, 6U) ==
                                   (uint16_t)(frame[6] | ((uint16_t)frame[7] << 8U)),
                  "Modbus RTU CRC is wrong");
+
+    require_true(edge_modbus_rtu_quiet_time_us(9600U, 8U, 1U, false) == 3646U,
+                 "Modbus RTU 3.5T calculation is wrong for 9600 8N1");
+    require_true(edge_modbus_rtu_quiet_time_us(19200U, 8U, 1U, true) == 2006U,
+                 "Modbus RTU 3.5T calculation is wrong for parity framing");
+
+    edge_modbus_read_point points[] = {
+        {.point_index = 0U, .function = 3U, .address = 3U, .quantity = 1U},
+        {.point_index = 1U, .function = 3U, .address = 15U, .quantity = 2U},
+        {.point_index = 2U, .function = 3U, .address = 17U, .quantity = 2U},
+        {.point_index = 3U, .function = 3U, .address = 1U, .quantity = 1U},
+        {.point_index = 4U, .function = 3U, .address = 19U, .quantity = 1U},
+    };
+    edge_modbus_read_group groups[5];
+    size_t group_count = 0U;
+    require_true(edge_modbus_plan_reads(points, 5U, 100U, 125U, groups, 5U,
+                                        &group_count),
+                 "Modbus read plan failed");
+    require_true(group_count == 1U && groups[0].function == 3U &&
+                     groups[0].address == 1U && groups[0].quantity == 19U,
+                 "Modbus points were not merged into the expected 1..19 read");
+    require_true(points[0].point_index == 3U && points[1].point_index == 0U,
+                 "Modbus read points were not sorted without losing source indexes");
+
+    uint8_t grouped[38];
+    for (size_t index = 0U; index < sizeof(grouped); ++index)
+        grouped[index] = (uint8_t)index;
+    uint8_t extracted[8];
+    size_t extracted_size = 0U;
+    require_true(edge_modbus_extract_point(&groups[0], &points[2], grouped,
+                                            sizeof(grouped), extracted,
+                                            sizeof(extracted), &extracted_size) &&
+                     extracted_size == 4U && extracted[0] == 28U && extracted[3] == 31U,
+                 "Modbus grouped register extraction used the wrong offset");
+
+    edge_modbus_read_point split_points[] = {
+        {.point_index = 0U, .function = 3U, .address = 1U, .quantity = 1U},
+        {.point_index = 1U, .function = 3U, .address = 15U, .quantity = 2U},
+        {.point_index = 2U, .function = 4U, .address = 16U, .quantity = 1U},
+    };
+    require_true(edge_modbus_plan_reads(split_points, 3U, 2U, 125U, groups, 5U,
+                                        &group_count) && group_count == 3U,
+                 "Modbus planner merged across a large gap or function boundary");
+
+    const edge_modbus_read_group coil_group = {
+        .function = 1U, .address = 8U, .quantity = 10U};
+    const edge_modbus_read_point coil_point = {
+        .point_index = 0U, .function = 1U, .address = 17U, .quantity = 1U};
+    const uint8_t coil_data[] = {0U, 0x02U};
+    require_true(edge_modbus_extract_point(&coil_group, &coil_point, coil_data,
+                                            sizeof(coil_data), extracted,
+                                            sizeof(extracted), &extracted_size) &&
+                     extracted_size == 1U && extracted[0] == 1U,
+                 "Modbus grouped coil extraction used the wrong bit offset");
 }
 
 static void test_s7(void) {

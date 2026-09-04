@@ -30,7 +30,41 @@ typedef struct {
     uint16_t quantity;
 } edge_modbus_request;
 
+typedef struct {
+    size_t point_index;
+    uint8_t function;
+    uint16_t address;
+    uint16_t quantity;
+} edge_modbus_read_point;
+
+typedef struct {
+    uint8_t function;
+    uint16_t address;
+    uint16_t quantity;
+} edge_modbus_read_group;
+
 uint16_t edge_modbus_crc16(const uint8_t *data, size_t size);
+
+/* Returns the minimum Modbus RTU silent interval (3.5 character times). */
+uint32_t edge_modbus_rtu_quiet_time_us(uint32_t baud_rate, uint8_t data_bits,
+                                       uint8_t stop_bits, bool parity_enabled);
+
+/*
+ * Sorts points by function/address and creates the same bounded read groups as
+ * the platform collector. A zero max_quantity is treated as the legacy
+ * default of 125 registers.
+ */
+bool edge_modbus_plan_reads(edge_modbus_read_point *points, size_t point_count,
+                            uint32_t merge_gap, uint32_t max_quantity,
+                            edge_modbus_read_group *groups, size_t group_capacity,
+                            size_t *group_count);
+
+/* Extracts one configured point from a grouped read response payload. */
+bool edge_modbus_extract_point(const edge_modbus_read_group *group,
+                               const edge_modbus_read_point *point,
+                               const uint8_t *data, size_t data_size,
+                               uint8_t *output, size_t capacity,
+                               size_t *output_size);
 
 edge_modbus_result edge_modbus_build_read(const edge_modbus_request *request,
                                           uint8_t *output, size_t capacity,

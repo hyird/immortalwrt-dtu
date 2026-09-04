@@ -70,6 +70,10 @@ struct edge_acquisition_device {
     const iot_edge_v1_DeviceConfig *config;
     edge_acquisition_point *points;
     size_t point_count;
+    edge_modbus_read_point *modbus_points;
+    size_t modbus_point_count;
+    edge_modbus_read_group *modbus_groups;
+    size_t modbus_group_count;
     edge_device_runtime runtime;
     uint16_t transaction;
     uint16_t s7_reference;
@@ -532,14 +536,20 @@ static bool configure_serial(int fd, const iot_edge_v1_SerialSettings *settings)
     (void)ioctl(fd, TIOCSRS485, &mode);
 #endif
     (void)tcflush(fd, TCIFLUSH);
-    const uint32_t parity_bits = strcmp(settings->parity, "none") == 0 ? 0U : 1U;
-    const uint64_t bits = 1U + settings->data_bits + settings->stop_bits + parity_bits;
-    const useconds_t quiet_us = (useconds_t)((bits * 3500000U +
-                                               settings->baud_rate - 1U) /
-                                              settings->baud_rate);
-    if (quiet_us != 0U)
-        usleep(quiet_us);
     return true;
+}
+
+static void wait_serial_quiet(const edge_acquisition_device *device) {
+    const iot_edge_v1_SerialSettings *settings = &device->endpoint->serial;
+    const uint32_t quiet_us = edge_modbus_rtu_quiet_time_us(
+        settings->baud_rate, (uint8_t)settings->data_bits,
+        (uint8_t)settings->stop_bits, strcmp(settings->parity, "none") != 0);
+    struct timespec remaining = {
+        .tv_sec = quiet_us / 1000000U,
+        .tv_nsec = (long)(quiet_us % 1000000U) * 1000L,
+    };
+    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
+    }
 }
 
 static int open_serial(const iot_edge_v1_SerialSettings *settings) {
@@ -792,9 +802,10 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
                   "TCP peer disconnected before request");
         return false;
     }
-    if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
+    if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL) {
         (void)tcflush(device->link->fd, TCIFLUSH);
-    else if (device->endpoint->mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER &&
+        wait_serial_quiet(device);
+    } else if (device->endpoint->mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER &&
              device->config->heartbeat_payload.size != 0U) {
         for (;;) {
             int available = 0;
@@ -958,16 +969,17 @@ static edge_s7_address s7_address(const iot_edge_v1_S7AreaConfig *point) {
     return address;
 }
 
-static edge_io_result read_modbus_point(edge_acquisition_device *device,
-                                         const iot_edge_v1_ModbusRegisterConfig *point,
-                                         uint8_t *data, size_t capacity, size_t *data_size) {
+static edge_io_result read_modbus_range(edge_acquisition_device *device,
+                                        uint8_t function, uint16_t address,
+                                        uint16_t quantity, uint8_t *data,
+                                        size_t capacity, size_t *data_size) {
     edge_modbus_request request = {
         .transport = modbus_transport(device),
         .transaction_id = ++device->transaction,
         .unit_id = (uint8_t)device->config->modbus_slave_id,
-        .function = modbus_function(point->register_type),
-        .address = (uint16_t)point->address,
-        .quantity = (uint16_t)point->quantity};
+        .function = function,
+        .address = address,
+        .quantity = quantity};
     uint8_t output[EDGE_MODBUS_MAX_FRAME];
     uint8_t response[EDGE_MODBUS_MAX_FRAME];
     size_t output_size = 0U;
@@ -982,11 +994,21 @@ static edge_io_result read_modbus_point(edge_acquisition_device *device,
         &request, response, response_size, NULL, 0U, data, capacity, data_size, &exception);
     if (parsed != EDGE_MODBUS_OK)
         return EDGE_IO_PROTOCOL_ERROR;
-    if ((request.function == 1U || request.function == 2U) && *data_size != 0U) {
+    return EDGE_IO_OK;
+}
+
+static edge_io_result read_modbus_point(edge_acquisition_device *device,
+                                         const iot_edge_v1_ModbusRegisterConfig *point,
+                                         uint8_t *data, size_t capacity, size_t *data_size) {
+    const uint8_t function = modbus_function(point->register_type);
+    const edge_io_result result = read_modbus_range(
+        device, function, (uint16_t)point->address, (uint16_t)point->quantity,
+        data, capacity, data_size);
+    if (result == EDGE_IO_OK && (function == 1U || function == 2U) && *data_size != 0U) {
         data[0] = (uint8_t)(data[0] & 1U);
         *data_size = 1U;
     }
-    return EDGE_IO_OK;
+    return result;
 }
 
 static edge_io_result read_s7_point(edge_acquisition_device *device,
@@ -1212,18 +1234,45 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
     if (!prepare_serial_task(device))
         return EDGE_IO_OFFLINE;
     bool any = false;
+    for (size_t index = 0U; index < device->point_count; ++index)
+        device->points[index].valid = false;
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS) {
+        for (size_t group_index = 0U; group_index < device->modbus_group_count;
+             ++group_index) {
+            const edge_modbus_read_group *group = &device->modbus_groups[group_index];
+            uint8_t grouped[EDGE_MODBUS_MAX_FRAME];
+            size_t grouped_size = 0U;
+            const edge_io_result result = read_modbus_range(
+                device, group->function, group->address, group->quantity,
+                grouped, sizeof(grouped), &grouped_size);
+            if (result != EDGE_IO_OK) {
+                log_io_result(device, result, "read");
+                return result;
+            }
+            for (size_t point_index = 0U; point_index < device->modbus_point_count;
+                 ++point_index) {
+                const edge_modbus_read_point *planned = &device->modbus_points[point_index];
+                uint8_t raw[EDGE_DEVICE_VALUE_MAX];
+                size_t raw_size = 0U;
+                if (!edge_modbus_extract_point(group, planned, grouped, grouped_size,
+                                                raw, sizeof(raw), &raw_size))
+                    continue;
+                edge_acquisition_point *point = &device->points[planned->point_index];
+                fill_point_value(point, raw, raw_size);
+                any = any || point->valid;
+            }
+        }
+        log_io_result(device, EDGE_IO_OK, "read");
+        sample->bytes[0] = any || device->point_count == 0U ? 1U : 0U;
+        sample->size = 1U;
+        return EDGE_IO_OK;
+    }
     for (size_t index = 0U; index < device->point_count; ++index) {
         edge_acquisition_point *point = &device->points[index];
-        point->valid = false;
         uint8_t raw[EDGE_DEVICE_VALUE_MAX];
         size_t raw_size = 0U;
-        edge_io_result result = point->item->which_item ==
-                                        iot_edge_v1_ConfigItem_modbus_register_tag
-                                    ? read_modbus_point(device,
-                                          &point->item->item.modbus_register,
-                                          raw, sizeof(raw), &raw_size)
-                                    : read_s7_point(device, &point->item->item.s7_area,
-                                          raw, sizeof(raw), &raw_size);
+        edge_io_result result = read_s7_point(device, &point->item->item.s7_area,
+                                              raw, sizeof(raw), &raw_size);
         if (result != EDGE_IO_OK) {
             log_io_result(device, result, "read");
             return result;
@@ -1528,6 +1577,8 @@ static void free_devices(edge_acquisition_device *devices, size_t count) {
     for (size_t index = 0U; index < count; ++index) {
         edge_device_runtime_close(&devices[index].runtime);
         free(devices[index].points);
+        free(devices[index].modbus_points);
+        free(devices[index].modbus_groups);
     }
     free(devices);
 }
@@ -1719,6 +1770,39 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                 for (uint32_t point = 0U; point < config->item_count; ++point)
                     if (point_for_device(&config->items[point], device))
                         runtime->points[point_output++].item = &config->items[point];
+                if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS) {
+                    runtime->modbus_points = calloc(runtime->point_count,
+                                                    sizeof(*runtime->modbus_points));
+                    runtime->modbus_groups = calloc(runtime->point_count,
+                                                    sizeof(*runtime->modbus_groups));
+                    if (runtime->modbus_points == NULL || runtime->modbus_groups == NULL) {
+                        free_devices(devices, output + 1U);
+                        free_links(links, link_count);
+                        set_error(error, error_size, "Modbus plan memory allocation failed");
+                        return false;
+                    }
+                    runtime->modbus_point_count = runtime->point_count;
+                    for (size_t point = 0U; point < runtime->point_count; ++point) {
+                        const iot_edge_v1_ModbusRegisterConfig *register_config =
+                            &runtime->points[point].item->item.modbus_register;
+                        runtime->modbus_points[point] = (edge_modbus_read_point){
+                            .point_index = point,
+                            .function = modbus_function(register_config->register_type),
+                            .address = (uint16_t)register_config->address,
+                            .quantity = (uint16_t)register_config->quantity,
+                        };
+                    }
+                    if (!edge_modbus_plan_reads(
+                            runtime->modbus_points, runtime->modbus_point_count,
+                            device->modbus_merge_gap, device->modbus_max_quantity,
+                            runtime->modbus_groups, runtime->point_count,
+                            &runtime->modbus_group_count)) {
+                        free_devices(devices, output + 1U);
+                        free_links(links, link_count);
+                        set_error(error, error_size, "invalid Modbus read plan");
+                        return false;
+                    }
+                }
             }
             const edge_device_protocol protocol =
                 device->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS

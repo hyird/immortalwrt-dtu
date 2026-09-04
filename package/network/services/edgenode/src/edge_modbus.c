@@ -24,6 +24,119 @@ uint16_t edge_modbus_crc16(const uint8_t *data, size_t size) {
     return crc;
 }
 
+uint32_t edge_modbus_rtu_quiet_time_us(uint32_t baud_rate, uint8_t data_bits,
+                                       uint8_t stop_bits, bool parity_enabled) {
+    if (baud_rate == 0U || data_bits < 5U || data_bits > 8U ||
+        (stop_bits != 1U && stop_bits != 2U))
+        return 0U;
+    const uint64_t bits = 1U + data_bits + stop_bits + (parity_enabled ? 1U : 0U);
+    return (uint32_t)((bits * 3500000U + baud_rate - 1U) / baud_rate);
+}
+
+static bool read_point_precedes(const edge_modbus_read_point *left,
+                                const edge_modbus_read_point *right) {
+    if (left->function != right->function)
+        return left->function < right->function;
+    if (left->address != right->address)
+        return left->address < right->address;
+    return left->point_index < right->point_index;
+}
+
+bool edge_modbus_plan_reads(edge_modbus_read_point *points, size_t point_count,
+                            uint32_t merge_gap, uint32_t max_quantity,
+                            edge_modbus_read_group *groups, size_t group_capacity,
+                            size_t *group_count) {
+    if (group_count == NULL || (point_count != 0U && (points == NULL || groups == NULL)) ||
+        group_capacity < point_count)
+        return false;
+    *group_count = 0U;
+    if (merge_gap > 2000U)
+        merge_gap = 2000U;
+    if (max_quantity == 0U)
+        max_quantity = 125U;
+    if (max_quantity > 125U)
+        max_quantity = 125U;
+
+    for (size_t index = 0U; index < point_count; ++index) {
+        const uint16_t maximum = points[index].function <= 2U
+                                     ? 2000U : (uint16_t)max_quantity;
+        if (points[index].function < 1U || points[index].function > 4U ||
+            points[index].quantity == 0U || points[index].quantity > maximum)
+            return false;
+    }
+    for (size_t index = 1U; index < point_count; ++index) {
+        const edge_modbus_read_point value = points[index];
+        size_t position = index;
+        while (position != 0U && read_point_precedes(&value, &points[position - 1U])) {
+            points[position] = points[position - 1U];
+            --position;
+        }
+        points[position] = value;
+    }
+
+    for (size_t index = 0U; index < point_count; ++index) {
+        const edge_modbus_read_point *point = &points[index];
+        const uint16_t maximum = point->function <= 2U
+                                     ? 2000U : (uint16_t)max_quantity;
+        if (*group_count != 0U) {
+            edge_modbus_read_group *current = &groups[*group_count - 1U];
+            if (current->function == point->function) {
+                const uint32_t current_end = (uint32_t)current->address + current->quantity;
+                const uint32_t next_end = (uint32_t)point->address + point->quantity;
+                const int32_t gap = (int32_t)point->address - (int32_t)current_end;
+                const uint32_t merged = next_end - current->address;
+                if (gap <= (int32_t)merge_gap && merged <= maximum) {
+                    if (merged > current->quantity)
+                        current->quantity = (uint16_t)merged;
+                    continue;
+                }
+            }
+        }
+        groups[*group_count] = (edge_modbus_read_group){
+            .function = point->function,
+            .address = point->address,
+            .quantity = point->quantity,
+        };
+        ++*group_count;
+    }
+    return true;
+}
+
+bool edge_modbus_extract_point(const edge_modbus_read_group *group,
+                               const edge_modbus_read_point *point,
+                               const uint8_t *data, size_t data_size,
+                               uint8_t *output, size_t capacity,
+                               size_t *output_size) {
+    if (output_size != NULL)
+        *output_size = 0U;
+    if (group == NULL || point == NULL || data == NULL || output == NULL ||
+        output_size == NULL || group->function != point->function ||
+        point->address < group->address)
+        return false;
+    const uint32_t offset = (uint32_t)point->address - group->address;
+    if (offset + point->quantity > group->quantity)
+        return false;
+    const size_t expected = group->function <= 2U
+                                ? (size_t)(group->quantity + 7U) / 8U
+                                : (size_t)group->quantity * 2U;
+    if (data_size != expected)
+        return false;
+    if (group->function <= 2U) {
+        if (capacity < 1U)
+            return false;
+        output[0] = (uint8_t)((data[offset / 8U] >> (offset % 8U)) & 1U);
+        *output_size = 1U;
+        return true;
+    }
+    const size_t byte_offset = (size_t)offset * 2U;
+    const size_t byte_count = (size_t)point->quantity * 2U;
+    if (capacity < byte_count || byte_offset + byte_count > data_size)
+        return false;
+    memcpy(output, data + byte_offset, byte_count);
+    *output_size = byte_count;
+    return true;
+}
+
 static bool valid_base(const edge_modbus_request *request) {
     return request != NULL &&
            (request->transport == EDGE_MODBUS_TCP || request->transport == EDGE_MODBUS_RTU) &&
