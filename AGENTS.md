@@ -35,7 +35,9 @@
   the terminal, so the init restart path must survive PTY hangup and service
   recovery must not depend on that terminal session. Keep procd respawn enabled
   for both the main and modem-monitor instances.
-- Use `configs/tas-682f.config` as the release seed configuration.
+- Use `configs/tastek-mt76x8.config` as the release seed configuration. It
+  builds the TAS-682F and IT-694_s3 profiles together with per-device root
+  filesystems.
 
 ## Build environment
 
@@ -52,9 +54,9 @@
   installs only `libev`, `libuwsc`, `openssh-sftp-server`, `luci-light`, and
   `luci-proto-wireguard` with their dependencies;
   the helper pre-seeds the three source packages needed to keep the feeds scan
-  warning-free. Do not use `feeds install -a`; this single-device tree
+  warning-free. Do not use `feeds install -a`; this targeted device tree
   intentionally omits dependencies of unused feed packages.
-- Copy `configs/tas-682f.config` to `.config`, run `make defconfig`, and perform
+- Copy `configs/tastek-mt76x8.config` to `.config`, run `make defconfig`, and perform
   a full firmware image build; a package-only compile is not a release build.
   Do not run global `make clean` for routine source-only updates when the build
   checkout has a verified clean baseline. Use it only when the toolchain,
