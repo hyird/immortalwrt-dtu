@@ -34,6 +34,9 @@ int main(void) {
                 strstr(source,
                        "#define EDGE_VPN_VIRTUAL_POOL_MASK 0xFFF00000U") != NULL,
             "virtual LAN pool is not 172.16.0.0/12");
+    require(strstr(source,
+                   "#define EDGE_VPN_VIRTUAL_POOL_CIDR \"172.16.0.0/12\"") != NULL,
+            "virtual LAN route is not the complete RFC1918 pool");
     require(strstr(source, "\"proto\", \"wireguard\"") != NULL,
             "wg is not managed by the native netifd WireGuard protocol");
     require(strstr(source, "\"wireguard_\" EDGE_VPN_INTERFACE") != NULL,
@@ -53,6 +56,14 @@ int main(void) {
             "VPN firewall include paths are not runtime-managed");
     require(strstr(source, "dnat ip prefix to ip daddr map") != NULL,
             "VPN NAT does not preserve host bits across mapped prefixes");
+    require(strstr(source, "snat ip prefix to ip saddr map") != NULL,
+            "LAN egress NAT does not preserve host bits across mapped prefixes");
+    require(strstr(source, "ip daddr \"\n"
+                           "                             EDGE_VPN_VIRTUAL_POOL_CIDR") != NULL,
+            "LAN egress is not limited to the virtual LAN pool");
+    require(strstr(source, "add_uci_list(context, package, peer, \"allowed_ips\",\n"
+                           "                               EDGE_VPN_VIRTUAL_POOL_CIDR)") != NULL,
+            "WireGuard does not route the virtual LAN pool through the Hub");
     require(strstr(source, "ip\", \"link\", \"add") == NULL &&
                 strstr(source, "WG_CMD_SET_DEVICE") == NULL,
             "edge still configures WireGuard outside netifd");

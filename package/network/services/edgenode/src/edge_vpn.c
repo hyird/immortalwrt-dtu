@@ -19,6 +19,7 @@
 #define EDGE_VPN_PEER_DESCRIPTION "IoT VPN Hub"
 #define EDGE_VPN_KEY_PATH "/etc/edgenode/vpn.key"
 #define EDGE_VPN_OVERLAY_CIDR "100.96.0.0/11"
+#define EDGE_VPN_VIRTUAL_POOL_CIDR "172.16.0.0/12"
 #define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC100000U /* 172.16.0.0/12 */
 #define EDGE_VPN_VIRTUAL_POOL_MASK 0xFFF00000U
 #define EDGE_VPN_AGENT_VERSION EDGE_SOFTWARE_VERSION
@@ -484,7 +485,9 @@ static bool configure_network(const char *private_key, const char *edge_address,
                   set_uci_option(context, package, peer, "persistent_keepalive", "25") &&
                   set_uci_option(context, package, peer, "route_allowed_ips", "1") &&
                   add_uci_list(context, package, peer, "allowed_ips",
-                               EDGE_VPN_OVERLAY_CIDR);
+                               EDGE_VPN_OVERLAY_CIDR) &&
+                  add_uci_list(context, package, peer, "allowed_ips",
+                               EDGE_VPN_VIRTUAL_POOL_CIDR);
     if (success)
         success = uci_save(context, package) == UCI_OK &&
                   uci_commit(context, &package, false) == UCI_OK;
@@ -666,7 +669,7 @@ static bool configure_firewall(const iot_edge_v1_VpnConfigRequest *request) {
         return false;
     char dstnat[8192] = {0};
     char forward[8192] = {0};
-    char srcnat[512] = {0};
+    char srcnat[8192] = {0};
     size_t dstnat_used = 0U;
     size_t forward_used = 0U;
     size_t srcnat_used = 0U;
@@ -691,7 +694,18 @@ static bool configure_firewall(const iot_edge_v1_VpnConfigRequest *request) {
                 !append_rule(forward, sizeof(forward), &forward_used,
                              "iifname \"" EDGE_VPN_INTERFACE
                              "\" ip daddr %s accept\n",
-                             target_text, NULL, NULL))
+                             target_text, NULL, NULL) ||
+                !append_rule(forward, sizeof(forward), &forward_used,
+                             "oifname \"" EDGE_VPN_INTERFACE
+                             "\" ip saddr %s ip daddr "
+                             EDGE_VPN_VIRTUAL_POOL_CIDR " accept\n",
+                             target_text, NULL, NULL) ||
+                !append_rule(srcnat, sizeof(srcnat), &srcnat_used,
+                             "oifname \"" EDGE_VPN_INTERFACE
+                             "\" ip saddr %s ip daddr "
+                             EDGE_VPN_VIRTUAL_POOL_CIDR
+                             " snat ip prefix to ip saddr map { %s : %s }\n",
+                             target_text, target_text, virtual_text))
                 return false;
             have_nat = true;
         } else if (!append_rule(forward, sizeof(forward), &forward_used,
