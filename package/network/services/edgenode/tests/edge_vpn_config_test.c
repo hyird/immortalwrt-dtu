@@ -38,6 +38,9 @@ int main(void) {
             "wg is not managed by the native netifd WireGuard protocol");
     require(strstr(source, "\"wireguard_\" EDGE_VPN_INTERFACE") != NULL,
             "native netifd peer section is missing");
+    require(strstr(source, "\"description\",\n"
+                           "                                 EDGE_VPN_PEER_DESCRIPTION") != NULL,
+            "native netifd peer description is missing");
     require(strstr(source, "configure_firewall_uci(true)") != NULL,
             "wg and VPN rules are not managed through firewall UCI");
     require(strstr(source, "\"type\", \"nftables\"") != NULL &&

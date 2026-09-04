@@ -16,6 +16,7 @@
 
 #define EDGE_VPN_INTERFACE "wg"
 #define EDGE_VPN_PEER_SECTION "iot_server"
+#define EDGE_VPN_PEER_DESCRIPTION "IoT VPN Hub"
 #define EDGE_VPN_KEY_PATH "/etc/edgenode/vpn.key"
 #define EDGE_VPN_OVERLAY_CIDR "100.96.0.0/11"
 #define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC100000U /* 172.16.0.0/12 */
@@ -475,7 +476,9 @@ static bool configure_network(const char *private_key, const char *edge_address,
         success = add_named_section(context, package, "wireguard_" EDGE_VPN_INTERFACE,
                                     EDGE_VPN_PEER_SECTION, &peer);
     if (success)
-        success = set_uci_option(context, package, peer, "public_key", hub_public_key) &&
+        success = set_uci_option(context, package, peer, "description",
+                                 EDGE_VPN_PEER_DESCRIPTION) &&
+                  set_uci_option(context, package, peer, "public_key", hub_public_key) &&
                   set_uci_option(context, package, peer, "endpoint_host", endpoint_host) &&
                   set_uci_option(context, package, peer, "endpoint_port", endpoint_port) &&
                   set_uci_option(context, package, peer, "persistent_keepalive", "25") &&
