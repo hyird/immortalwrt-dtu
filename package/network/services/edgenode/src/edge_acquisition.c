@@ -526,7 +526,11 @@ static bool configure_serial(int fd, const iot_edge_v1_SerialSettings *settings)
         options.c_cflag |= CSTOPB;
     options.c_cc[VMIN] = 0;
     options.c_cc[VTIME] = 0;
-    if (tcdrain(fd) != 0 || tcsetattr(fd, TCSANOW, &options) != 0)
+    /* Every exchange already bounds request completion before the scheduler can
+     * select another task. On the mt76x8 RS485 UART, tcdrain() can nevertheless
+     * wait forever after a silent slave and stall the acquisition worker. Apply
+     * the settings immediately; the request path enforces the Modbus quiet gap. */
+    if (tcsetattr(fd, TCSANOW, &options) != 0)
         return false;
 #if defined(__linux__) && defined(TIOCSRS485)
     struct serial_rs485 mode;
@@ -1247,6 +1251,16 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
                 grouped, sizeof(grouped), &grouped_size);
             if (result != EDGE_IO_OK) {
                 log_io_result(device, result, "read");
+                if (result == EDGE_IO_NO_RESPONSE &&
+                    device->endpoint->transport ==
+                        iot_edge_v1_Transport_TRANSPORT_SERIAL) {
+                    /* A timed-out RS485 transaction can leave the mt76x8 UART
+                     * driver unable to drain its transmit state. Close it now
+                     * so the runtime reconnects before the next scan cycle
+                     * instead of carrying poisoned state forward. */
+                    close_fd(&device->link->fd);
+                    return EDGE_IO_OFFLINE;
+                }
                 return result;
             }
             for (size_t point_index = 0U; point_index < device->modbus_point_count;
