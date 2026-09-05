@@ -52,6 +52,7 @@ for now in 1000 1090 1180 1270 1360; do
     tick "$now"; health "$now"; ensure_edgenode_running; check_count 2
 done
 # An orphaned acquisition worker does not count as the opted-in main PID.
+sed -i 's/(edgenode) S 101 /(edgenode) S 1 /' ROOT/proc/202/stat
 pidof() { echo 202; }
 tick 1400; ensure_edgenode_running
 wait "$recovery_pid"; recovery_pid=''; check_count 3
