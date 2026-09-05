@@ -20,6 +20,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <syslog.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
