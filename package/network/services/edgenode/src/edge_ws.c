@@ -517,6 +517,7 @@ static void schedule_reconnect(edge_ws_session *session) {
 static void websocket_open(struct uwsc_client *client) {
     edge_ws_session *session = session_from_client(client);
     session->websocket_open = true;
+    session->last_liveness_probe_ms = monotonic_ms();
     edge_retry_transport_connected(&session->retry, monotonic_ms(),
                                    EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS);
     ev_timer_stop(session->app->loop, &session->reconnect_timer);
@@ -1532,6 +1533,7 @@ static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int event
     (void)loop;
     (void)events;
     edge_ws_app *app = app_from_status(timer);
+    edge_terminal_reap();
     edge_status_platform platforms[EDGE_MAX_PLATFORMS];
     for (size_t index = 0U; index < app->config->platform_count; ++index) {
         const edge_ws_session *session = &app->sessions[index];
@@ -1555,6 +1557,15 @@ static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int event
         .platform_count = app->config->platform_count,
     };
     (void)edge_status_write(&snapshot);
+    // Independent watchdog observes progress, not platform connectivity.
+    FILE *health = fopen("/tmp/edgenode/loop.health.new", "w");
+    if (health != NULL) {
+        const bool written = fprintf(health, "%ld %llu\n", (long)getpid(),
+                                     (unsigned long long)snapshot.now_ms) > 0;
+        const bool closed = fclose(health) == 0;
+        if (written && closed)
+            (void)rename("/tmp/edgenode/loop.health.new", "/tmp/edgenode/loop.health");
+    }
 }
 
 static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
@@ -1844,8 +1855,20 @@ static void liveness_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     const bool acknowledgement_stalled =
         edge_spool_outbox_timed_out(&session->spool, current_ms,
                                     EDGE_OUTBOX_ACK_TIMEOUT_MS);
-    if (!application_stalled && !acknowledgement_stalled)
+    if (!application_stalled && !acknowledgement_stalled) {
+        if (session->enrolled && edge_retry_probe_due(
+                current_ms, session->last_inbound_ms, session->last_liveness_probe_ms,
+                application_timeout_ms(session))) {
+            iot_edge_v1_Envelope *probe = &session->app->envelope;
+            if (init_envelope(session, probe)) {
+                probe->which_payload = iot_edge_v1_Envelope_ping_tag;
+                probe->payload.ping.nonce = current_ms;
+                (void)send_envelope(session, probe);
+            }
+            session->last_liveness_probe_ms = current_ms;
+        }
         return;
+    }
     const char *reason = application_stalled
                              ? "application heartbeat timed out"
                              : "outbox acknowledgement timed out";

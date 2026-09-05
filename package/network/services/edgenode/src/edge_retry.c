@@ -9,6 +9,15 @@ static uint64_t add_delay(uint64_t now_ms, uint32_t delay_ms) {
     return now_ms + delay_ms;
 }
 
+bool edge_retry_probe_due(uint64_t now_ms, uint64_t last_inbound_ms,
+                          uint64_t last_probe_ms, uint32_t timeout_ms) {
+    uint32_t interval = timeout_ms / 3U;
+    if (interval == 0U) interval = 1U;
+    if (interval > 30000U) interval = 30000U;
+    const uint64_t last = last_inbound_ms > last_probe_ms ? last_inbound_ms : last_probe_ms;
+    return now_ms >= last && now_ms - last >= interval;
+}
+
 bool edge_retry_init(edge_retry *retry, uint32_t retry_delay_ms,
                      uint32_t connect_timeout_ms) {
     if (retry == NULL || retry_delay_ms == 0U || connect_timeout_ms == 0U)

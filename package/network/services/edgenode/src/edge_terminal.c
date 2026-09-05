@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "edge_capability.h"
@@ -19,6 +20,8 @@ typedef struct {
     bool active;
     int master;
     pid_t child;
+    uint64_t kill_after_ms;
+    bool kill_sent;
     uint8_t id[16];
     uint8_t pending_input[4096];
     size_t pending_input_size;
@@ -29,21 +32,35 @@ typedef struct {
 
 static terminal_state terminals[EDGE_MAX_PLATFORMS];
 
-static void terminate_and_reap(pid_t child) {
-    if (child <= 0)
-        return;
-    (void)kill(child, SIGHUP);
-    for (unsigned attempt = 0U; attempt < 20U; ++attempt) {
-        pid_t waited;
-        do {
-            waited = waitpid(child, NULL, WNOHANG);
-        } while (waited < 0 && errno == EINTR);
-        if (waited == child || (waited < 0 && errno == ECHILD))
-            return;
-        usleep(5000U);
+static uint64_t terminal_now_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0U;
+    return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+}
+
+void edge_terminal_reap(void) {
+    const uint64_t now = terminal_now_ms();
+    for (size_t index = 0U; index < EDGE_MAX_PLATFORMS; ++index) {
+        terminal_state *terminal = &terminals[index];
+        if (terminal->active || terminal->child <= 0) continue;
+        const pid_t waited = waitpid(terminal->child, NULL, WNOHANG);
+        if (waited == terminal->child || (waited < 0 && errno == ECHILD)) {
+            memset(terminal, 0, sizeof(*terminal));
+        } else if (!terminal->kill_sent && now >= terminal->kill_after_ms) {
+            (void)kill(terminal->child, SIGKILL);
+            terminal->kill_sent = true;
+        }
     }
-    (void)kill(child, SIGKILL);
-    while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {
+}
+
+static void terminate_later(terminal_state *terminal) {
+    terminal->active = false;
+    if (terminal->child > 0) {
+        (void)kill(terminal->child, SIGHUP);
+        terminal->kill_after_ms = terminal_now_ms() + 100U;
+        terminal->kill_sent = false;
+    } else {
+        memset(terminal, 0, sizeof(*terminal));
     }
 }
 
@@ -73,8 +90,9 @@ static terminal_state *terminal_from_field(const void *field) {
 }
 
 static terminal_state *available_terminal(void) {
+    edge_terminal_reap();
     for (size_t index = 0U; index < EDGE_MAX_PLATFORMS; ++index)
-        if (!terminals[index].active)
+        if (!terminals[index].active && terminals[index].child <= 0)
             return &terminals[index];
     return NULL;
 }
@@ -119,7 +137,9 @@ bool edge_terminal_open(const iot_edge_v1_TerminalOpen *request,
     const int flags = fcntl(master, F_GETFL, 0);
     if (flags < 0 || fcntl(master, F_SETFL, flags | O_NONBLOCK) != 0) {
         close(master);
-        terminate_and_reap(child);
+        memset(terminal, 0, sizeof(*terminal));
+        terminal->child = child;
+        terminate_later(terminal);
         set_error(error, error_size, "cannot configure terminal pty");
         return false;
     }
@@ -205,11 +225,15 @@ void edge_terminal_close(const uint8_t terminal_id[16]) {
     if (terminal == NULL)
         return;
     close(terminal->master);
-    terminate_and_reap(terminal->child);
-    memset(terminal, 0, sizeof(*terminal));
+    terminal->master = -1;
+    terminate_later(terminal);
 }
 
 #ifdef EDGENODE_TERMINAL_TEST
+void edge_terminal_test_set_child(const uint8_t terminal_id[16], pid_t child) {
+    terminal_state *terminal = find_terminal(terminal_id);
+    if (terminal != NULL) terminal->child = child;
+}
 bool edge_terminal_test_attach(int master, const uint8_t terminal_id[16]) {
     if (master < 0 || terminal_id == NULL || find_terminal(terminal_id) != NULL)
         return false;
@@ -233,12 +257,15 @@ ssize_t edge_terminal_read(const uint8_t terminal_id[16], uint8_t *output, size_
     if (terminal == NULL || output == NULL || capacity == 0U)
         return 0;
     const ssize_t size = read(terminal->master, output, capacity);
+    const int read_error = errno;
     if (size > 0)
         return size;
     int status = 0;
     const pid_t result = waitpid(terminal->child, &status, WNOHANG);
-    if (result == terminal->child || (size == 0) ||
-        (size < 0 && errno != EAGAIN && errno != EINTR)) {
+    if (result == terminal->child || (result < 0 && errno == ECHILD))
+        terminal->child = 0;
+    if (terminal->child == 0 || (size == 0) ||
+        (size < 0 && read_error != EAGAIN && read_error != EWOULDBLOCK && read_error != EINTR)) {
         if (closed != NULL)
             *closed = true;
         if (exit_code != NULL)

@@ -12,6 +12,26 @@ static void require_true(bool value, const char *message) {
 }
 
 int main(void) {
+    /* Five-minute reporting must not postpone application liveness probes. */
+    for (unsigned timeout = 15000U; timeout <= 90000U; timeout += 75000U) {
+        edge_retry idle;
+        require_true(edge_retry_init(&idle, 5000U, 30000U), "idle init");
+        edge_retry_application_ready(&idle, 0U, timeout);
+        uint64_t last_reply = 0U, last_probe = 0U;
+        for (uint64_t tick = 1000U; tick <= 600000U; tick += 1000U) {
+            require_true(!edge_retry_application_timed_out(&idle, tick),
+                         "long heartbeat caused a healthy session to reconnect");
+            if (edge_retry_probe_due(tick, last_reply, last_probe, timeout)) {
+                last_probe = tick;
+                last_reply = tick;
+                edge_retry_application_alive(&idle, tick, timeout);
+            }
+        }
+        require_true(edge_retry_application_timed_out(&idle, last_reply + timeout),
+                     "missing application replies did not time out");
+        require_true(!edge_retry_probe_due(last_probe + 1, last_reply, last_probe, timeout),
+                     "probe rate was not bounded");
+    }
     edge_retry retry;
     require_true(edge_retry_init(&retry, 5000U, 30000U), "retry initialization failed");
     require_true(edge_retry_should_start(&retry, 0U), "initial connection was not ready");

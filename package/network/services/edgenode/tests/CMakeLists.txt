@@ -132,6 +132,11 @@ set_target_properties(edgenode_stability_x64 PROPERTIES
 add_test(NAME edgenode_stability COMMAND edgenode_stability_x64 --iterations 20000)
 
 if(UNIX)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME network_watchdog COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/network_watchdog_test.py")
+    endif()
     add_executable(edge_terminal_test
         edge_terminal_test.c
         "${EDGENODE_ROOT}/src/edge_terminal.c")

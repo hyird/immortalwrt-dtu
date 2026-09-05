@@ -50,6 +50,7 @@ typedef struct {
     uint64_t sequence;
     uint64_t last_heartbeat_ms;
     uint64_t last_inbound_ms;
+    uint64_t last_liveness_probe_ms;
     uint64_t terminal_output_sequence;
     uint64_t terminal_output_acked_sequence;
     uint64_t terminal_output_deadline_ms;

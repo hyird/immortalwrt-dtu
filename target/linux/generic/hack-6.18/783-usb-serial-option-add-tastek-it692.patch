@@ -1,0 +1,22 @@
+From: ImmortalWrt DTU <firmware@example.invalid>
+Subject: [PATCH] usb: serial: option: support Tastek IT-692 modem
+
+The IT-692 modem uses USB ID 3505:0003. Its three vendor-specific
+interfaces (ff/00/04, ff/00/03 and ff/00/05) need option to expose the
+diagnostic and AT ports. Without this match, RNDIS networking works but
+the modem monitor cannot open /dev/ttyUSB2 and reports unavailable.
+
+Match only vendor-specific interfaces so the RNDIS control and data
+interfaces remain owned by the network driver, including during boot.
+Keep the existing IT-694 match unchanged.
+
+--- a/drivers/usb/serial/option.c
++++ b/drivers/usb/serial/option.c
+@@ -1172,5 +1172,7 @@ static const struct usb_device_id option_ids[] = {
+ 	/* Tastek IT-694 / Marvell Mobile Composite Device Bus */
+ 	{ USB_DEVICE(0x1286, 0x4e3c) },
++	/* Tastek IT-692: leave the RNDIS interfaces to rndis_host. */
++	{ USB_DEVICE_INTERFACE_CLASS(0x3505, 0x0003, USB_CLASS_VENDOR_SPEC) },
+ 	/* Quectel products using Qualcomm vendor ID */
+ 	{ USB_DEVICE(QUALCOMM_VENDOR_ID, QUECTEL_PRODUCT_UC15)},
+ 	{ USB_DEVICE(QUALCOMM_VENDOR_ID, QUECTEL_PRODUCT_UC20),

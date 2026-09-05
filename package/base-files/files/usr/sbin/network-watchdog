@@ -5,24 +5,75 @@ SECONDARY_TARGET="223.6.6.6"
 OFFLINE_TIMEOUT=300
 CHECK_INTERVAL=30
 PING_TIMEOUT=15
+MAIN_STALL_TIMEOUT=120
+main_identity=''
+main_token=''
+main_progress_at=0
+recovery_pid=''
+recovery_started=0
 
 edgenode_main_running() {
-	local command pid
+	local command pid parent parent_command
 
 	for pid in $(pidof edgenode 2>/dev/null); do
 		[ -r "/proc/${pid}/cmdline" ] || continue
 		command="$(tr '\000' '\n' <"/proc/${pid}/cmdline")"
-		[ "${command}" = '/usr/sbin/edgenode' ] && return 0
+		[ "${command}" = '/usr/sbin/edgenode' ] || continue
+		# The acquisition worker inherits the same cmdline. Monitor its parent.
+		parent="$(awk '{print $4}' "/proc/${pid}/stat" 2>/dev/null)"
+		parent_command="$(tr '\000' '\n' <"/proc/${parent}/cmdline" 2>/dev/null)"
+		[ "$parent_command" = '/usr/sbin/edgenode' ] && continue
+		edgenode_pid="$pid"
+		return 0
 	done
 
 	return 1
 }
 
 ensure_edgenode_running() {
-	edgenode_main_running && return 0
+	local now identity token health_pid health_tick required_pid
+	now="$(uptime_seconds)" || return 0
+	if [ -n "$recovery_pid" ]; then
+		if kill -0 "$recovery_pid" 2>/dev/null; then
+			[ $((now - recovery_started)) -lt 30 ] || kill -KILL "$recovery_pid" 2>/dev/null
+			return 0
+		fi
+		wait "$recovery_pid" 2>/dev/null
+		recovery_pid=''
+	fi
+	if edgenode_main_running; then
+		required_pid="$(cat /tmp/edgenode/loop.watchdog 2>/dev/null)"
+		[ "$required_pid" = "$edgenode_pid" ] || return 0
+		identity="$edgenode_pid:$(awk '{print $22}' "/proc/$edgenode_pid/stat" 2>/dev/null)"
+		if [ "$identity" != "$main_identity" ]; then
+			main_identity="$identity"
+			main_token=''
+			main_progress_at="$now"
+		fi
+		health_pid='' health_tick=''
+		if [ -r /tmp/edgenode/loop.health ]; then
+			read -r health_pid health_tick </tmp/edgenode/loop.health
+		fi
+		case "$health_tick" in ''|*[!0-9]*) health_tick='' ;; esac
+		token="$health_pid:$health_tick"
+		if [ "$health_pid" = "$edgenode_pid" ] && [ -n "$health_tick" ] && [ "$token" != "$main_token" ]; then
+			main_token="$token"
+			main_progress_at="$now"
+		fi
+		[ $((now - main_progress_at)) -ge "$MAIN_STALL_TIMEOUT" ] || return 0
+		logger -t network-watchdog "edgenode main loop stalled for ${MAIN_STALL_TIMEOUT}s; restarting service"
+		/etc/init.d/edgenode restart >/dev/null 2>&1 &
+		recovery_pid=$!
+		recovery_started="$now"
+		main_progress_at="$now"
+		return 0
+	fi
 
 	logger -t network-watchdog 'edgenode main process is not running; starting service'
-	/etc/init.d/edgenode start >/dev/null 2>&1
+	/etc/init.d/edgenode start >/dev/null 2>&1 &
+	recovery_pid=$!
+	recovery_started="$now"
+	main_identity=''
 }
 
 uptime_seconds() {

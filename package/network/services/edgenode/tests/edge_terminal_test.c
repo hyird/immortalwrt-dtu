@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <time.h>
 
 #include "edge_terminal.h"
 
@@ -152,6 +155,44 @@ int main(void) {
     edge_terminal_close(other_terminal_id);
     close(pipes[0]);
     close(other_pipes[0]);
+    /* A shell that ignores HUP must not hold up the event loop on close. */
+    int ready[2], transport[2];
+    require(pipe(ready) == 0 && pipe(transport) == 0, "cleanup pipes");
+    const pid_t stubborn = fork();
+    require(stubborn >= 0, "cleanup fork");
+    if (stubborn == 0) {
+        signal(SIGHUP, SIG_IGN);
+        close(ready[0]);
+        (void)write(ready[1], "R", 1);
+        for (;;) pause();
+    }
+    close(ready[1]);
+    char ready_byte;
+    require(read(ready[0], &ready_byte, 1) == 1, "child ready");
+    close(ready[0]);
+    require(edge_terminal_test_attach(transport[1], terminal_id), "cleanup attach");
+    edge_terminal_test_set_child(terminal_id, stubborn);
+    struct timespec before, after;
+    clock_gettime(CLOCK_MONOTONIC, &before);
+    edge_terminal_close(terminal_id);
+    clock_gettime(CLOCK_MONOTONIC, &after);
+    const double elapsed = (double)(after.tv_sec - before.tv_sec) +
+                           (double)(after.tv_nsec - before.tv_nsec) / 1e9;
+    require(elapsed < 0.08, "terminal close blocked waiting for child");
+    require(kill(stubborn, 0) == 0, "HUP-resistant child was not retained");
+    for (unsigned tick = 0; tick < 100; ++tick) {
+        edge_terminal_reap();
+        usleep(5000);
+    }
+    errno = 0;
+    require(waitpid(stubborn, NULL, WNOHANG) < 0 && errno == ECHILD,
+            "deferred child was not reaped");
+    close(transport[0]);
+    int reused[2];
+    require(pipe(reused) == 0 && edge_terminal_test_attach(reused[1], terminal_id),
+            "reaped slot could not be reused");
+    edge_terminal_close(terminal_id);
+    close(reused[0]);
     puts("edge terminal tests passed");
     return 0;
 }

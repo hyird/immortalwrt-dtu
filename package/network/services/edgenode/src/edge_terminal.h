@@ -27,6 +27,8 @@ edge_terminal_input_result edge_terminal_flush(const uint8_t terminal_id[16],
                                                uint64_t *acked_sequence);
 bool edge_terminal_resize(const iot_edge_v1_TerminalResize *request);
 void edge_terminal_close(const uint8_t terminal_id[16]);
+/* Poll from the event loop even when no terminal is active. Never blocks. */
+void edge_terminal_reap(void);
 
 /* Nonblocking. Returns output bytes; closed is set once the shell exits. */
 ssize_t edge_terminal_read(const uint8_t terminal_id[16], uint8_t *output, size_t capacity,
@@ -35,4 +37,5 @@ ssize_t edge_terminal_read(const uint8_t terminal_id[16], uint8_t *output, size_
 #ifdef EDGENODE_TERMINAL_TEST
 /* Takes ownership of master. */
 bool edge_terminal_test_attach(int master, const uint8_t terminal_id[16]);
+void edge_terminal_test_set_child(const uint8_t terminal_id[16], pid_t child);
 #endif
