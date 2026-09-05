@@ -314,7 +314,7 @@ static bool load_outbox(edge_spool *spool) {
             continue;
         }
         uint8_t *data = read_file(path, EDGENODE_MAX_WS_MESSAGE, &size);
-        iot_edge_v1_Envelope envelope;
+        iot_edge_v1_Envelope envelope = iot_edge_v1_Envelope_init_zero;
         const char *error = NULL;
         bool entry_ok = true;
         if (data == NULL || !edge_protocol_decode(data, size, &envelope, &error) ||
@@ -343,6 +343,7 @@ static bool load_outbox(edge_spool *spool) {
                                                  size, priority))
                 entry_ok = false;
         }
+        edge_protocol_release(&envelope);
         if (!entry_ok) {
             unlink(path);
             syslog(LOG_WARNING, "removed invalid or over-limit tmpfs outbox message: %s", path);

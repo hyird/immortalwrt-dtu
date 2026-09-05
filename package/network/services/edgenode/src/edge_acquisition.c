@@ -34,6 +34,8 @@
 #include "edge_protocol.h"
 #include "edge_s7.h"
 #include "log.h"
+#include "pb_encode.h"
+#include "pb_decode.h"
 
 #define EDGE_IO_TIMEOUT_MS 800
 #define EDGE_IO_LOG_REPEAT_MS 60000
@@ -122,7 +124,7 @@ typedef struct {
     uint32_t payload_size;
     uint8_t platform_id[16];
     union {
-        iot_edge_v1_TelemetryRecord telemetry;
+        uint8_t telemetry[EDGENODE_MAX_WS_MESSAGE];
         iot_edge_v1_CommandResult command_result;
         iot_edge_v1_DeviceStatusReport status;
         iot_edge_v1_CommandRequest command_request;
@@ -1488,6 +1490,10 @@ static edge_io_result device_write_readback(void *context,
     return result;
 }
 
+static void acquisition_status_local(edge_acquisition *acquisition,
+                                      const uint8_t platform_id[16],
+                                      iot_edge_v1_DeviceStatusReport *report);
+
 static void device_report(void *context, const uint8_t platform_id[16],
                           const uint8_t device_id[16],
                           const edge_device_sample *sample) {
@@ -1495,8 +1501,13 @@ static void device_report(void *context, const uint8_t platform_id[16],
     (void)device_id;
     device->observed_at_ms = sample->sampled_at_ms;
     size_t index = 0U;
-    while (index < device->point_count) {
+    if (device->point_count != 0U) {
         iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
+        record.values = calloc(device->point_count, sizeof(*record.values));
+        if (record.values == NULL) {
+            syslog(LOG_ERR, "cannot allocate complete telemetry record");
+            return;
+        }
         uint8_t id[16];
         record_id((uint64_t)device->observed_at_ms, id);
         edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes), id, 16U);
@@ -1513,10 +1524,19 @@ static void device_report(void *context, const uint8_t platform_id[16],
         copy_text(record.function_name, sizeof(record.function_name), "定时采集");
         copy_text(record.direction, sizeof(record.direction), "UP");
         record.observed_at_ms = device->observed_at_ms;
-        while (index < device->point_count && record.values_count < 16U) {
+        while (index < device->point_count) {
             if (device->points[index].valid)
                 record.values[record.values_count++] = device->points[index].value;
             ++index;
+        }
+        iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
+        acquisition_status_local(device->owner, platform_id, &status);
+        for (pb_size_t i = 0; i < status.devices_count; ++i) {
+            if (memcmp(status.devices[i].device_id.bytes, device_id, 16U) == 0) {
+                record.has_device_status = true;
+                record.device_status = status.devices[i];
+                break;
+            }
         }
         /* The callback only hands the record to the parent process; it is not a
          * durable outbox confirmation. Do not turn this periodic path into an
@@ -1524,6 +1544,7 @@ static void device_report(void *context, const uint8_t platform_id[16],
         if (record.values_count != 0U)
             (void)device->owner->telemetry(device->owner->callback_context,
                                            platform_id, &record);
+        free(record.values);
     }
 }
 
@@ -2025,8 +2046,15 @@ static bool worker_send(edge_acquisition *acquisition, uint32_t type,
 static bool worker_telemetry(void *context,
                              const uint8_t platform_id[16],
                              const iot_edge_v1_TelemetryRecord *record) {
+    uint8_t wire[EDGENODE_MAX_WS_MESSAGE];
+    pb_ostream_t stream = pb_ostream_from_buffer(wire, sizeof(wire));
+    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, record)) {
+        syslog(LOG_ERR, "cannot encode complete telemetry record: %s", PB_GET_ERROR(&stream));
+        return false;
+    }
+    // Pointers are process-local. Transfer serialized values, never the C struct.
     return worker_send(context, EDGE_ACQUISITION_EVENT_TELEMETRY, platform_id,
-                       record, sizeof(*record));
+                       wire, (uint32_t)stream.bytes_written);
 }
 
 static bool worker_command_result(void *context,
@@ -2263,11 +2291,17 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY &&
-            message.payload_size == sizeof(message.payload.telemetry))
-            (void)acquisition->telemetry(acquisition->callback_context,
-                                         message.platform_id,
-                                         &message.payload.telemetry);
+        if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY) {
+            iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
+            pb_istream_t stream = pb_istream_from_buffer(message.payload.telemetry,
+                                                        message.payload_size);
+            if (pb_decode(&stream, iot_edge_v1_TelemetryRecord_fields, &record))
+                (void)acquisition->telemetry(acquisition->callback_context,
+                                             message.platform_id, &record);
+            else
+                syslog(LOG_ERR, "cannot decode telemetry from acquisition worker");
+            pb_release(iot_edge_v1_TelemetryRecord_fields, &record);
+        }
         else if (message.type == EDGE_ACQUISITION_EVENT_COMMAND_RESULT &&
                  message.payload_size == sizeof(message.payload.command_result))
             (void)acquisition->command(acquisition->callback_context,

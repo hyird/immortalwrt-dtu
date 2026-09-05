@@ -93,10 +93,10 @@ PB_BIND(iot_edge_v1_ScalarValue, iot_edge_v1_ScalarValue, 2)
 PB_BIND(iot_edge_v1_TelemetryValue, iot_edge_v1_TelemetryValue, 2)
 
 
-PB_BIND(iot_edge_v1_TelemetryRecord, iot_edge_v1_TelemetryRecord, 4)
+PB_BIND(iot_edge_v1_TelemetryRecord, iot_edge_v1_TelemetryRecord, 2)
 
 
-PB_BIND(iot_edge_v1_TelemetryBatch, iot_edge_v1_TelemetryBatch, 4)
+PB_BIND(iot_edge_v1_TelemetryBatch, iot_edge_v1_TelemetryBatch, 2)
 
 
 PB_BIND(iot_edge_v1_TelemetryAck, iot_edge_v1_TelemetryAck, AUTO)
@@ -248,3 +248,4 @@ PB_BIND(iot_edge_v1_Envelope, iot_edge_v1_Envelope, 4)
  */
 PB_STATIC_ASSERT(sizeof(double) == 8, DOUBLE_MUST_BE_8_BYTES)
 #endif
+

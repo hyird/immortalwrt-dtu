@@ -470,8 +470,9 @@ message TelemetryRecord {
   string function_name = 6 [(nanopb).max_length = 100];
   string direction = 7 [(nanopb).max_length = 8];
   int64 observed_at_ms = 8;
-  repeated TelemetryValue values = 9 [(nanopb).max_count = 16];
+  repeated TelemetryValue values = 9 [(nanopb).type = FT_POINTER];
   bytes raw_payload = 10 [(nanopb).max_size = 2048];
+  DeviceStatus device_status = 11;
 }
 
 message TelemetryBatch {

@@ -6,6 +6,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
 set(EDGENODE_ROOT "${CMAKE_CURRENT_LIST_DIR}/..")
+add_compile_definitions(PB_ENABLE_MALLOC)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 if(NANOPB_ROOT)
     add_library(edgenode_nanopb STATIC

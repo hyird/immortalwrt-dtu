@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.42
+PKG_VERSION:=0.3.43
 PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
@@ -44,7 +44,7 @@ endef
 
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -Os -flto -D_FILE_OFFSET_BITS=64 \
-		-DEDGE_SOFTWARE_VERSION='"$(PKG_VERSION)"' \
+		-DEDGE_SOFTWARE_VERSION='"$(PKG_VERSION)"' -DPB_ENABLE_MALLOC \
 		-Wall -Wextra -Werror -Wno-strict-aliasing \
 		-ffunction-sections -fdata-sections -fno-unwind-tables \
 		-I$(PKG_BUILD_DIR) -I$(PKG_BUILD_DIR)/edge/src \

@@ -126,7 +126,7 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
         return false;
     }
     memset(config, 0, sizeof(*config));
-    config->heartbeat_interval_sec = 30U;
+    config->heartbeat_interval_sec = 300U;
     uint8_t bootstrap_id[16];
     if (!edge_config_parse_uuid(EDGE_BOOTSTRAP_PLATFORM_ID, bootstrap_id)) {
         set_error(error, error_size, "invalid default platform id");
@@ -160,7 +160,7 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
                 goto fail;
             }
             config->heartbeat_interval_sec = (uint16_t)number_option(
-                context, section, "heartbeat_interval_sec", 30U, 5U, 3600U);
+                context, section, "heartbeat_interval_sec", 300U, 5U, 3600U);
             have_node = true;
             continue;
         }

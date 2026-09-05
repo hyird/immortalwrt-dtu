@@ -9,6 +9,8 @@
 #define EDGENODE_PROTOCOL_VERSION 6U
 #define EDGENODE_MAX_WS_MESSAGE 16384U
 
+void edge_protocol_release(iot_edge_v1_Envelope *envelope);
+
 bool edge_protocol_validate_imei(const char *imei);
 
 void edge_protocol_uuid_v7(uint64_t now_ms, const uint8_t random_bytes[10],

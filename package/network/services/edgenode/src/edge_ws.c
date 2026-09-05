@@ -286,7 +286,11 @@ static bool acquisition_telemetry(void *context,
     envelope->which_payload = iot_edge_v1_Envelope_telemetry_batch_tag;
     envelope->payload.telemetry_batch.records_count = 1U;
     envelope->payload.telemetry_batch.records[0] = *record;
-    return edge_ws_app_enqueue(session->app, session->config->id, record_id, envelope);
+    const bool queued = edge_ws_app_enqueue(session->app, session->config->id, record_id, envelope);
+    // The callback borrows values from the acquisition IPC decoder.
+    envelope->payload.telemetry_batch.records[0].values = NULL;
+    envelope->payload.telemetry_batch.records[0].values_count = 0U;
+    return queued;
 }
 
 static bool acquisition_command_result(void *context,
@@ -334,7 +338,9 @@ static void send_outbox_window(edge_ws_session *session) {
                                 session->node_id, sizeof(session->node_id));
         envelope->session_epoch = session->session_epoch;
         envelope->sequence = ++session->sequence;
-        if (!send_envelope(session, envelope)) {
+        const bool sent = send_envelope(session, envelope);
+        edge_protocol_release(envelope);
+        if (!sent) {
             (void)edge_spool_outbox_retry(&session->spool, message_id);
             return;
         }
@@ -1261,7 +1267,15 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         !valid_origin(session, envelope)) {
         syslog(LOG_WARNING, "platform %s sent invalid nanopb envelope: %s",
                session->config->name, error != NULL ? error : "wrong origin");
+        edge_protocol_release(envelope);
         client->send_close(client, UWSC_CLOSE_STATUS_PROTOCOL_ERR, "invalid envelope");
+        return;
+    }
+    // Telemetry flows node -> platform only. Release unexpected dynamic payloads
+    // before any handler can reuse the shared output envelope.
+    if (envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag) {
+        edge_protocol_release(envelope);
+        client->send_close(client, UWSC_CLOSE_STATUS_PROTOCOL_ERR, "unexpected telemetry");
         return;
     }
     session->last_inbound_ms = monotonic_ms();

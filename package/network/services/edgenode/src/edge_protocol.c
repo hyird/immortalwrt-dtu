@@ -5,6 +5,11 @@
 #include "pb_decode.h"
 #include "pb_encode.h"
 
+void edge_protocol_release(iot_edge_v1_Envelope *envelope) {
+    pb_release(iot_edge_v1_Envelope_fields, envelope);
+    *envelope = (iot_edge_v1_Envelope)iot_edge_v1_Envelope_init_zero;
+}
+
 bool edge_protocol_validate_imei(const char *imei) {
     if (imei == NULL || strlen(imei) != 15U)
         return false;
@@ -127,6 +132,7 @@ bool edge_protocol_decode(const uint8_t *input, size_t input_size,
         envelope->message_id.size != 16U || envelope->platform_id.size != 16U) {
         if (error != NULL)
             *error = "invalid envelope identity or protocol version";
+        edge_protocol_release(envelope);
         return false;
     }
     return true;

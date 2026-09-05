@@ -404,7 +404,45 @@ static void test_vpn_config_round_trip(void) {
             "VPN request changed during round trip");
 }
 
+static void test_complete_telemetry(void) {
+    const uint8_t platform[16] = {1}, random[10] = {2};
+    iot_edge_v1_Envelope envelope;
+    require(edge_protocol_init_envelope(&envelope, platform, NULL, 1, 1, 1, random),
+            "telemetry init");
+    envelope.which_payload = iot_edge_v1_Envelope_telemetry_batch_tag;
+    envelope.payload.telemetry_batch.records_count = 1;
+    iot_edge_v1_TelemetryRecord *record = &envelope.payload.telemetry_batch.records[0];
+    // More than both the old 16-value boundary and the reported 22-point device.
+    record->values_count = 100;
+    record->values = calloc(record->values_count, sizeof(*record->values));
+    require(record->values != NULL, "telemetry allocation");
+    for (pb_size_t i = 0; i < record->values_count; ++i) {
+        snprintf(record->values[i].element_id, sizeof(record->values[i].element_id), "point-%u", i);
+        record->values[i].has_value = true;
+        record->values[i].value.which_value = iot_edge_v1_ScalarValue_unsigned_value_tag;
+        record->values[i].value.value.unsigned_value = i;
+    }
+    record->has_device_status = true;
+    strcpy(record->device_status.state, "connected");
+    uint8_t wire[EDGENODE_MAX_WS_MESSAGE];
+    size_t size;
+    const char *error = NULL;
+    require(edge_protocol_encode(&envelope, wire, sizeof(wire), &size, &error), "complete telemetry encode");
+    iot_edge_v1_Envelope decoded;
+    require(edge_protocol_decode(wire, size, &decoded, &error), "complete telemetry decode");
+    const iot_edge_v1_TelemetryRecord *actual = &decoded.payload.telemetry_batch.records[0];
+    require(decoded.payload.telemetry_batch.records_count == 1 && actual->values_count == 100,
+            "one scan must remain one complete record");
+    require(actual->values[99].value.value.unsigned_value == 99 && actual->has_device_status &&
+            strcmp(actual->device_status.state, "connected") == 0, "telemetry lost values or status");
+    // Re-encoding is the reconnect/outbox replay path.
+    require(edge_protocol_encode(&decoded, wire, sizeof(wire), &size, &error), "telemetry replay");
+    edge_protocol_release(&decoded);
+    edge_protocol_release(&envelope);
+}
+
 int main(void) {
+    test_complete_telemetry();
     test_imei();
     test_hello_round_trip();
     test_heartbeat_mobile_state_round_trip();
