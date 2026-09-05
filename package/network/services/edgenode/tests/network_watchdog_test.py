@@ -51,6 +51,11 @@ main_identity=''
 for now in 1000 1090 1180 1270 1360; do
     tick "$now"; health "$now"; ensure_edgenode_running; check_count 2
 done
+# An orphaned acquisition worker does not count as the opted-in main PID.
+pidof() { echo 202; }
+tick 1400; ensure_edgenode_running
+wait "$recovery_pid"; recovery_pid=''; check_count 3
+[ "$(tail -1 ROOT/calls)" = start ] || exit 1
 echo 'network watchdog tests passed'
 '''.replace('ROOT', str(root))
     subprocess.run(['sh', '-n'], input=functions + scenario, text=True, check=True)

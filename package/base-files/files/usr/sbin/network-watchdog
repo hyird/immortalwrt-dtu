@@ -13,12 +13,16 @@ recovery_pid=''
 recovery_started=0
 
 edgenode_main_running() {
-	local command pid parent parent_command
+	local command pid parent parent_command expected_pid
+	expected_pid="$(cat /tmp/edgenode/loop.watchdog 2>/dev/null)"
+	case "$expected_pid" in ''|*[!0-9]*) expected_pid='' ;; esac
 
 	for pid in $(pidof edgenode 2>/dev/null); do
 		[ -r "/proc/${pid}/cmdline" ] || continue
 		command="$(tr '\000' '\n' <"/proc/${pid}/cmdline")"
 		[ "${command}" = '/usr/sbin/edgenode' ] || continue
+		# An orphaned acquisition worker must not impersonate the exited main.
+		[ -z "$expected_pid" ] || [ "$pid" = "$expected_pid" ] || continue
 		# The acquisition worker inherits the same cmdline. Monitor its parent.
 		parent="$(awk '{print $4}' "/proc/${pid}/stat" 2>/dev/null)"
 		parent_command="$(tr '\000' '\n' <"/proc/${parent}/cmdline" 2>/dev/null)"
