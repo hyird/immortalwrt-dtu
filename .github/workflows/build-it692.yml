@@ -1,4 +1,4 @@
-name: Build IT-692 firmware
+name: Build Tastek firmware images
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: it692-firmware-${{ github.ref }}
+  group: tastek-firmware-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -60,16 +60,20 @@ jobs:
       - name: Build firmware images
         run: make -j"$(nproc)"
 
-      - name: Verify IT-692 image and prepare artifact
+      - name: Verify all device images and prepare artifact
         shell: bash
         run: |
           set -euo pipefail
           target_dir=bin/targets/ramips/mt76x8
-          image="$target_dir/immortalwrt-ramips-mt76x8-tastek_it692-squashfs-sysupgrade.bin"
-          test -s "$image"
           revision="$(cat "$target_dir/version.buildinfo")"
+          mapfile -t images < <(find "$target_dir" -maxdepth 1 -type f \
+            -name 'immortalwrt-ramips-mt76x8-tastek_*-squashfs-sysupgrade.bin' | sort)
+          test "${#images[@]}" -gt 0
+          mapfile -t expected_boards < <(sed -n 's/^CONFIG_TARGET_DEVICE_.*_DEVICE_\([^=]*\)=y$/\1/p' .config | sort -u)
+          test "${#expected_boards[@]}" -gt 0
           grep -F "edgenode - " "$target_dir/immortalwrt-ramips-mt76x8.manifest"
-          python3 - "$image" "$revision" <<'PY'
+          for image in "${images[@]}"; do
+            python3 - "$image" "$revision" <<'PY'
           import json
           import re
           import sys
@@ -83,23 +87,23 @@ jobs:
           version = metadata['version']
           if version['revision'] != revision:
               raise SystemExit(f"embedded revision {version['revision']} != {revision}")
-          if version['board'] != 'tastek_it692':
-              raise SystemExit(f"unexpected board {version['board']}")
-          if 'tastek,it692' not in metadata['supported_devices']:
-              raise SystemExit('IT-692 device id missing')
           print(f"embedded revision: {version['revision']}")
           print(f"embedded board: {version['board']}")
           PY
+          done
+          for board in "${expected_boards[@]}"; do
+            test -s "$target_dir/immortalwrt-ramips-mt76x8-${board}-squashfs-sysupgrade.bin"
+          done
           mkdir -p ci-artifact
-          cp "$image" "$target_dir/immortalwrt-ramips-mt76x8.manifest" \
+          cp "${images[@]}" "$target_dir/immortalwrt-ramips-mt76x8.manifest" \
              "$target_dir/version.buildinfo" "$target_dir/profiles.json" \
              "$target_dir/sha256sums" configs/tastek-mt76x8.config ci-artifact/
-          sha256sum "$image" | tee ci-artifact/SHA256SUMS
+          sha256sum "${images[@]}" | tee ci-artifact/SHA256SUMS
 
-      - name: Upload IT-692 firmware
+      - name: Upload all Tastek firmware images
         uses: actions/upload-artifact@v4
         with:
-          name: it692-firmware-${{ github.sha }}
+          name: tastek-firmware-${{ github.sha }}
           path: ci-artifact
           if-no-files-found: error
           retention-days: 30
