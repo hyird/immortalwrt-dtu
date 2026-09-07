@@ -1,0 +1,105 @@
+name: Build IT-692 firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/build-it692.yml'
+      - 'configs/tastek-mt76x8.config'
+      - 'feeds.conf.default'
+      - 'package/**'
+      - 'target/**'
+      - 'scripts/install-tas-feeds.sh'
+      - 'include/**'
+      - 'Makefile'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: it692-firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gettext git \
+            libncurses-dev libssl-dev python3-setuptools rsync unzip \
+            zlib1g-dev file wget xsltproc libelf-dev ccache \
+            swig time
+
+      - name: Cache source downloads
+        uses: actions/cache@v4
+        with:
+          path: downloads
+          key: openwrt-downloads-${{ runner.os }}-${{ hashFiles('feeds.conf.default', 'configs/tastek-mt76x8.config') }}
+          restore-keys: |
+            openwrt-downloads-${{ runner.os }}-
+
+      - name: Update selected feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/install-tas-feeds.sh
+
+      - name: Configure release profiles
+        run: |
+          cp configs/tastek-mt76x8.config .config
+          make defconfig
+
+      - name: Build firmware images
+        run: make -j"$(nproc)"
+
+      - name: Verify IT-692 image and prepare artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir=bin/targets/ramips/mt76x8
+          image="$target_dir/immortalwrt-ramips-mt76x8-tastek_it692-squashfs-sysupgrade.bin"
+          test -s "$image"
+          revision="$(cat "$target_dir/version.buildinfo")"
+          grep -F "edgenode - " "$target_dir/immortalwrt-ramips-mt76x8.manifest"
+          python3 - "$image" "$revision" <<'PY'
+          import json
+          import re
+          import sys
+
+          image, revision = sys.argv[1:]
+          data = open(image, 'rb').read()
+          match = re.search(rb'\{\s*"metadata_version".*?\}\s*\}', data, re.S)
+          if not match:
+              raise SystemExit('image metadata not found')
+          metadata = json.loads(match.group())
+          version = metadata['version']
+          if version['revision'] != revision:
+              raise SystemExit(f"embedded revision {version['revision']} != {revision}")
+          if version['board'] != 'tastek_it692':
+              raise SystemExit(f"unexpected board {version['board']}")
+          if 'tastek,it692' not in metadata['supported_devices']:
+              raise SystemExit('IT-692 device id missing')
+          print(f"embedded revision: {version['revision']}")
+          print(f"embedded board: {version['board']}")
+          PY
+          mkdir -p ci-artifact
+          cp "$image" "$target_dir/immortalwrt-ramips-mt76x8.manifest" \
+             "$target_dir/version.buildinfo" "$target_dir/profiles.json" \
+             "$target_dir/sha256sums" configs/tastek-mt76x8.config ci-artifact/
+          sha256sum "$image" | tee ci-artifact/SHA256SUMS
+
+      - name: Upload IT-692 firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: it692-firmware-${{ github.sha }}
+          path: ci-artifact
+          if-no-files-found: error
+          retention-days: 30
