@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - main
     paths:
       - '.github/workflows/build-it692.yml'
       - 'configs/tastek-mt76x8.config'
