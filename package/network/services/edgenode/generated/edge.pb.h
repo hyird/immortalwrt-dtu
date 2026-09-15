@@ -562,6 +562,8 @@ typedef struct _iot_edge_v1_RawPacket {
     bool debug;
     char direction[17];
     bool device_only;
+    char status[33];
+    char reason[129];
 } iot_edge_v1_RawPacket;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_RawPacketAck_packet_id_t;
@@ -1107,7 +1109,7 @@ extern "C" {
 #define iot_edge_v1_TelemetryRecord_init_default {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, {0, {0}}, false, iot_edge_v1_DeviceStatus_init_default, {0, {0}}, 0, NULL, {0, {0}}, 0, 0}
 #define iot_edge_v1_TelemetryBatch_init_default  {0, {iot_edge_v1_TelemetryRecord_init_default}}
 #define iot_edge_v1_TelemetryAck_init_default    {0, {{0, {0}}}}
-#define iot_edge_v1_RawPacket_init_default       {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0}
+#define iot_edge_v1_RawPacket_init_default       {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", ""}
 #define iot_edge_v1_RawPacketAck_init_default    {{0, {0}}}
 #define iot_edge_v1_CommandValue_init_default    {"", false, iot_edge_v1_ScalarValue_init_default}
 #define iot_edge_v1_CommandRequest_init_default  {{0, {0}}, {0, {0}}, 0, {iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default}, 0, 0, 0, 0}
@@ -1175,7 +1177,7 @@ extern "C" {
 #define iot_edge_v1_TelemetryRecord_init_zero    {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, {0, {0}}, false, iot_edge_v1_DeviceStatus_init_zero, {0, {0}}, 0, NULL, {0, {0}}, 0, 0}
 #define iot_edge_v1_TelemetryBatch_init_zero     {0, {iot_edge_v1_TelemetryRecord_init_zero}}
 #define iot_edge_v1_TelemetryAck_init_zero       {0, {{0, {0}}}}
-#define iot_edge_v1_RawPacket_init_zero          {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0}
+#define iot_edge_v1_RawPacket_init_zero          {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", ""}
 #define iot_edge_v1_RawPacketAck_init_zero       {{0, {0}}}
 #define iot_edge_v1_CommandValue_init_zero       {"", false, iot_edge_v1_ScalarValue_init_zero}
 #define iot_edge_v1_CommandRequest_init_zero     {{0, {0}}, {0, {0}}, 0, {iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero}, 0, 0, 0, 0}
@@ -1483,6 +1485,8 @@ extern "C" {
 #define iot_edge_v1_RawPacket_debug_tag          7
 #define iot_edge_v1_RawPacket_direction_tag      8
 #define iot_edge_v1_RawPacket_device_only_tag    9
+#define iot_edge_v1_RawPacket_status_tag         10
+#define iot_edge_v1_RawPacket_reason_tag         11
 #define iot_edge_v1_RawPacketAck_packet_id_tag   1
 #define iot_edge_v1_CommandValue_element_id_tag  1
 #define iot_edge_v1_CommandValue_expected_tag    2
@@ -2101,7 +2105,9 @@ X(a, STATIC,   SINGULAR, INT64,    observed_at_ms,    5) \
 X(a, STATIC,   SINGULAR, BYTES,    payload,           6) \
 X(a, STATIC,   SINGULAR, BOOL,     debug,             7) \
 X(a, STATIC,   SINGULAR, STRING,   direction,         8) \
-X(a, STATIC,   SINGULAR, BOOL,     device_only,       9)
+X(a, STATIC,   SINGULAR, BOOL,     device_only,       9) \
+X(a, STATIC,   SINGULAR, STRING,   status,           10) \
+X(a, STATIC,   SINGULAR, STRING,   reason,           11)
 #define iot_edge_v1_RawPacket_CALLBACK NULL
 #define iot_edge_v1_RawPacket_DEFAULT NULL
 
@@ -2688,7 +2694,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_PlatformConfigResult_size    279
 #define iot_edge_v1_Pong_size                    11
 #define iot_edge_v1_RawPacketAck_size            18
-#define iot_edge_v1_RawPacket_size               4252
+#define iot_edge_v1_RawPacket_size               4417
 #define iot_edge_v1_S7AreaConfig_size            310
 #define iot_edge_v1_ScalarValue_size             261
 #define iot_edge_v1_SerialCapability_size        168

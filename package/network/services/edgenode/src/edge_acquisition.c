@@ -75,6 +75,7 @@ struct edge_acquisition_link {
 };
 
 struct edge_acquisition_device {
+    iot_edge_v1_RawPacket *debug_request;
     edge_acquisition *owner;
     edge_acquisition_link *link;
     uint8_t platform_id[16];
@@ -483,10 +484,43 @@ static void debug_packet(edge_acquisition_device *device, const char *direction,
         if (identified) { packet.device_id.size = 16; memcpy(packet.device_id.bytes, device->config->device_id.bytes, 16); }
         packet.observed_at_ms = current_ms();
         copy_text(packet.direction, sizeof(packet.direction), direction);
+        copy_text(packet.status, sizeof(packet.status), strcmp(direction, "TX") == 0 ? "sent" : "received");
         packet.payload.size = (pb_size_t)((size-offset) > 4096U ? 4096U : (size-offset));
         memcpy(packet.payload.bytes, data+offset, packet.payload.size);
         device->owner->debug(device->owner->callback_context, device->platform_id, &packet);
     }
+}
+
+static void debug_request_status(edge_acquisition_device *device, const char *status,
+                                 const char *reason, bool finished) {
+    iot_edge_v1_RawPacket *packet = device->debug_request;
+    if (!packet) return;
+    copy_text(packet->status, sizeof(packet->status), status);
+    copy_text(packet->reason, sizeof(packet->reason), reason ? reason : "");
+    if (device->owner->debug)
+        device->owner->debug(device->owner->callback_context, device->platform_id, packet);
+    if (finished) { free(packet); device->debug_request = NULL; }
+}
+
+static void debug_request_begin(edge_acquisition_device *device, const uint8_t *request, size_t size) {
+    debug_request_status(device, "failed", "request_replaced", true);
+    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
+        !device->owner->debug || !size || size > 4096U) return;
+    iot_edge_v1_RawPacket *packet = calloc(1, sizeof(*packet));
+    if (!packet) return;
+    device->debug_request = packet;
+    packet->debug = true;
+    packet->packet_id.size = 16;
+    record_id((uint64_t)current_ms(), packet->packet_id.bytes);
+    packet->endpoint_id.size = 16;
+    memcpy(packet->endpoint_id.bytes, device->config->endpoint_id.bytes, 16);
+    packet->device_id.size = 16;
+    memcpy(packet->device_id.bytes, device->config->device_id.bytes, 16);
+    packet->observed_at_ms = current_ms();
+    copy_text(packet->direction, sizeof(packet->direction), "TX");
+    packet->payload.size = (pb_size_t)size;
+    memcpy(packet->payload.bytes, request, size);
+    debug_request_status(device, "sending", "", false);
 }
 
 static bool write_all(edge_acquisition_device *device, const uint8_t *data, size_t size) {
@@ -500,7 +534,7 @@ static bool write_all(edge_acquisition_device *device, const uint8_t *data, size
             continue;
         if (count <= 0)
             return false;
-        debug_packet(device, "TX", data + offset, (size_t)count, true, false);
+        if (!device->debug_request) debug_packet(device, "TX", data + offset, (size_t)count, true, false);
         offset += (size_t)count;
     }
     return true;
@@ -892,7 +926,9 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
                 break;
         }
     }
+    debug_request_begin(device, request, request_size);
     if (!write_all(device, request, request_size)) {
+        debug_request_status(device, "failed", "socket_write_failed", true);
         if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET ||
             device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
             close_fd(&device->link->fd);
@@ -903,6 +939,7 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
     }
     device->last_activity_at_ms = current_ms();
     edge_log_packet(log_source(device), "tx", device_label(device), request, request_size);
+    debug_request_status(device, "waiting", "", false);
     bool received = false;
     if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
         received = receive_s7(device, response, capacity, response_size);
@@ -930,6 +967,7 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
     } else if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
         close_fd(&device->link->fd);
     }
+    if (!received) debug_request_status(device, "failed", "response_timeout_or_connection_closed", true);
     return received;
 }
 
@@ -970,9 +1008,11 @@ static edge_io_result device_handshake(void *context) {
         return EDGE_IO_NO_RESPONSE;
     }
     if (edge_s7_parse_cotp_confirm(response, response_size) != EDGE_S7_OK) {
+        debug_request_status(device, "failed", "s7_cotp_invalid", true);
         log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "s7-cotp");
         return EDGE_IO_PROTOCOL_ERROR;
     }
+    debug_request_status(device, "success", "", true);
     const uint16_t reference = ++device->s7_reference;
     request_size = edge_s7_build_setup(reference, EDGE_S7_DEFAULT_PDU_LENGTH,
                                        request, sizeof(request));
@@ -983,9 +1023,11 @@ static edge_io_result device_handshake(void *context) {
     }
     if (edge_s7_parse_setup(response, response_size, reference,
                             &device->s7_pdu_length) != EDGE_S7_OK) {
+        debug_request_status(device, "failed", "s7_setup_invalid", true);
         log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "s7-setup");
         return EDGE_IO_PROTOCOL_ERROR;
     }
+    debug_request_status(device, "success", "", true);
     if (!device->s7_handshake_logged) {
         char detail[192];
         device_detail(device, "s7-handshake", detail, sizeof(detail));
@@ -1081,6 +1123,8 @@ static edge_io_result read_modbus_range(edge_acquisition_device *device,
         return device->link->fd < 0 ? EDGE_IO_OFFLINE : EDGE_IO_NO_RESPONSE;
     const edge_modbus_result parsed = edge_modbus_parse_response(
         &request, response, response_size, NULL, 0U, data, capacity, data_size, &exception);
+    debug_request_status(device, parsed == EDGE_MODBUS_OK ? "success" : "failed",
+        parsed == EDGE_MODBUS_OK ? "" : "modbus_exception_or_invalid_response", true);
     if (parsed != EDGE_MODBUS_OK)
         return EDGE_IO_PROTOCOL_ERROR;
     if (!retain_read_response(device, response, response_size))
@@ -1118,6 +1162,8 @@ static edge_io_result read_s7_point(edge_acquisition_device *device,
         return device->link->fd < 0 ? EDGE_IO_OFFLINE : EDGE_IO_NO_RESPONSE;
     const edge_s7_result result = edge_s7_parse_read(response, response_size, reference,
                                                      data, capacity, data_size, &return_code);
+    debug_request_status(device, result == EDGE_S7_OK ? "success" : "failed",
+        result == EDGE_S7_OK ? "" : "s7_exception_or_invalid_response", true);
     if (result != EDGE_S7_OK)
         return EDGE_IO_PROTOCOL_ERROR;
     if (!retain_read_response(device, response, response_size))
@@ -1533,8 +1579,11 @@ static edge_io_result write_modbus(edge_acquisition_device *device,
         return device->link->fd < 0 ? EDGE_IO_OFFLINE : EDGE_IO_NO_RESPONSE;
     if (edge_modbus_parse_response(&request, response, response_size, command->value,
                                    command->value_size, NULL, 0U, &ignored,
-                                   &exception) != EDGE_MODBUS_OK)
+                                   &exception) != EDGE_MODBUS_OK) {
+        debug_request_status(device, "failed", "modbus_write_exception", true);
         return EDGE_IO_PROTOCOL_ERROR;
+    }
+    debug_request_status(device, "success", "", true);
     return read_modbus_point(device, point, actual->bytes, sizeof(actual->bytes),
                               &actual->size);
 }
@@ -1556,8 +1605,11 @@ static edge_io_result write_s7(edge_acquisition_device *device,
         return EDGE_IO_PROTOCOL_ERROR;
     if (!exchange(device, output, output_size, response, sizeof(response), &response_size))
         return EDGE_IO_NO_RESPONSE;
-    if (edge_s7_parse_write(response, response_size, reference, &return_code) != EDGE_S7_OK)
+    if (edge_s7_parse_write(response, response_size, reference, &return_code) != EDGE_S7_OK) {
+        debug_request_status(device, "failed", "s7_write_exception", true);
         return EDGE_IO_PROTOCOL_ERROR;
+    }
+    debug_request_status(device, "success", "", true);
     return read_s7_point(device, point, actual->bytes, sizeof(actual->bytes), &actual->size);
 }
 
@@ -2068,6 +2120,7 @@ static void free_devices(edge_acquisition_device *devices, size_t count) {
                                 point < devices[index].point_count; ++point)
             release_response(devices[index].points[point].response);
         release_response(devices[index].read_response);
+        free(devices[index].debug_request);
         free(devices[index].points);
         free(devices[index].modbus_points);
         free(devices[index].modbus_groups);

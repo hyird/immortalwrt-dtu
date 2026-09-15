@@ -504,6 +504,8 @@ message TelemetryAck {
 }
 
 message RawPacket {
+  string status = 10 [(nanopb).max_length = 32];
+  string reason = 11 [(nanopb).max_length = 128];
   bool device_only = 9;
   // Debug-only transport bytes; never enters historical telemetry.
   bool debug = 7;

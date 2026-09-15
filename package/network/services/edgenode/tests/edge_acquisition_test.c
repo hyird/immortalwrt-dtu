@@ -344,9 +344,10 @@ static void receive_s7_request(int fd, uint8_t request[1024]) {
     assert(recv(fd, request + 4, size - 4, MSG_WAITALL) == (ssize_t)(size - 4));
 }
 
-static unsigned debug_rx, debug_tx;
+static unsigned debug_rx, debug_tx, debug_success;
 static void record_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
     (void)context; (void)platform_id;
+    if (!strcmp(packet->status, "success")) ++debug_success;
     assert(packet->debug && packet->packet_id.size == 16 && packet->device_id.size == 16);
     assert(packet->device_id.bytes[0] == 2 && packet->endpoint_id.bytes[0] == 1);
     assert(packet->payload.size > 0 && packet->payload.size <= 4096);
@@ -354,7 +355,7 @@ static void record_debug(void *context, const uint8_t platform_id[16], const iot
     else { assert(!strcmp(packet->direction, "TX")); debug_tx += packet->payload.size; }
 }
 static void verify_separate_response_records(bool s7, bool link_debug, bool device_debug) {
-    debug_rx = debug_tx = 0;
+    debug_rx = debug_tx = debug_success = 0;
     response_records = 0;
     s7_responses = s7;
     expected_response_size = s7 ? 27 : 11;
@@ -457,7 +458,7 @@ static void verify_separate_response_records(bool s7, bool link_debug, bool devi
         edge_acquisition_tick(acquisition, monotonic_ms());
     }
     assert(response_records == 2);
-    if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); }
+    if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); }
     else { assert(debug_rx == 0 && debug_tx == 0); }
     edge_acquisition_destroy(acquisition);
     close(fd);
