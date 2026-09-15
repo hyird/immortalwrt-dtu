@@ -342,6 +342,8 @@ message DeviceConfig {
   uint32 command_fast_read_interval_sec = 21;
   bytes heartbeat_payload = 22 [(nanopb).max_size = 256];
   bool enabled = 24;
+  // 0 is the legacy default (M1); explicit modes use 1 through 4.
+  uint32 sl651_response_mode = 25;
 }
 
 message ModbusRegisterConfig {
@@ -394,6 +396,9 @@ message Sl651ElementConfig {
   bytes guide = 9 [(nanopb).max_size = 64];
   bool response_element = 10;
   bool writable = 11;
+  bool fixed_position = 12;
+  // Zero-based offset from the reassembled body, including serial and report time.
+  uint32 byte_offset = 13;
 }
 
 message Sl651DictionaryConfig {
@@ -459,6 +464,9 @@ message TelemetryValue {
   string name = 2 [(nanopb).max_length = 100];
   string unit = 3 [(nanopb).max_length = 32];
   ScalarValue value = 4;
+  // Bounded binary SL651 elements; absent in deployed 0.3.44 firmware.
+  bytes encoded_value = 5 [(nanopb).type = FT_POINTER];
+  string encoding = 6 [(nanopb).max_length = 16];
 }
 
 message TelemetryRecord {

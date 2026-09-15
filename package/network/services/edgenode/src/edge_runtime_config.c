@@ -80,11 +80,43 @@ static bool valid_device(const edge_runtime_config *config,
          value->command_fast_read_interval_sec == 0U) ||
         (value->io_interval_ms != 0U && value->io_interval_ms != 1000U) ||
         (value->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
-         value->protocol != iot_edge_v1_Protocol_PROTOCOL_S7))
+         value->protocol != iot_edge_v1_Protocol_PROTOCOL_S7 &&
+         value->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651) || value->sl651_response_mode > 4)
         return false;
     const iot_edge_v1_EndpointConfig *endpoint =
         edge_runtime_config_endpoint(config, value->endpoint_id.bytes);
     return endpoint != NULL && endpoint->protocol == value->protocol;
+}
+
+static bool valid_sl651_function(const char *code) {
+    if (strlen(code) != 2) return false;
+    for (size_t i = 0; i < 2; ++i)
+        if (!((code[i] >= '0' && code[i] <= '9') || (code[i] >= 'A' && code[i] <= 'F')))
+            return false;
+    return true;
+}
+
+static bool valid_sl651_element(const iot_edge_v1_Sl651ElementConfig *point) {
+    if (!point->element_id[0] || !valid_sl651_function(point->function_code) ||
+        point->digits > 7 || point->length > 65536 ||
+        (strcmp(point->encoding, "BCD") && strcmp(point->encoding, "HEX") &&
+         strcmp(point->encoding, "JPEG") && strcmp(point->encoding, "TIME_YYMMDDHHMMSS")))
+        return false;
+    if (point->fixed_position)
+        return point->length && point->byte_offset <= 65536U - point->length &&
+               (!point->writable || point->byte_offset >= 8);
+    size_t n = point->guide.size;
+    const uint8_t *guide = point->guide.bytes;
+    if ((n != 2 && n != 3) || (guide[0] == 0xFF ? n != 3 : n != 2)) return false;
+    if (guide[0] >= 0xF0 && guide[0] != 0xFF) {
+        if (guide[1] != guide[0]) return false;
+        if (guide[0] == 0xF0) return point->length == 5;
+        if (guide[0] == 0xF1) return point->length == 6;
+        if (guide[0] == 0xF2 || guide[0] == 0xF3) return true;
+        return point->length > 0;
+    }
+    return point->length && point->length == (uint32_t)(guide[n - 1] >> 3U) &&
+           point->digits == (guide[n - 1] & 7U);
 }
 
 static bool valid_point(const edge_runtime_config *config,
@@ -123,10 +155,12 @@ static bool valid_point(const edge_runtime_config *config,
         break;
     }
     case iot_edge_v1_ConfigItem_sl651_function_tag:
+        if (!valid_sl651_function(item->item.sl651_function.function_code)) return false;
         device_id = &item->item.sl651_function.device_id;
         expected = iot_edge_v1_Protocol_PROTOCOL_SL651;
         break;
     case iot_edge_v1_ConfigItem_sl651_element_tag:
+        if (!valid_sl651_element(&item->item.sl651_element)) return false;
         device_id = &item->item.sl651_element.device_id;
         expected = iot_edge_v1_Protocol_PROTOCOL_SL651;
         break;

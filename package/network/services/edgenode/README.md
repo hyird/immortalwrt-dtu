@@ -6,6 +6,31 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 Implemented foundations:
 
+SL651（0.3.45）：串口及 TCP Client/Server 接入支持 HEX/BCD M1–M4；M2 的
+ETB/ETX 分别返回 ACK/EOT，M3 按 SYN 序号重组、逐个 NAK 请求缺包，M4 支持
+ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功，最终 EOT 还须
+等待命令结果入队。tmpfs 不提供断电持久性，空间不足时仍遵循既有 outbox 淘汰策略。
+
+要素支持引导符和固定位置。`fixed_position=true` 时 `byte_offset` 从重组后正文
+的流水号首字节算起（0 基），偏移 8 跳过流水号和发报时间；固定位置必须有正长度，
+不要求引导符。混合配置先放固定字段区，再放引导符区。下行固定字段不得覆盖偏移
+0–7，字段不能重叠；空隙填 0。普通及 FF 扩展引导符校验长度和小数位，名称及业务
+功能码不设白名单。`response_element` 是查询应答的解析配置，不决定 ACK/EOT。
+
+同一物理测站只发一份确认，各平台分别解析、入队，全部成功后确认。共享测站必须
+使用一致模式；SL651 被动串口不能与轮询协议或不同串口参数混用。查询超时重试两次，
+随后隔离该连接的同一测站，重连恢复；已确认响应不完成后续新查询。
+
+运行上限：每帧正文 4095 字节，4095 个分包，重组正文 64 KiB；单个二进制 HEX/JPEG
+要素 8 KiB，单次解析二进制总量 64 KiB，最多 128 个出站记录。大要素按二进制字段
+上传，平台还原 HEX 或 JPEG data URL；超限不截断、不发送成功确认。ASCII 及非纯 BCD
+站址未实现，完整标准的所有业务语义不等同于此传输实现。协议版本仍为 6；新增字段均为
+可选扩展，不修改 0.3.44 原字段编号，也不移除旧固件下载和升级路径。
+
+本地主机验证包含 Linux 19 项、Windows Release 14 项；真实 TCP 测试覆盖入队失败不
+确认、命令结果提交边界、8 KiB 图片三包重组；协议测试覆盖 CRC、缺包 NAK、重复包、
+超时隔离以及配置默认值和越界拒绝。实际测站互通仍需用目标设备验收。
+
 - the node registers independently with up to four platforms using its 15-digit IMEI;
 - an HTTP or HTTPS platform base address is upgraded internally to a binary WS or WSS
   session carrying one nanopb `Envelope` per message; HTTP/WS is unencrypted and intended

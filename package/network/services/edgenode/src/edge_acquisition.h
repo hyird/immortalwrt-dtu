@@ -29,7 +29,7 @@ edge_acquisition *edge_acquisition_create(
 
 /*
  * Builds a replacement runtime without opening device connections.
- * Only Modbus RTU/TCP and S7 TCP Client are accepted.
+ * Accepts Modbus RTU/TCP, S7 TCP Client and passive SL651 serial/TCP sessions.
  */
 bool edge_acquisition_apply(edge_acquisition *acquisition,
                             const edge_runtime_config *config,

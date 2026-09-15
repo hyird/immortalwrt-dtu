@@ -165,6 +165,7 @@ if(UNIX)
     add_test(NAME edge_log COMMAND edge_log_test)
 
     add_executable(edge_acquisition_test
+        "${EDGENODE_ROOT}/src/edge_sl651.c"
         edge_acquisition_test.c
         "${EDGENODE_ROOT}/src/edge_acquisition.c"
         "${EDGENODE_ROOT}/src/edge_runtime_config.c"
@@ -178,3 +179,10 @@ if(UNIX)
     target_link_libraries(edge_acquisition_test PRIVATE edgenode_nanopb m)
     add_test(NAME edge_acquisition COMMAND edge_acquisition_test)
 endif()
+
+add_executable(edge_sl651_test edge_sl651_test.c "${EDGENODE_ROOT}/src/edge_sl651.c")
+target_include_directories(edge_sl651_test PRIVATE "${EDGENODE_ROOT}/src")
+if(NOT MSVC)
+    target_link_libraries(edge_sl651_test PRIVATE m)
+endif()
+add_test(NAME edge_sl651 COMMAND edge_sl651_test)

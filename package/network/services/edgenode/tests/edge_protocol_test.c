@@ -423,6 +423,12 @@ static void test_complete_telemetry(void) {
         record->values[i].value.value.unsigned_value = i;
     }
     record->has_device_status = true;
+    record->values[0].has_value = false;
+    strcpy(record->values[0].encoding, "JPEG");
+    record->values[0].encoded_value = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(8192));
+    require(record->values[0].encoded_value != NULL, "binary allocation");
+    record->values[0].encoded_value->size = 8192;
+    memset(record->values[0].encoded_value->bytes, 0xAA, 8192);
     strcpy(record->device_status.state, "connected");
     uint8_t wire[EDGENODE_MAX_WS_MESSAGE];
     size_t size;
@@ -433,6 +439,9 @@ static void test_complete_telemetry(void) {
     const iot_edge_v1_TelemetryRecord *actual = &decoded.payload.telemetry_batch.records[0];
     require(decoded.payload.telemetry_batch.records_count == 1 && actual->values_count == 100,
             "one scan must remain one complete record");
+    require(actual->values[0].encoded_value && actual->values[0].encoded_value->size == 8192 &&
+            actual->values[0].encoded_value->bytes[8191] == 0xAA &&
+            !strcmp(actual->values[0].encoding, "JPEG"), "binary telemetry truncated");
     require(actual->values[99].value.value.unsigned_value == 99 && actual->has_device_status &&
             strcmp(actual->device_status.state, "connected") == 0, "telemetry lost values or status");
     // Re-encoding is the reconnect/outbox replay path.

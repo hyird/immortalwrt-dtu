@@ -34,9 +34,10 @@
 #include "edge_process.h"
 #include "edge_protocol.h"
 #include "edge_s7.h"
+#include "edge_sl651.h"
 #include "log.h"
-#include "pb_encode.h"
 #include "pb_decode.h"
+#include "pb_encode.h"
 
 #define EDGE_IO_TIMEOUT_MS 800
 #define EDGE_IO_LOG_REPEAT_MS 60000
@@ -78,6 +79,16 @@ struct edge_acquisition_device {
     edge_modbus_read_group *modbus_groups;
     size_t modbus_group_count;
     edge_device_runtime runtime;
+    edge_sl651_session *sl651;
+    uint8_t sl651_station[5];
+    bool sl651_transmitter, sl651_query_active;
+    uint64_t sl651_token;
+    bool sl651_report_encoded;
+    uint32_t sl651_parts;
+    bool sl651_committed[128];
+    uint8_t sl651_record_ids[128][16];
+    iot_edge_v1_CommandResult sl651_result;
+    bool sl651_result_pending;
     uint16_t transaction;
     uint16_t s7_reference;
     uint16_t s7_pdu_length;
@@ -117,12 +128,18 @@ typedef enum {
     EDGE_ACQUISITION_EVENT_STATUS = 3,
     EDGE_ACQUISITION_CONTROL_COMMAND = 4,
     EDGE_ACQUISITION_CONTROL_STOP = 5,
+    EDGE_ACQUISITION_EVENT_SL651 = 6,
+    EDGE_ACQUISITION_CONTROL_SL651_COMMIT = 7,
+    EDGE_ACQUISITION_CONTROL_SL651_COMMAND_COMMIT = 8,
 } edge_acquisition_message_type;
 
 typedef struct {
     uint32_t magic;
     uint32_t type;
     uint32_t payload_size;
+    uint64_t report_token;
+    uint32_t report_part;
+    uint8_t device_id[16];
     uint8_t platform_id[16];
     union {
         uint8_t telemetry[EDGENODE_MAX_WS_MESSAGE];
@@ -131,6 +148,9 @@ typedef struct {
         iot_edge_v1_CommandRequest command_request;
     } payload;
 } edge_acquisition_message;
+
+static bool worker_sl651_report(edge_acquisition_device *device,
+                                const iot_edge_v1_TelemetryRecord *record, uint32_t part);
 
 static void set_error(char *error, size_t size, const char *message) {
     if (error != NULL && size != 0U)
@@ -190,10 +210,14 @@ static uint64_t monotonic_milliseconds(void) {
 }
 
 static const char *protocol_name(const edge_acquisition_device *device) {
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651)
+        return "SL651";
     return device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ? "S7" : "Modbus";
 }
 
 static const char *log_source(const edge_acquisition_device *device) {
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651)
+        return "sl651";
     return device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ? "s7" : "modbus";
 }
 
@@ -1495,6 +1519,285 @@ static void acquisition_status_local(edge_acquisition *acquisition,
                                       const uint8_t platform_id[16],
                                       iot_edge_v1_DeviceStatusReport *report);
 
+static int sl651_timezone(const edge_acquisition_device *device) {
+    const char *zone = device->config->timezone;
+    unsigned hours = 8, minutes = 0;
+    if (strlen(zone) != 6 || (zone[0] != '+' && zone[0] != '-') ||
+        sscanf(zone + 1, "%2u:%2u", &hours, &minutes) != 2 || hours > 23 || minutes > 59)
+        return 8 * 3600;
+    return (zone[0] == '-' ? -1 : 1) * (int)(hours * 3600 + minutes * 60);
+}
+static void sl651_time(edge_acquisition_device *device, uint8_t output[6]) {
+    time_t now = (time_t)(current_ms() / 1000 + sl651_timezone(device));
+    struct tm local;
+    gmtime_r(&now, &local);
+    unsigned values[6] = {(unsigned)(local.tm_year + 1900) % 100,
+                          (unsigned)local.tm_mon + 1,
+                          (unsigned)local.tm_mday,
+                          (unsigned)local.tm_hour,
+                          (unsigned)local.tm_min,
+                          (unsigned)local.tm_sec};
+    for (size_t i = 0; i < 6; ++i)
+        output[i] = (uint8_t)((values[i] / 10) * 16 + values[i] % 10);
+}
+static int64_t sl651_observed(edge_acquisition_device *device, const uint8_t *body) {
+    unsigned values[6];
+    for (size_t i = 0; i < 6; ++i)
+        values[i] = (body[i + 2] >> 4U) * 10U + (body[i + 2] & 15U);
+    struct tm local = {.tm_year = (int)values[0] + 100,
+                       .tm_mon = (int)values[1] - 1,
+                       .tm_mday = (int)values[2],
+                       .tm_hour = (int)values[3],
+                       .tm_min = (int)values[4],
+                       .tm_sec = (int)values[5]};
+    return ((int64_t)timegm(&local) - sl651_timezone(device)) * 1000;
+}
+static bool sl651_send(void *context, const uint8_t *bytes, size_t size) {
+    edge_acquisition_device *device = context;
+    if (!device->sl651_transmitter)
+        return true;
+    if (device->link->fd < 0)
+        return false;
+    size_t offset = 0;
+    while (offset < size) {
+        ssize_t n = write(device->link->fd, bytes + offset, size - offset);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return false;
+        offset += (size_t)n;
+    }
+    return true;
+}
+static bool sl651_value(const iot_edge_v1_Sl651ElementConfig *element, const uint8_t *bytes,
+                        size_t size, iot_edge_v1_ScalarValue *value) {
+    if (!strcmp(element->encoding, "BCD")) {
+        double decoded;
+        if (!edge_sl651_bcd(bytes, size, element->digits, &decoded))
+            return false;
+        scalar_double(value, decoded);
+        return true;
+    }
+    value->kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    value->which_value = iot_edge_v1_ScalarValue_string_value_tag;
+    char *text = value->value.string_value;
+    if (!strcmp(element->encoding, "TIME_YYMMDDHHMMSS")) {
+        if (size != 5 && size != 6)
+            return false;
+        for (size_t i = 0; i < size; ++i)
+            if ((bytes[i] & 15) > 9 || (bytes[i] >> 4) > 9)
+                return false;
+        snprintf(text, sizeof(value->value.string_value), "20%02X-%02X-%02XT%02X:%02X:%02X",
+                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], size == 6 ? bytes[5] : 0);
+        return true;
+    }
+    if (size * 2 >= sizeof(value->value.string_value)) {
+        if (strcmp(element->encoding, "HEX") || size > sizeof(value->value.bytes_value.bytes))
+            return false;
+        value->kind = iot_edge_v1_ValueKind_VALUE_BYTES;
+        value->which_value = iot_edge_v1_ScalarValue_bytes_value_tag;
+        value->value.bytes_value.size = (pb_size_t)size;
+        memcpy(value->value.bytes_value.bytes, bytes, size);
+        return true;
+    }
+    static const char hex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < size; ++i) {
+        text[i * 2] = hex[bytes[i] >> 4];
+        text[i * 2 + 1] = hex[bytes[i] & 15];
+    }
+    text[size * 2] = 0;
+    return true;
+}
+static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *frame) {
+    edge_acquisition_device *device = context;
+    if (device->sl651_token != token)
+        device->sl651_report_encoded = false;
+    char function[3];
+    snprintf(function, sizeof(function), "%02X", frame->function);
+    bool response = false;
+    for (size_t i = 0; i < device->point_count; ++i) {
+        const iot_edge_v1_Sl651ElementConfig *element = &device->points[i].item->item.sl651_element;
+        if (!strcmp(function, element->function_code) && element->response_element)
+            response = true;
+    }
+    size_t guide_start = 8;
+    for (size_t i = 0; i < device->point_count; ++i) {
+        const iot_edge_v1_Sl651ElementConfig *element = &device->points[i].item->item.sl651_element;
+        if (!strcmp(function, element->function_code) && element->response_element == response &&
+            element->fixed_position && element->length &&
+            element->byte_offset <= frame->body_size &&
+            element->length <= frame->body_size - element->byte_offset &&
+            guide_start < element->byte_offset + element->length)
+            guide_start = element->byte_offset + element->length;
+    }
+    iot_edge_v1_TelemetryValue *values =
+        calloc(device->point_count ? device->point_count : 1, sizeof(*values));
+    if (!values)
+        return false;
+    size_t count = 0, binary_size = 0;
+    for (size_t i = 0; i < device->point_count; ++i) {
+        const iot_edge_v1_Sl651ElementConfig *element = &device->points[i].item->item.sl651_element;
+        if (strcmp(function, element->function_code) || element->response_element != response)
+            continue;
+        const uint8_t *bytes;
+        size_t size;
+        if (!edge_sl651_field(frame->body, frame->body_size, element->fixed_position,
+                              element->fixed_position ? element->byte_offset : guide_start,
+                              element->guide.bytes, element->guide.size, element->length, &bytes,
+                              &size))
+            continue;
+        iot_edge_v1_TelemetryValue *value = &values[count];
+        bool binary =
+            !strcmp(element->encoding, "JPEG") || (!strcmp(element->encoding, "HEX") && size > 63);
+        bool decoded = false;
+        if (binary && size <= 8192 && size <= EDGE_SL651_BODY_MAX - binary_size) {
+            value->encoded_value = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(size));
+            if (value->encoded_value) {
+                value->encoded_value->size = (pb_size_t)size;
+                memcpy(value->encoded_value->bytes, bytes, size);
+                copy_text(value->encoding, sizeof(value->encoding), element->encoding);
+                binary_size += size;
+                decoded = true;
+            }
+        } else if (!binary)
+            decoded = sl651_value(element, bytes, size, &value->value);
+        if (!decoded) {
+            for (size_t j = 0; j < count; ++j)
+                free(values[j].encoded_value);
+            free(values);
+            copy_text(device->last_error, sizeof(device->last_error),
+                      "SL651 value exceeds telemetry encoding or is invalid");
+            return false;
+        }
+        copy_text(value->element_id, sizeof(value->element_id), element->element_id);
+        copy_text(value->name, sizeof(value->name), element->name);
+        copy_text(value->unit, sizeof(value->unit), element->unit);
+        value->has_value = !binary;
+        ++count;
+    }
+    size_t starts[129] = {0}, parts = 0;
+    for (size_t index = 0; index < count;) {
+        if (parts == 128) {
+            for (size_t j = 0; j < count; ++j)
+                free(values[j].encoded_value);
+            free(values);
+            return false;
+        }
+        starts[parts++] = index;
+        size_t bytes = 0, first = index;
+        while (index < count && index - first < 8) {
+            size_t estimated =
+                512 + (values[index].encoded_value ? values[index].encoded_value->size : 0);
+            if (bytes + estimated > 12288)
+                break;
+            bytes += estimated;
+            ++index;
+        }
+        starts[parts] = index;
+    }
+    if (!parts)
+        parts = 1;
+    if (device->sl651_token != token) {
+        device->sl651_token = token;
+        device->sl651_parts = (uint32_t)parts;
+        memset(device->sl651_committed, 0, sizeof(device->sl651_committed));
+        for (size_t i = 0; i < parts; ++i)
+            record_id((uint64_t)current_ms(), device->sl651_record_ids[i]);
+    }
+    device->sl651_report_encoded = true;
+    bool queued = true;
+    device->observed_at_ms = sl651_observed(device, frame->body);
+    device->last_activity_at_ms = current_ms();
+    for (size_t part = 0; part < parts; ++part) {
+        if (device->sl651_committed[part])
+            continue;
+        iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
+        edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes),
+                                device->sl651_record_ids[part], 16);
+        edge_protocol_set_bytes(&record.device_id, sizeof(record.device_id.bytes),
+                                device->config->device_id.bytes, 16);
+        edge_protocol_set_bytes(&record.endpoint_id, sizeof(record.endpoint_id.bytes),
+                                device->config->endpoint_id.bytes, 16);
+        record.protocol = iot_edge_v1_Protocol_PROTOCOL_SL651;
+        record.observed_at_ms = device->observed_at_ms;
+        copy_text(record.function_code, sizeof(record.function_code), function);
+        copy_text(record.direction, sizeof(record.direction), "UP");
+        record.values = values + starts[part];
+        record.values_count = (pb_size_t)(starts[part + 1] - starts[part]);
+        if (!worker_sl651_report(device, &record, (uint32_t)part))
+            queued = false;
+    }
+    for (size_t j = 0; j < count; ++j)
+        free(values[j].encoded_value);
+    free(values);
+    return queued;
+}
+static void sl651_command_result(void *context, const uint8_t id[16], bool success,
+                                 const char *reason) {
+    edge_acquisition_device *device = context;
+    device->sl651_result = (iot_edge_v1_CommandResult)iot_edge_v1_CommandResult_init_zero;
+    edge_protocol_set_bytes(&device->sl651_result.command_id,
+                            sizeof(device->sl651_result.command_id.bytes), id, 16);
+    edge_protocol_set_bytes(&device->sl651_result.device_id,
+                            sizeof(device->sl651_result.device_id.bytes),
+                            device->config->device_id.bytes, 16);
+    device->sl651_result.state = success ? iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED
+                                         : iot_edge_v1_CommandState_COMMAND_STATE_FAILED;
+    device->sl651_result.completed_at_ms = current_ms();
+    copy_text(device->sl651_result.message, sizeof(device->sl651_result.message), reason);
+    if (!success)
+        for (size_t i = 0; i < device->owner->device_count; ++i) {
+            edge_acquisition_device *other = &device->owner->devices[i];
+            if (other->sl651 && other->link == device->link &&
+                !memcmp(other->sl651_station, device->sl651_station, 5))
+                edge_sl651_quarantine(other->sl651);
+        }
+    device->sl651_result_pending = true;
+    (void)device->owner->command(device->owner->callback_context, device->platform_id,
+                                 &device->sl651_result);
+}
+static void sl651_poll(edge_acquisition_device *device, uint64_t now) {
+    uint8_t time[6];
+    sl651_time(device, time);
+    edge_sl651_tick(device->sl651, now, time);
+    if (device->sl651_result_pending)
+        (void)device->owner->command(device->owner->callback_context, device->platform_id,
+                                     &device->sl651_result);
+    /* A shared physical stream is read once and broadcast to its configured station sessions. */
+    for (size_t i = 0; i < device->owner->device_count; ++i) {
+        edge_acquisition_device *other = &device->owner->devices[i];
+        if (other == device)
+            break;
+        if (other->sl651 && other->link == device->link)
+            return;
+    }
+    for (size_t i = 0; i < device->owner->device_count; ++i)
+        if (device->owner->devices[i].link == device->link && device->owner->devices[i].sl651 &&
+            !edge_sl651_ready(device->owner->devices[i].sl651))
+            return;
+    if (device_connect(device) != EDGE_IO_OK)
+        return;
+    struct pollfd descriptor = {.fd = device->link->fd, .events = POLLIN};
+    if (poll(&descriptor, 1, 0) <= 0)
+        return;
+    uint8_t bytes[4096];
+    ssize_t n = read(device->link->fd, bytes, sizeof(bytes));
+    if (n <= 0) {
+        close_fd(&device->link->fd);
+        for (size_t i = 0; i < device->owner->device_count; ++i)
+            if (device->owner->devices[i].sl651 && device->owner->devices[i].link == device->link)
+                edge_sl651_reset(device->owner->devices[i].sl651);
+        return;
+    }
+    for (size_t i = 0; i < device->owner->device_count; ++i) {
+        edge_acquisition_device *other = &device->owner->devices[i];
+        if (!other->sl651 || other->link != device->link)
+            continue;
+        sl651_time(other, time);
+        edge_sl651_receive(other->sl651, bytes, (size_t)n, now, time);
+    }
+}
+
 static void device_report(void *context, const uint8_t platform_id[16],
                           const uint8_t device_id[16],
                           const edge_device_sample *sample) {
@@ -1611,7 +1914,10 @@ static void free_devices(edge_acquisition_device *devices, size_t count) {
     if (devices == NULL)
         return;
     for (size_t index = 0U; index < count; ++index) {
-        edge_device_runtime_close(&devices[index].runtime);
+        if (devices[index].sl651)
+            edge_sl651_destroy(devices[index].sl651);
+        else
+            edge_device_runtime_close(&devices[index].runtime);
         free(devices[index].points);
         free(devices[index].modbus_points);
         free(devices[index].modbus_groups);
@@ -1649,6 +1955,9 @@ edge_acquisition *edge_acquisition_create(
 
 static bool point_for_device(const iot_edge_v1_ConfigItem *item,
                              const iot_edge_v1_DeviceConfig *device) {
+    if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651)
+        return item->which_item == iot_edge_v1_ConfigItem_sl651_element_tag &&
+               same_id(&item->item.sl651_element.device_id, device->device_id.bytes);
     if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS)
         return item->which_item == iot_edge_v1_ConfigItem_modbus_register_tag &&
                same_id(&item->item.modbus_register.device_id, device->device_id.bytes);
@@ -1769,11 +2078,12 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                 edge_runtime_config_endpoint(config, device->endpoint_id.bytes);
             if (endpoint == NULL || !endpoint->enabled ||
                 (device->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
-                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_S7)) {
+                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_S7 &&
+                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651)) {
                 free_devices(devices, output);
                 free_links(links, link_count);
                 set_error(error, error_size,
-                          "only enabled Modbus and S7 endpoints are supported");
+                          "only enabled Modbus, S7 and SL651 endpoints are supported");
                 return false;
             }
             if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 &&
@@ -1840,6 +2150,76 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                     }
                 }
             }
+            if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651) {
+                uint8_t station[5];
+                const char *code = device->device_code;
+                size_t size = strlen(code);
+                if (!size || size > 10) {
+                    free_devices(devices, output + 1);
+                    free_links(links, link_count);
+                    set_error(error, error_size, "SL651 requires a BCD station address");
+                    return false;
+                }
+                char padded[11] = "0000000000";
+                memcpy(padded + 10 - size, code, size);
+                for (size_t i = 0; i < 10; ++i)
+                    if (padded[i] < '0' || padded[i] > '9') {
+                        free_devices(devices, output + 1);
+                        free_links(links, link_count);
+                        set_error(error, error_size, "SL651 station address must be decimal");
+                        return false;
+                    }
+                for (size_t i = 0; i < 5; ++i)
+                    station[i] = (uint8_t)((padded[i * 2] - '0') * 16 + padded[i * 2 + 1] - '0');
+                edge_sl651_callbacks callbacks = {sl651_send, sl651_report, sl651_command_result};
+                runtime->sl651 =
+                    edge_sl651_create(device->sl651_response_mode, station, callbacks, runtime);
+                if (!runtime->sl651) {
+                    free_devices(devices, output + 1);
+                    free_links(links, link_count);
+                    set_error(error, error_size, "SL651 session allocation failed");
+                    return false;
+                }
+                memcpy(runtime->sl651_station, station, 5);
+                runtime->sl651_transmitter = true;
+                for (size_t i = 0; i < output; ++i)
+                    if (devices[i].link == runtime->link) {
+                        if (!devices[i].sl651 ||
+                            (endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL &&
+                             memcmp(&endpoint->serial, &devices[i].endpoint->serial,
+                                    sizeof(endpoint->serial)))) {
+                            free_devices(devices, output + 1);
+                            free_links(links, link_count);
+                            set_error(
+                                error, error_size,
+                                "SL651 passive stream requires matching exclusive serial settings");
+                            return false;
+                        }
+                        if (!memcmp(devices[i].sl651_station, runtime->sl651_station, 5)) {
+                            unsigned previous_mode = devices[i].config->sl651_response_mode;
+                            unsigned current_mode = device->sl651_response_mode;
+                            if ((previous_mode ? previous_mode : 1) !=
+                                (current_mode ? current_mode : 1)) {
+                                free_devices(devices, output + 1);
+                                free_links(links, link_count);
+                                set_error(error, error_size,
+                                          "shared SL651 station response modes conflict");
+                                return false;
+                            }
+                            runtime->sl651_transmitter = false;
+                        }
+                    }
+                ++output;
+                continue;
+            }
+            for (size_t i = 0; i < output; ++i)
+                if (devices[i].link == runtime->link && devices[i].sl651) {
+                    free_devices(devices, output + 1);
+                    free_links(links, link_count);
+                    set_error(error, error_size,
+                              "SL651 cannot share a physical stream with a polling protocol");
+                    return false;
+                }
             const edge_device_protocol protocol =
                 device->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS
                     ? EDGE_DEVICE_MODBUS : EDGE_DEVICE_S7;
@@ -1999,10 +2379,174 @@ static bool build_write_command(edge_acquisition *acquisition,
     return true;
 }
 
+static bool sl651_encode(const iot_edge_v1_Sl651ElementConfig *element, const char *text,
+                         uint8_t *out, size_t cap) {
+    size_t length = element->length;
+    if (!length || length > cap)
+        return false;
+    memset(out, 0, length);
+    if (!strcmp(element->encoding, "BCD")) {
+        if (element->digits > 7 || length > 31)
+            return false;
+        char *end;
+        errno = 0;
+        double number = strtod(text, &end);
+        if (end == text || *end || errno || !isfinite(number))
+            return false;
+        bool negative = number < 0;
+        size_t sign = negative ? 1 : 0;
+        if (length <= sign)
+            return false;
+        char decimal[96];
+        int count = snprintf(decimal, sizeof(decimal), "%.*f", (int)element->digits, fabs(number));
+        if (count <= 0 || (size_t)count >= sizeof(decimal))
+            return false;
+        size_t digits = 0;
+        for (int i = 0; i < count; ++i)
+            if (decimal[i] != '.')
+                decimal[digits++] = decimal[i];
+        if (digits > (length - sign) * 2)
+            return false;
+        size_t padding = (length - sign) * 2 - digits;
+        for (size_t i = 0; i < digits; ++i) {
+            if (decimal[i] < '0' || decimal[i] > '9')
+                return false;
+            size_t position = padding + i;
+            out[sign + position / 2] |= (uint8_t)((decimal[i] - '0') << (position % 2 ? 0 : 4));
+        }
+        if (negative)
+            out[0] = 0xFF;
+        return true;
+    }
+    size_t digits = strlen(text);
+    if (!digits || digits > length * 2)
+        return false;
+    for (size_t i = 0; i < digits; ++i) {
+        char ch = text[i];
+        unsigned digit = ch >= '0' && ch <= '9'   ? (unsigned)(ch - '0')
+                         : ch >= 'A' && ch <= 'F' ? (unsigned)(ch - 'A' + 10)
+                         : ch >= 'a' && ch <= 'f' ? (unsigned)(ch - 'a' + 10)
+                                                  : 16;
+        if (digit > 15)
+            return false;
+        size_t position = length * 2 - digits + i;
+        out[position / 2] |= (uint8_t)(digit << (position % 2 ? 0 : 4));
+    }
+    return true;
+}
+static bool sl651_query_request(edge_acquisition_device *device,
+                                const iot_edge_v1_CommandRequest *request, char *error,
+                                size_t error_size) {
+    if (request->command_id.size != 16 || !request->values_count || request->values_count > 8) {
+        set_error(error, error_size, "SL651 command requires configured values");
+        return false;
+    }
+    uint8_t body[4087] = {0};
+    bool occupied[4087] = {0};
+    size_t size = 0;
+    const iot_edge_v1_Sl651ElementConfig *elements[8] = {0};
+    const char *function = NULL;
+    for (pb_size_t i = 0; i < request->values_count; ++i) {
+        const iot_edge_v1_CommandValue *value = &request->values[i];
+        if (!value->has_expected ||
+            value->expected.which_value != iot_edge_v1_ScalarValue_string_value_tag)
+            return false;
+        for (size_t j = 0; j < device->point_count; ++j) {
+            const iot_edge_v1_Sl651ElementConfig *element =
+                &device->points[j].item->item.sl651_element;
+            if (!strcmp(element->element_id, value->element_id) && element->writable &&
+                !element->response_element) {
+                if (elements[i]) {
+                    set_error(error, error_size, "ambiguous SL651 command element");
+                    return false;
+                }
+                elements[i] = element;
+            }
+        }
+        if (!elements[i] || (function && strcmp(function, elements[i]->function_code))) {
+            set_error(error, error_size, "SL651 command elements must share a writable function");
+            return false;
+        }
+        function = elements[i]->function_code;
+    }
+    for (unsigned pass = 0; pass < 2; ++pass)
+        for (pb_size_t i = 0; i < request->values_count; ++i) {
+            const iot_edge_v1_Sl651ElementConfig *element = elements[i];
+            if (element->fixed_position != (pass == 0))
+                continue;
+            size_t offset = size;
+            if (element->fixed_position) {
+                if (element->byte_offset < 8) {
+                    set_error(error, error_size, "SL651 fixed command overlaps serial/time");
+                    return false;
+                }
+                offset = element->byte_offset - 8;
+            } else {
+                if (element->guide.size > sizeof(body) - size)
+                    return false;
+                memcpy(body + size, element->guide.bytes, element->guide.size);
+                offset += element->guide.size;
+            }
+            if (offset > sizeof(body) || element->length > sizeof(body) - offset ||
+                !sl651_encode(element, request->values[i].expected.value.string_value,
+                              body + offset, sizeof(body) - offset)) {
+                set_error(error, error_size, "invalid SL651 command value or length");
+                return false;
+            }
+            for (size_t j = offset; j < offset + element->length; ++j) {
+                if (occupied[j]) {
+                    set_error(error, error_size, "overlapping SL651 command elements");
+                    return false;
+                }
+                occupied[j] = true;
+            }
+            if (size < offset + element->length)
+                size = offset + element->length;
+        }
+    char *end;
+    unsigned long code = strtoul(function, &end, 16);
+    if (strlen(function) != 2 || *end || code > 255)
+        return false;
+    for (size_t i = 0; i < device->owner->device_count; ++i) {
+        edge_acquisition_device *other = &device->owner->devices[i];
+        if (other->link == device->link &&
+            !memcmp(other->sl651_station, device->sl651_station, 5) && other->sl651_query_active) {
+            set_error(error, error_size, "SL651 physical station command is busy");
+            return false;
+        }
+    }
+    bool previous = device->sl651_transmitter;
+    device->sl651_transmitter = true;
+    uint8_t time[6];
+    sl651_time(device, time);
+    if (!edge_sl651_query(device->sl651, request->command_id.bytes, (uint8_t)code, body, size,
+                          monotonic_milliseconds(), request->timeout_ms, time)) {
+        device->sl651_transmitter = previous;
+        set_error(error, error_size,
+                  "SL651 command requires an online M2/M3/M4 station without a pending or "
+                  "timed-out query");
+        return false;
+    }
+    for (size_t i = 0; i < device->owner->device_count; ++i) {
+        edge_acquisition_device *other = &device->owner->devices[i];
+        if (other != device && other->link == device->link &&
+            !memcmp(other->sl651_station, device->sl651_station, 5))
+            other->sl651_transmitter = false;
+    }
+    device->sl651_query_active = true;
+    return true;
+}
+
 static bool acquisition_command_local(edge_acquisition *acquisition,
                                       const uint8_t platform_id[16],
                                       const iot_edge_v1_CommandRequest *request,
                                       char *error, size_t error_size) {
+    if (request && request->device_id.size == 16) {
+        edge_acquisition_device *station =
+            find_device(acquisition, platform_id, request->device_id.bytes);
+        if (station && station->sl651)
+            return sl651_query_request(station, request, error, error_size);
+    }
     edge_acquisition_device *device = NULL;
     edge_write_command command;
     if (!build_write_command(acquisition, platform_id, request, &device, &command,
@@ -2042,6 +2586,26 @@ static bool worker_send(edge_acquisition *acquisition, uint32_t type,
             continue;
         return false;
     }
+}
+
+static bool worker_sl651_report(edge_acquisition_device *device,
+                                const iot_edge_v1_TelemetryRecord *record, uint32_t part) {
+    edge_acquisition_message message;
+    memset(&message, 0, sizeof(message));
+    message.magic = EDGE_ACQUISITION_MAGIC;
+    message.type = EDGE_ACQUISITION_EVENT_SL651;
+    memcpy(message.platform_id, device->platform_id, 16);
+    memcpy(message.device_id, device->config->device_id.bytes, 16);
+    message.report_token = device->sl651_token;
+    message.report_part = part;
+    pb_ostream_t stream =
+        pb_ostream_from_buffer(message.payload.telemetry, sizeof(message.payload.telemetry));
+    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, record))
+        return false;
+    message.payload_size = (uint32_t)stream.bytes_written;
+    const size_t size = acquisition_message_size(message.payload_size);
+    return send(device->owner->worker_fd, &message, size, MSG_DONTWAIT | MSG_NOSIGNAL) ==
+           (ssize_t)size;
 }
 
 static bool worker_telemetry(void *context,
@@ -2097,6 +2661,49 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
         message.payload_size > sizeof(message.payload) ||
         acquisition_message_size(message.payload_size) != (size_t)size)
         return false;
+    if (message.type == EDGE_ACQUISITION_CONTROL_SL651_COMMIT ||
+        message.type == EDGE_ACQUISITION_CONTROL_SL651_COMMAND_COMMIT) {
+        edge_acquisition_device *device =
+            find_device(acquisition, message.platform_id, message.device_id);
+        if (!device || !device->sl651)
+            return true;
+        uint8_t time[6];
+        sl651_time(device, time);
+        if (message.type == EDGE_ACQUISITION_CONTROL_SL651_COMMAND_COMMIT) {
+            if (message.payload_size != 16 || !device->sl651_result_pending ||
+                memcmp(message.payload.telemetry, device->sl651_result.command_id.bytes, 16))
+                return true;
+            device->sl651_result_pending = false;
+            device->sl651_query_active = false;
+            edge_sl651_command_committed(device->sl651, message.payload.telemetry,
+                                         monotonic_milliseconds(), time);
+            return true;
+        }
+        if (message.report_token != device->sl651_token ||
+            message.report_part >= device->sl651_parts)
+            return true;
+        device->sl651_committed[message.report_part] = true;
+        for (size_t i = 0; i < acquisition->device_count; ++i) {
+            edge_acquisition_device *other = &acquisition->devices[i];
+            if (!other->sl651 || other->link != device->link ||
+                memcmp(other->sl651_station, device->sl651_station, 5))
+                continue;
+            if (!other->sl651_report_encoded)
+                return true;
+            for (uint32_t part = 0; part < other->sl651_parts; ++part)
+                if (!other->sl651_committed[part])
+                    return true;
+        }
+        for (size_t i = 0; i < acquisition->device_count; ++i) {
+            edge_acquisition_device *other = &acquisition->devices[i];
+            if (!other->sl651 || other->link != device->link ||
+                memcmp(other->sl651_station, device->sl651_station, 5))
+                continue;
+            sl651_time(other, time);
+            edge_sl651_commit(other->sl651, other->sl651_token, monotonic_milliseconds(), time);
+        }
+        return true;
+    }
     if (message.type == EDGE_ACQUISITION_CONTROL_STOP) {
         *stop = true;
         return true;
@@ -2166,8 +2773,11 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
         if (schedule_ms < next_tick)
             continue;
         for (size_t index = 0U; index < acquisition->device_count && !stop; ++index) {
-            edge_device_runtime_tick(&acquisition->devices[index].runtime,
-                                     schedule_ms, current_ms());
+            if (acquisition->devices[index].sl651)
+                sl651_poll(&acquisition->devices[index], schedule_ms);
+            else
+                edge_device_runtime_tick(&acquisition->devices[index].runtime, schedule_ms,
+                                         current_ms());
             while (!stop) {
                 struct pollfd pending = {.fd = worker_fd, .events = POLLIN};
                 if (poll(&pending, 1U, 0) <= 0)
@@ -2292,24 +2902,44 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY) {
+        if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY ||
+            message.type == EDGE_ACQUISITION_EVENT_SL651) {
             iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
             pb_istream_t stream = pb_istream_from_buffer(message.payload.telemetry,
                                                         message.payload_size);
-            if (pb_decode(&stream, iot_edge_v1_TelemetryRecord_fields, &record))
-                (void)acquisition->telemetry(acquisition->callback_context,
-                                             message.platform_id, &record);
-            else
+            if (pb_decode(&stream, iot_edge_v1_TelemetryRecord_fields, &record)) {
+                const bool stored = acquisition->telemetry(acquisition->callback_context,
+                                                           message.platform_id, &record);
+                if (stored && message.type == EDGE_ACQUISITION_EVENT_SL651) {
+                    message.type = EDGE_ACQUISITION_CONTROL_SL651_COMMIT;
+                    message.payload_size = 0;
+                    (void)send(acquisition->worker_fd, &message, acquisition_message_size(0),
+                               MSG_DONTWAIT | MSG_NOSIGNAL);
+                }
+            } else
                 syslog(LOG_ERR, "cannot decode telemetry from acquisition worker");
             pb_release(iot_edge_v1_TelemetryRecord_fields, &record);
-        }
-        else if (message.type == EDGE_ACQUISITION_EVENT_COMMAND_RESULT &&
-                 message.payload_size == sizeof(message.payload.command_result))
-            (void)acquisition->command(acquisition->callback_context,
-                                       message.platform_id,
-                                       &message.payload.command_result);
-        else if (message.type == EDGE_ACQUISITION_EVENT_STATUS &&
-                 message.payload_size == sizeof(message.payload.status)) {
+        } else if (message.type == EDGE_ACQUISITION_EVENT_COMMAND_RESULT &&
+                   message.payload_size == sizeof(message.payload.command_result)) {
+            const iot_edge_v1_CommandResult *result = &message.payload.command_result;
+            const bool stored =
+                acquisition->command(acquisition->callback_context, message.platform_id, result);
+            edge_acquisition_device *device =
+                result->device_id.size == 16
+                    ? find_device(acquisition, message.platform_id, result->device_id.bytes)
+                    : NULL;
+            if (stored && device && device->sl651 && result->command_id.size == 16) {
+                uint8_t id[16];
+                memcpy(id, result->command_id.bytes, 16);
+                memcpy(message.device_id, result->device_id.bytes, 16);
+                memcpy(message.payload.telemetry, id, 16);
+                message.type = EDGE_ACQUISITION_CONTROL_SL651_COMMAND_COMMIT;
+                message.payload_size = 16;
+                (void)send(acquisition->worker_fd, &message, acquisition_message_size(16),
+                           MSG_DONTWAIT | MSG_NOSIGNAL);
+            }
+        } else if (message.type == EDGE_ACQUISITION_EVENT_STATUS &&
+                   message.payload_size == sizeof(message.payload.status)) {
             for (size_t index = 0U; index < acquisition->platform_count; ++index)
                 if (memcmp(acquisition->platform_ids[index], message.platform_id,
                            16U) == 0) {
@@ -2382,13 +3012,20 @@ bool edge_acquisition_command_for_platform(
         set_error(error, error_size, "acquisition worker is unavailable");
         return false;
     }
-    edge_acquisition_device *device = NULL;
-    edge_write_command command;
-    if (!build_write_command(acquisition, platform_id, request, &device, &command,
-                             error, error_size))
+    edge_acquisition_device *device =
+        request && request->device_id.size == 16
+            ? find_device(acquisition, platform_id, request->device_id.bytes)
+            : NULL;
+    if (!device || !device->sl651) {
+        edge_write_command command;
+        if (!build_write_command(acquisition, platform_id, request, &device, &command, error,
+                                 error_size))
+            return false;
+    } else if (request->command_id.size != 16 || !request->values_count ||
+               request->values_count > 8) {
+        set_error(error, error_size, "invalid SL651 command");
         return false;
-    (void)device;
-    (void)command;
+    }
     edge_acquisition_message message;
     memset(&message, 0, sizeof(message));
     message.magic = EDGE_ACQUISITION_MAGIC;

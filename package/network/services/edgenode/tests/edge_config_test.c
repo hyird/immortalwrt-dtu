@@ -116,6 +116,37 @@ static void test_valid_snapshot(void) {
                         "LITTLE_ENDIAN_BYTE_SWAP") == 0,
                  "nanopb byte order was truncated");
     edge_runtime_config_free(&runtime);
+
+    values[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_SL651;
+    values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_SL651;
+    strcpy(values[1].item.device.device_code, "0000000001");
+    values[2].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_SL651_ELEMENT;
+    values[2].which_item = iot_edge_v1_ConfigItem_sl651_element_tag;
+    memset(&values[2].item, 0, sizeof(values[2].item));
+    iot_edge_v1_Sl651ElementConfig *point = &values[2].item.sl651_element;
+    set_id(&point->device_id, sizeof(point->device_id.bytes), id);
+    strcpy(point->function_code, "E1"); strcpy(point->element_id, "custom");
+    strcpy(point->encoding, "BCD");
+    point->length = 2; point->digits = 2;
+    point->guide.size = 2; point->guide.bytes[0] = 0xAB; point->guide.bytes[1] = 0x12;
+    for (unsigned scenario = 0; scenario < 6; ++scenario) {
+        if (scenario == 1) { point->fixed_position = true; point->byte_offset = 8; point->guide.size = 0; }
+        if (scenario == 2) point->byte_offset = 65535;
+        if (scenario == 3) { point->byte_offset = 0; point->writable = true; }
+        if (scenario == 4) { point->byte_offset = 8; point->digits = 8; }
+        if (scenario == 5) { point->digits = 2; values[1].item.device.sl651_response_mode = 5; }
+        for (size_t index = 0; index < 3; ++index)
+            items[index].payload_size = encode_item(&values[index], payloads[index], sizeof(payloads[index]));
+        bool loaded = edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error));
+        require_true(loaded == (scenario < 2), "SL651 positioning/mode validation mismatch");
+        if (loaded) {
+            require_true(runtime.items[1].item.device.sl651_response_mode == 0,
+                         "legacy absent mode must retain zero/M1 default");
+            require_true(runtime.items[2].item.sl651_element.fixed_position == (scenario == 1),
+                         "positioning did not survive protobuf snapshot");
+            edge_runtime_config_free(&runtime);
+        }
+    }
 }
 
 static void test_unknown_item_rejected(void) {
