@@ -55,6 +55,8 @@ typedef struct {
     size_t references;
     size_t size;
     int64_t observed_at_ms;
+    uint8_t packet_id[16];
+    uint64_t sequence;
     uint8_t bytes[];
 } edge_acquisition_response;
 
@@ -76,6 +78,8 @@ struct edge_acquisition_link {
 
 struct edge_acquisition_device {
     iot_edge_v1_RawPacket *debug_request;
+    uint8_t received_packet_id[16];
+    int64_t received_packet_time;
     edge_acquisition *owner;
     edge_acquisition_link *link;
     uint8_t platform_id[16];
@@ -88,6 +92,7 @@ struct edge_acquisition_device {
     edge_modbus_read_group *modbus_groups;
     size_t modbus_group_count;
     edge_acquisition_response *read_response;
+    uint64_t response_sequence;
     edge_device_runtime runtime;
     edge_sl651_session *sl651;
     uint8_t sl651_station[5];
@@ -469,7 +474,7 @@ static int wait_fd(int fd, short events) {
     }
 }
 
-static void debug_packet(edge_acquisition_device *device, const char *direction,
+static void debug_packet_with_id(edge_acquisition_device *device, const uint8_t id[16], const char *direction,
                          const uint8_t *data, size_t size, bool identified, bool device_only) {
     if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
         !device->owner->debug || !data || !size) return;
@@ -478,7 +483,12 @@ static void debug_packet(edge_acquisition_device *device, const char *direction,
         packet.debug = true;
         packet.device_only = device_only;
         packet.packet_id.size = 16;
-        record_id((uint64_t)current_ms(), packet.packet_id.bytes);
+        memcpy(packet.packet_id.bytes, id, 16);
+        packet.payload_offset = (uint32_t)offset;
+        if (!strcmp(direction, "TX") && device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651) {
+            packet.reply_to_packet_id.size = 16;
+            memcpy(packet.reply_to_packet_id.bytes, device->received_packet_id, 16);
+        }
         packet.endpoint_id.size = 16;
         memcpy(packet.endpoint_id.bytes, device->endpoint->endpoint_id.bytes, 16);
         if (identified) { packet.device_id.size = 16; memcpy(packet.device_id.bytes, device->config->device_id.bytes, 16); }
@@ -489,6 +499,12 @@ static void debug_packet(edge_acquisition_device *device, const char *direction,
         memcpy(packet.payload.bytes, data+offset, packet.payload.size);
         device->owner->debug(device->owner->callback_context, device->platform_id, &packet);
     }
+}
+
+static void debug_packet(edge_acquisition_device *device, const char *direction,
+                         const uint8_t *data, size_t size, bool identified, bool device_only) {
+    uint8_t id[16]; record_id((uint64_t)current_ms(), id);
+    debug_packet_with_id(device, id, direction, data, size, identified, device_only);
 }
 
 static void debug_request_status(edge_acquisition_device *device, const char *status,
@@ -575,7 +591,7 @@ static bool read_exact(edge_acquisition_device *device, uint8_t *data, size_t si
             continue;
         if (count <= 0)
             return false;
-        debug_packet(device, "RX", data + offset, (size_t)count, true, false);
+        /* The completed protocol frame receives one ID in exchange(). */
         offset += (size_t)count;
     }
     return true;
@@ -961,6 +977,9 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
         }
     }
     if (received) {
+        record_id((uint64_t)current_ms(), device->received_packet_id);
+        device->received_packet_time = current_ms();
+        debug_packet_with_id(device, device->received_packet_id, "RX", response, *response_size, true, false);
         device->last_activity_at_ms = current_ms();
         edge_log_packet(log_source(device), "rx", device_label(device), response,
                         *response_size);
@@ -1092,8 +1111,10 @@ static bool retain_read_response(edge_acquisition_device *device,
     if (response == NULL)
         return false;
     response->references = 1U;
+    response->sequence = ++device->response_sequence;
     response->size = size;
-    response->observed_at_ms = current_ms();
+    response->observed_at_ms = device->received_packet_time;
+    memcpy(response->packet_id, device->received_packet_id, 16);
     memcpy(response->bytes, bytes, size);
     release_response(device->read_response);
     device->read_response = response;
@@ -1689,8 +1710,11 @@ static bool sl651_send(void *context, const uint8_t *bytes, size_t size) {
     }
     return true;
 }
-static void sl651_trace(void *context, const uint8_t *bytes, size_t size) {
-    debug_packet(context, "RX", bytes, size, true, true);
+static void sl651_trace(void *context, const uint8_t *bytes, size_t size, uint8_t packet_id[16]) {
+    edge_acquisition_device *device = context;
+    record_id((uint64_t)current_ms(), packet_id);
+    memcpy(device->received_packet_id, packet_id, 16);
+    debug_packet_with_id(device, packet_id, "RX", bytes, size, true, false);
 }
 static bool sl651_value(const iot_edge_v1_Sl651ElementConfig *element, const uint8_t *bytes,
                         size_t size, iot_edge_v1_ScalarValue *value) {
@@ -1822,9 +1846,10 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     const size_t value_parts = parts;
     const size_t frame_count = edge_sl651_report_frame_count(device->sl651);
     pb_bytes_array_t **raw_frames = calloc(frame_count, sizeof(*raw_frames));
+    pb_bytes_array_t **raw_ids = calloc(frame_count, sizeof(*raw_ids));
     bool queued = false;
     size_t raw_starts[257] = {0}, raw_parts = 0;
-    if (frame_count == 0 || raw_frames == NULL)
+    if (frame_count == 0 || raw_frames == NULL || raw_ids == NULL)
         goto report_cleanup;
     size_t raw_bytes = 0;
     for (size_t index = 0; index < frame_count; ++index) {
@@ -1841,6 +1866,10 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         raw_frames[index] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(size));
         if (raw_frames[index] == NULL)
             goto report_cleanup;
+        raw_ids[index] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(16));
+        if (raw_ids[index] == NULL) goto report_cleanup;
+        raw_ids[index]->size = 16;
+        memcpy(raw_ids[index]->bytes, edge_sl651_report_packet_id(device->sl651, index), 16);
         raw_frames[index]->size = (pb_size_t)size;
         memcpy(raw_frames[index]->bytes, bytes, size);
         raw_bytes += size + 8;
@@ -1881,6 +1910,8 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             record.values_count = (pb_size_t)(starts[part + 1] - starts[part]);
         } else {
             size_t raw_part = part - value_parts;
+            record.raw_packet_ids = raw_ids + raw_starts[raw_part];
+            record.raw_packet_ids_count = (pb_size_t)(raw_starts[raw_part + 1] - raw_starts[raw_part]);
             record.raw_payloads = raw_frames + raw_starts[raw_part];
             record.raw_payloads_count = (pb_size_t)(raw_starts[raw_part + 1] - raw_starts[raw_part]);
         }
@@ -1888,6 +1919,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             queued = false;
     }
 report_cleanup:
+    if (raw_ids != NULL) { for (size_t i = 0; i < frame_count; ++i) free(raw_ids[i]); free(raw_ids); }
     if (raw_frames != NULL) {
         for (size_t index = 0; index < frame_count; ++index)
             free(raw_frames[index]);
@@ -1964,90 +1996,130 @@ static void sl651_poll(edge_acquisition_device *device, uint64_t now) {
             edge_acquisition_device *previous = &device->owner->devices[j];
             if (previous->link == other->link && !memcmp(previous->platform_id, other->platform_id, 16)) first = false;
         }
-        if (first && other->endpoint->debug_enabled)
+        bool framed = (size_t)n >= 17 && bytes[0] == 0x7e && bytes[1] == 0x7e &&
+            ((((size_t)bytes[11] & 15U) << 8U) + bytes[12] + 17U == (size_t)n);
+        bool identified = false;
+        if (framed) for (size_t j = 0; j < device->owner->device_count; ++j) {
+            const edge_acquisition_device *candidate = &device->owner->devices[j];
+            if (candidate->sl651 && candidate->link == other->link &&
+                !memcmp(candidate->platform_id, other->platform_id, 16) &&
+                !memcmp(candidate->sl651_station, bytes + 3, 5)) identified = true;
+        }
+        if (first && other->endpoint->debug_enabled && !identified)
             debug_packet(other, "RX", bytes, (size_t)n, false, false);
         sl651_time(other, time);
         edge_sl651_receive(other->sl651, bytes, (size_t)n, now, time);
     }
 }
 
+/* Upload chunks share one logical report ID; the platform commits only after
+ * every chunk is present. Small cycles use one record directly. */
+static bool publish_acquisition_cycle(edge_acquisition_device *device,
+                                       const uint8_t platform_id[16],
+                                       iot_edge_v1_TelemetryRecord *record) {
+    size_t encoded = 0;
+    if (!pb_get_encoded_size(&encoded, iot_edge_v1_TelemetryRecord_fields, record))
+        return false;
+    if (encoded <= 14000)
+        return device->owner->telemetry(device->owner->callback_context, platform_id, record);
+    const size_t value_parts = (record->values_count + 7U) / 8U;
+    const size_t raw_parts = (record->raw_payloads_count + 1U) / 2U;
+    const size_t parts = value_parts + raw_parts;
+    if (parts > 256U) return false;
+    for (size_t index = 0; index < parts; ++index) {
+        iot_edge_v1_TelemetryRecord part = *record;
+        edge_protocol_set_bytes(&part.report_id, sizeof(part.report_id.bytes), record->record_id.bytes, 16);
+        uint8_t id[16]; record_id((uint64_t)current_ms(), id);
+        edge_protocol_set_bytes(&part.record_id, sizeof(part.record_id.bytes), id, 16);
+        part.part_index = (uint32_t)index;
+        part.part_count = (uint32_t)parts;
+        part.values_count = part.raw_payloads_count = part.raw_packet_ids_count = 0;
+        part.values = NULL; part.raw_payloads = NULL; part.raw_packet_ids = NULL;
+        if (index < value_parts) {
+            const size_t offset = index * 8U;
+            part.values = record->values + offset;
+            part.values_count = (pb_size_t)(record->values_count - offset);
+            if (part.values_count > 8U) part.values_count = 8U;
+        } else {
+            const size_t offset = (index - value_parts) * 2U;
+            part.raw_payloads = record->raw_payloads + offset;
+            part.raw_packet_ids = record->raw_packet_ids + offset;
+            part.raw_payloads_count = (pb_size_t)(record->raw_payloads_count - offset);
+            if (part.raw_payloads_count > 2U) part.raw_payloads_count = 2U;
+            part.raw_packet_ids_count = part.raw_payloads_count;
+        }
+        if (!pb_get_encoded_size(&encoded, iot_edge_v1_TelemetryRecord_fields, &part) || encoded > 14000 ||
+            !device->owner->telemetry(device->owner->callback_context, platform_id, &part)) return false;
+    }
+    return true;
+}
+
 static void device_report(void *context, const uint8_t platform_id[16],
-                          const uint8_t device_id[16],
-                          const edge_device_sample *sample) {
+                          const uint8_t device_id[16], const edge_device_sample *sample) {
     edge_acquisition_device *device = context;
     (void)sample;
-    for (size_t first = 0U; first < device->point_count; ++first) {
-        const edge_acquisition_point *point = &device->points[first];
-        if (!point->valid || point->response == NULL)
-            continue;
-        bool already_reported = false;
-        for (size_t previous = 0U; previous < first; ++previous) {
-            if (device->points[previous].valid &&
-                device->points[previous].response == point->response) {
-                already_reported = true;
-                break;
-            }
-        }
-        if (already_reported)
-            continue;
-        const edge_acquisition_response *response = point->response;
-        if (response->observed_at_ms > device->observed_at_ms)
-            device->observed_at_ms = response->observed_at_ms;
-        iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
-        record.values = calloc(device->point_count, sizeof(*record.values));
-        if (record.values == NULL) {
-            syslog(LOG_ERR, "cannot allocate complete telemetry record");
-            return;
-        }
-        uint8_t id[16];
-        record_id((uint64_t)device->observed_at_ms, id);
-        edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes), id, 16U);
-        edge_protocol_set_bytes(&record.device_id, sizeof(record.device_id.bytes),
-                                device->config->device_id.bytes,
-                                device->config->device_id.size);
-        edge_protocol_set_bytes(&record.endpoint_id, sizeof(record.endpoint_id.bytes),
-                                device->config->endpoint_id.bytes,
-                                device->config->endpoint_id.size);
-        record.protocol = device->config->protocol;
-        copy_text(record.function_code, sizeof(record.function_code),
-                  device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS
-                      ? "POLL" : "READ");
-        copy_text(record.function_name, sizeof(record.function_name), "定时采集");
-        copy_text(record.direction, sizeof(record.direction), "UP");
-        record.observed_at_ms = response->observed_at_ms;
-        edge_protocol_set_bytes(&record.raw_payload, sizeof(record.raw_payload.bytes),
-                                response->bytes, response->size);
-        pb_bytes_array_t *raw_frame = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(response->size));
-        if (raw_frame == NULL) {
-            free(record.values);
-            return;
-        }
-        raw_frame->size = (pb_size_t)response->size;
-        memcpy(raw_frame->bytes, response->bytes, response->size);
-        record.raw_payloads = &raw_frame;
-        record.raw_payloads_count = 1;
-        for (size_t index = first; index < device->point_count; ++index) {
-            if (device->points[index].valid && device->points[index].response == response)
-                record.values[record.values_count++] = device->points[index].value;
-        }
-        iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
-        acquisition_status_local(device->owner, platform_id, &status);
-        for (pb_size_t i = 0; i < status.devices_count; ++i) {
-            if (memcmp(status.devices[i].device_id.bytes, device_id, 16U) == 0) {
-                record.has_device_status = true;
-                record.device_status = status.devices[i];
-                break;
-            }
-        }
-        /* The callback only hands the record to the parent process; it is not a
-         * durable outbox confirmation. Do not turn this periodic path into an
-         * activity log. Delivery pressure is reported in heartbeat outbox state. */
-        if (record.values_count != 0U)
-            (void)device->owner->telemetry(device->owner->callback_context,
-                                           platform_id, &record);
-        free(raw_frame);
-        free(record.values);
+    iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
+    const size_t capacity = device->point_count;
+    record.values = calloc(capacity, sizeof(*record.values));
+    record.raw_payloads = calloc(capacity, sizeof(*record.raw_payloads));
+    record.raw_packet_ids = calloc(capacity, sizeof(*record.raw_packet_ids));
+    const edge_acquisition_response **responses = calloc(capacity, sizeof(*responses));
+    if (!record.values || !record.raw_payloads || !record.raw_packet_ids || !responses) goto cleanup;
+    for (size_t index = 0; index < capacity; ++index) {
+        const edge_acquisition_point *point = &device->points[index];
+        if (!point->valid || !point->response) continue;
+        record.values[record.values_count++] = point->value;
+        size_t raw = 0;
+        while (raw < record.raw_payloads_count && responses[raw] != point->response) ++raw;
+        if (raw < record.raw_payloads_count) continue;
+        responses[raw] = point->response;
+        ++record.raw_payloads_count;
     }
+    /* Point definitions may be in a different order from the read plan. */
+    for (size_t i = 1; i < record.raw_payloads_count; ++i) {
+        const edge_acquisition_response *response = responses[i];
+        size_t j = i;
+        while (j > 0 && responses[j-1]->sequence > response->sequence) {
+            responses[j] = responses[j-1]; --j;
+        }
+        responses[j] = response;
+    }
+    for (size_t raw = 0; raw < record.raw_payloads_count; ++raw) {
+        const edge_acquisition_response *response = responses[raw];
+        record.raw_payloads[raw] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(response->size));
+        record.raw_packet_ids[raw] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(16));
+        if (!record.raw_payloads[raw] || !record.raw_packet_ids[raw]) goto cleanup;
+        record.raw_payloads[raw]->size = (pb_size_t)response->size;
+        memcpy(record.raw_payloads[raw]->bytes, response->bytes, response->size);
+        record.raw_packet_ids[raw]->size = 16;
+        memcpy(record.raw_packet_ids[raw]->bytes, response->packet_id, 16);
+    }
+    record.raw_packet_ids_count = record.raw_payloads_count;
+    if (!record.values_count || !record.raw_payloads_count) goto cleanup;
+    record.observed_at_ms = responses[0]->observed_at_ms;
+    device->observed_at_ms = responses[record.raw_payloads_count-1]->observed_at_ms;
+    uint8_t id[16]; record_id((uint64_t)device->observed_at_ms, id);
+    edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes), id, 16);
+    edge_protocol_set_bytes(&record.device_id, sizeof(record.device_id.bytes), device->config->device_id.bytes, 16);
+    edge_protocol_set_bytes(&record.endpoint_id, sizeof(record.endpoint_id.bytes), device->config->endpoint_id.bytes, 16);
+    record.protocol = device->config->protocol;
+    copy_text(record.function_code, sizeof(record.function_code), "POLL");
+    copy_text(record.function_name, sizeof(record.function_name), "定时采集");
+    copy_text(record.direction, sizeof(record.direction), "UP");
+    iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
+    acquisition_status_local(device->owner, platform_id, &status);
+    for (pb_size_t i = 0; i < status.devices_count; ++i)
+        if (memcmp(status.devices[i].device_id.bytes, device_id, 16) == 0) {
+            record.has_device_status = true; record.device_status = status.devices[i]; break;
+        }
+    if (!publish_acquisition_cycle(device, platform_id, &record))
+        syslog(LOG_ERR, "cannot queue complete acquisition cycle");
+cleanup:
+    for (size_t index = 0; index < capacity; ++index) {
+        if (record.raw_payloads) free(record.raw_payloads[index]);
+        if (record.raw_packet_ids) free(record.raw_packet_ids[index]);
+    }
+    free(responses); free(record.raw_payloads); free(record.raw_packet_ids); free(record.values);
 }
 
 static iot_edge_v1_CommandState command_state(edge_command_result result) {

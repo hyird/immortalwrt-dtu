@@ -178,6 +178,7 @@ typedef struct {
     uint8_t *raw;
     size_t raw_size;
     unsigned retries;
+    uint8_t packet_id[16];
 } sl_packet;
 struct edge_sl651_session {
     unsigned mode;
@@ -382,6 +383,7 @@ static void consume_frame(edge_sl651_session *s, const edge_sl651_frame *f) {
         }
         memcpy(packet->raw, f->raw, f->raw_size);
         packet->raw_size = f->raw_size;
+        memcpy(packet->packet_id, f->packet_id, 16);
         memcpy(packet->bytes, f->body, f->body_size);
         packet->size = f->body_size;
         s->assembled_size += f->body_size;
@@ -425,11 +427,14 @@ static void drain(edge_sl651_session *s) {
         size_t n = (be16(s->receive + 11) & 0xFFFU) + 17;
         if (n > s->receive_size)
             break;
+        uint8_t packet_id[16] = {0};
         if (s->callbacks.trace && !memcmp(s->receive + 3, s->station, 5))
-            s->callbacks.trace(s->context, s->receive, n);
+            s->callbacks.trace(s->context, s->receive, n, packet_id);
         edge_sl651_frame frame;
-        if (edge_sl651_parse(s->receive, n, &frame))
+        if (edge_sl651_parse(s->receive, n, &frame)) {
+            memcpy(frame.packet_id, packet_id, 16);
             consume_frame(s, &frame);
+        }
         s->receive_size -= n;
         memmove(s->receive, s->receive + n, s->receive_size);
     }
@@ -525,6 +530,10 @@ bool edge_sl651_report_frame(const edge_sl651_session *s, size_t index,
     return *bytes != NULL && *size != 0;
 }
 
+const uint8_t *edge_sl651_report_packet_id(const edge_sl651_session *s, size_t index) {
+    if (index >= edge_sl651_report_frame_count(s)) return NULL;
+    return s->report.total ? s->packets[index].packet_id : s->report.packet_id;
+}
 bool edge_sl651_query(edge_sl651_session *s, const uint8_t id[16], uint8_t function,
                       const uint8_t *body, size_t size, uint64_t now, uint32_t timeout,
                       const uint8_t time[6]) {

@@ -472,6 +472,8 @@ message TelemetryValue {
 }
 
 message TelemetryRecord {
+  // One immutable receive ID per original frame; absent in legacy firmware.
+  repeated bytes raw_packet_ids = 18 [(nanopb).type = FT_POINTER];
   bytes record_id = 1 [(nanopb).max_size = 16];
   bytes device_id = 2 [(nanopb).max_size = 16];
   bytes endpoint_id = 3 [(nanopb).max_size = 16];
@@ -504,6 +506,8 @@ message TelemetryAck {
 }
 
 message RawPacket {
+  uint32 payload_offset = 12;
+  bytes reply_to_packet_id = 13 [(nanopb).max_size = 16];
   string status = 10 [(nanopb).max_length = 32];
   string reason = 11 [(nanopb).max_length = 128];
   bool device_only = 9;

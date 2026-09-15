@@ -315,24 +315,26 @@ static bool store_response_record(void *context, const uint8_t platform_id[16],
                                   const iot_edge_v1_TelemetryRecord *record) {
     (void)context;
     (void)platform_id;
-    assert(response_records < 2U);
-    const unsigned index = response_records++;
+    assert(response_records++ == 0U);
     assert(record->protocol == (s7_responses ? iot_edge_v1_Protocol_PROTOCOL_S7
                                             : iot_edge_v1_Protocol_PROTOCOL_MODBUS));
-    assert(record->values_count == (!s7_responses && index == 0U ? 2U : 1U));
-    assert(strcmp(record->values[0].element_id, index == 0U ? "holding-1" : "holding-2") == 0);
-    assert(record->values[0].value.which_value == iot_edge_v1_ScalarValue_double_value_tag);
-    assert(record->values[0].value.value.double_value == 100.0 + index);
-    if (record->values_count == 2U) {
-        assert(strcmp(record->values[1].element_id, "holding-copy") == 0);
-        assert(record->values[1].value.value.double_value == 100.0);
+    assert(record->values_count == (s7_responses ? 2U : 3U));
+    assert(strcmp(record->values[0].element_id, "holding-1") == 0);
+    assert(record->values[0].value.value.double_value == 100.0);
+    assert(strcmp(record->values[1].element_id, "holding-2") == 0);
+    assert(record->values[1].value.value.double_value == 101.0);
+    if (!s7_responses) {
+        assert(strcmp(record->values[2].element_id, "holding-copy") == 0);
+        assert(record->values[2].value.value.double_value == 100.0);
     }
-    assert(record->raw_payload.size == expected_response_size);
-    assert(record->raw_payloads_count == 1);
-    assert(record->raw_payloads[0]->size == expected_response_size);
-    assert(memcmp(record->raw_payloads[0]->bytes, expected_responses[index], expected_response_size) == 0);
-    assert(memcmp(record->raw_payload.bytes, expected_responses[index],
-                  expected_response_size) == 0);
+    assert(record->raw_payload.size == 0);
+    assert(record->raw_payloads_count == 2 && record->raw_packet_ids_count == 2);
+    for (unsigned index = 0; index < 2; ++index) {
+        assert(record->raw_payloads[index]->size == expected_response_size);
+        assert(memcmp(record->raw_payloads[index]->bytes, expected_responses[index], expected_response_size) == 0);
+        assert(record->raw_packet_ids[index]->size == 16);
+    }
+    assert(memcmp(record->raw_packet_ids[0]->bytes, record->raw_packet_ids[1]->bytes, 16) != 0);
     assert(record->observed_at_ms > 0);
     return true;
 }
@@ -354,7 +356,7 @@ static void record_debug(void *context, const uint8_t platform_id[16], const iot
     if (!strcmp(packet->direction, "RX")) debug_rx += packet->payload.size;
     else { assert(!strcmp(packet->direction, "TX")); debug_tx += packet->payload.size; }
 }
-static void verify_separate_response_records(bool s7, bool link_debug, bool device_debug) {
+static void verify_complete_acquisition_record(bool s7, bool link_debug, bool device_debug) {
     debug_rx = debug_tx = debug_success = 0;
     response_records = 0;
     s7_responses = s7;
@@ -452,12 +454,12 @@ static void verify_separate_response_records(bool s7, bool link_debug, bool devi
         assert(send(fd, response, 11, 0) == 11);
     }
     const uint64_t deadline = monotonic_ms() + 3000;
-    while (response_records < 2 && monotonic_ms() < deadline) {
+    while (response_records < 1 && monotonic_ms() < deadline) {
         struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
         (void)poll(&event, 1, 100);
         edge_acquisition_tick(acquisition, monotonic_ms());
     }
-    assert(response_records == 2);
+    assert(response_records == 1);
     if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); }
     else { assert(debug_rx == 0 && debug_tx == 0); }
     edge_acquisition_destroy(acquisition);
@@ -483,8 +485,8 @@ int main(void) {
     verify_shared_resources();
     verify_sl651_commit();
     for (unsigned flags = 0; flags < 4; ++flags) {
-        verify_separate_response_records(false, (flags & 1) != 0, (flags & 2) != 0);
-        verify_separate_response_records(true, (flags & 1) != 0, (flags & 2) != 0);
+        verify_complete_acquisition_record(false, (flags & 1) != 0, (flags & 2) != 0);
+        verify_complete_acquisition_record(true, (flags & 1) != 0, (flags & 2) != 0);
     }
     return 0;
 }

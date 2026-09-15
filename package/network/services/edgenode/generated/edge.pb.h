@@ -534,6 +534,9 @@ typedef struct _iot_edge_v1_TelemetryRecord {
     iot_edge_v1_TelemetryRecord_report_id_t report_id;
     uint32_t part_index;
     uint32_t part_count;
+    /* One immutable receive ID per original frame; absent in legacy firmware. */
+    pb_size_t raw_packet_ids_count;
+    pb_bytes_array_t **raw_packet_ids;
 } iot_edge_v1_TelemetryRecord;
 
 typedef struct _iot_edge_v1_TelemetryBatch {
@@ -551,6 +554,7 @@ typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_RawPacket_packet_id_t;
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_RawPacket_endpoint_id_t;
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_RawPacket_device_id_t;
 typedef PB_BYTES_ARRAY_T(4096) iot_edge_v1_RawPacket_payload_t;
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_RawPacket_reply_to_packet_id_t;
 typedef struct _iot_edge_v1_RawPacket {
     iot_edge_v1_RawPacket_packet_id_t packet_id;
     iot_edge_v1_RawPacket_endpoint_id_t endpoint_id;
@@ -564,6 +568,8 @@ typedef struct _iot_edge_v1_RawPacket {
     bool device_only;
     char status[33];
     char reason[129];
+    uint32_t payload_offset;
+    iot_edge_v1_RawPacket_reply_to_packet_id_t reply_to_packet_id;
 } iot_edge_v1_RawPacket;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_RawPacketAck_packet_id_t;
@@ -1106,10 +1112,10 @@ extern "C" {
 #define iot_edge_v1_ConfigRejected_init_default  {0, "", "", 0}
 #define iot_edge_v1_ScalarValue_init_default     {_iot_edge_v1_ValueKind_MIN, 0, {0}}
 #define iot_edge_v1_TelemetryValue_init_default  {"", "", "", false, iot_edge_v1_ScalarValue_init_default, NULL, ""}
-#define iot_edge_v1_TelemetryRecord_init_default {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, {0, {0}}, false, iot_edge_v1_DeviceStatus_init_default, {0, {0}}, 0, NULL, {0, {0}}, 0, 0}
+#define iot_edge_v1_TelemetryRecord_init_default {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, {0, {0}}, false, iot_edge_v1_DeviceStatus_init_default, {0, {0}}, 0, NULL, {0, {0}}, 0, 0, 0, NULL}
 #define iot_edge_v1_TelemetryBatch_init_default  {0, {iot_edge_v1_TelemetryRecord_init_default}}
 #define iot_edge_v1_TelemetryAck_init_default    {0, {{0, {0}}}}
-#define iot_edge_v1_RawPacket_init_default       {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", ""}
+#define iot_edge_v1_RawPacket_init_default       {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", "", 0, {0, {0}}}
 #define iot_edge_v1_RawPacketAck_init_default    {{0, {0}}}
 #define iot_edge_v1_CommandValue_init_default    {"", false, iot_edge_v1_ScalarValue_init_default}
 #define iot_edge_v1_CommandRequest_init_default  {{0, {0}}, {0, {0}}, 0, {iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default, iot_edge_v1_CommandValue_init_default}, 0, 0, 0, 0}
@@ -1174,10 +1180,10 @@ extern "C" {
 #define iot_edge_v1_ConfigRejected_init_zero     {0, "", "", 0}
 #define iot_edge_v1_ScalarValue_init_zero        {_iot_edge_v1_ValueKind_MIN, 0, {0}}
 #define iot_edge_v1_TelemetryValue_init_zero     {"", "", "", false, iot_edge_v1_ScalarValue_init_zero, NULL, ""}
-#define iot_edge_v1_TelemetryRecord_init_zero    {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, {0, {0}}, false, iot_edge_v1_DeviceStatus_init_zero, {0, {0}}, 0, NULL, {0, {0}}, 0, 0}
+#define iot_edge_v1_TelemetryRecord_init_zero    {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, {0, {0}}, false, iot_edge_v1_DeviceStatus_init_zero, {0, {0}}, 0, NULL, {0, {0}}, 0, 0, 0, NULL}
 #define iot_edge_v1_TelemetryBatch_init_zero     {0, {iot_edge_v1_TelemetryRecord_init_zero}}
 #define iot_edge_v1_TelemetryAck_init_zero       {0, {{0, {0}}}}
-#define iot_edge_v1_RawPacket_init_zero          {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", ""}
+#define iot_edge_v1_RawPacket_init_zero          {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", "", 0, {0, {0}}}
 #define iot_edge_v1_RawPacketAck_init_zero       {{0, {0}}}
 #define iot_edge_v1_CommandValue_init_zero       {"", false, iot_edge_v1_ScalarValue_init_zero}
 #define iot_edge_v1_CommandRequest_init_zero     {{0, {0}}, {0, {0}}, 0, {iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero, iot_edge_v1_CommandValue_init_zero}, 0, 0, 0, 0}
@@ -1474,6 +1480,7 @@ extern "C" {
 #define iot_edge_v1_TelemetryRecord_report_id_tag 15
 #define iot_edge_v1_TelemetryRecord_part_index_tag 16
 #define iot_edge_v1_TelemetryRecord_part_count_tag 17
+#define iot_edge_v1_TelemetryRecord_raw_packet_ids_tag 18
 #define iot_edge_v1_TelemetryBatch_records_tag   1
 #define iot_edge_v1_TelemetryAck_accepted_record_ids_tag 1
 #define iot_edge_v1_RawPacket_packet_id_tag      1
@@ -1487,6 +1494,8 @@ extern "C" {
 #define iot_edge_v1_RawPacket_device_only_tag    9
 #define iot_edge_v1_RawPacket_status_tag         10
 #define iot_edge_v1_RawPacket_reason_tag         11
+#define iot_edge_v1_RawPacket_payload_offset_tag 12
+#define iot_edge_v1_RawPacket_reply_to_packet_id_tag 13
 #define iot_edge_v1_RawPacketAck_packet_id_tag   1
 #define iot_edge_v1_CommandValue_element_id_tag  1
 #define iot_edge_v1_CommandValue_expected_tag    2
@@ -2079,7 +2088,8 @@ X(a, STATIC,   SINGULAR, BYTES,    model_id,         12) \
 X(a, POINTER,  REPEATED, BYTES,    raw_payloads,     14) \
 X(a, STATIC,   SINGULAR, BYTES,    report_id,        15) \
 X(a, STATIC,   SINGULAR, UINT32,   part_index,       16) \
-X(a, STATIC,   SINGULAR, UINT32,   part_count,       17)
+X(a, STATIC,   SINGULAR, UINT32,   part_count,       17) \
+X(a, POINTER,  REPEATED, BYTES,    raw_packet_ids,   18)
 #define iot_edge_v1_TelemetryRecord_CALLBACK NULL
 #define iot_edge_v1_TelemetryRecord_DEFAULT NULL
 #define iot_edge_v1_TelemetryRecord_values_MSGTYPE iot_edge_v1_TelemetryValue
@@ -2107,7 +2117,9 @@ X(a, STATIC,   SINGULAR, BOOL,     debug,             7) \
 X(a, STATIC,   SINGULAR, STRING,   direction,         8) \
 X(a, STATIC,   SINGULAR, BOOL,     device_only,       9) \
 X(a, STATIC,   SINGULAR, STRING,   status,           10) \
-X(a, STATIC,   SINGULAR, STRING,   reason,           11)
+X(a, STATIC,   SINGULAR, STRING,   reason,           11) \
+X(a, STATIC,   SINGULAR, UINT32,   payload_offset,   12) \
+X(a, STATIC,   SINGULAR, BYTES,    reply_to_packet_id,  13)
 #define iot_edge_v1_RawPacket_CALLBACK NULL
 #define iot_edge_v1_RawPacket_DEFAULT NULL
 
@@ -2694,7 +2706,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_PlatformConfigResult_size    279
 #define iot_edge_v1_Pong_size                    11
 #define iot_edge_v1_RawPacketAck_size            18
-#define iot_edge_v1_RawPacket_size               4417
+#define iot_edge_v1_RawPacket_size               4441
 #define iot_edge_v1_S7AreaConfig_size            310
 #define iot_edge_v1_ScalarValue_size             261
 #define iot_edge_v1_SerialCapability_size        168
