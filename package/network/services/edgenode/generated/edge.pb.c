@@ -60,6 +60,12 @@ PB_BIND(iot_edge_v1_EndpointConfig, iot_edge_v1_EndpointConfig, 2)
 PB_BIND(iot_edge_v1_DeviceConfig, iot_edge_v1_DeviceConfig, 2)
 
 
+PB_BIND(iot_edge_v1_IndustrialConnectionConfig, iot_edge_v1_IndustrialConnectionConfig, AUTO)
+
+
+PB_BIND(iot_edge_v1_IndustrialPointConfig, iot_edge_v1_IndustrialPointConfig, 2)
+
+
 PB_BIND(iot_edge_v1_ModbusRegisterConfig, iot_edge_v1_ModbusRegisterConfig, 2)
 
 

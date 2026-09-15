@@ -51,9 +51,9 @@ bool edge_device_runtime_init(edge_device_runtime *runtime,
     if (runtime == NULL || platform_id == NULL || device_id == NULL || driver == NULL ||
         driver->connect == NULL || driver->read == NULL || driver->report == NULL ||
         driver->command_complete == NULL || report_interval_sec == 0U ||
-        (protocol != EDGE_DEVICE_MODBUS && protocol != EDGE_DEVICE_S7) ||
+        (protocol < EDGE_DEVICE_MODBUS || protocol > EDGE_DEVICE_DLT645) ||
         (io_interval_ms != 0U && io_interval_ms != EDGE_DTU_IO_PERIOD_MS) ||
-        (protocol == EDGE_DEVICE_S7 && driver->handshake == NULL))
+        ((protocol == EDGE_DEVICE_S7 || protocol == EDGE_DEVICE_FINS) && driver->handshake == NULL))
         return false;
 
     memset(runtime, 0, sizeof(*runtime));
@@ -89,7 +89,7 @@ static edge_io_result ensure_ready(edge_device_runtime *runtime) {
             return connected;
         runtime->connected = true;
     }
-    if (runtime->protocol == EDGE_DEVICE_S7 && !runtime->handshaken) {
+    if ((runtime->protocol == EDGE_DEVICE_S7 || runtime->protocol == EDGE_DEVICE_FINS) && !runtime->handshaken) {
         const edge_io_result handshaken = runtime->driver.handshake(runtime->driver_context);
         if (handshaken != EDGE_IO_OK)
             return handshaken;
@@ -120,7 +120,7 @@ static void handle_no_response(edge_device_runtime *runtime) {
      * timeout: some gateways send a banner or delayed response on the same
      * TCP stream and must not be forced through a reconnect loop.
      */
-    if (runtime->protocol == EDGE_DEVICE_S7)
+    if (runtime->protocol != EDGE_DEVICE_MODBUS)
         close_connection(runtime);
 }
 

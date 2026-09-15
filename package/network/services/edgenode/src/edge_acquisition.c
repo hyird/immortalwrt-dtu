@@ -34,6 +34,7 @@
 #include "edge_process.h"
 #include "edge_protocol.h"
 #include "edge_s7.h"
+#include "edge_industrial.h"
 #include "edge_sl651.h"
 #include "log.h"
 #include "pb_decode.h"
@@ -51,12 +52,13 @@
 typedef struct edge_acquisition_device edge_acquisition_device;
 typedef struct edge_acquisition_link edge_acquisition_link;
 
-typedef struct {
+typedef struct edge_acquisition_response {
     size_t references;
     size_t size;
     int64_t observed_at_ms;
     uint8_t packet_id[16];
     uint64_t sequence;
+    struct edge_acquisition_response *previous;
     uint8_t bytes[];
 } edge_acquisition_response;
 
@@ -74,6 +76,9 @@ struct edge_acquisition_link {
     bool owner_bootstrap;
     int fd;
     int listen_fd;
+    bool fins_ready;
+    uint32_t fins_source_node, fins_destination_node;
+    uint64_t generation;
 };
 
 struct edge_acquisition_device {
@@ -114,6 +119,8 @@ struct edge_acquisition_device {
     char last_error[128];
     bool has_last_io_result;
     bool s7_handshake_logged;
+    iot_edge_v1_IndustrialConnectionConfig industrial;
+    uint64_t industrial_generation;
     bool link_state_known;
     bool link_up;
 };
@@ -230,13 +237,19 @@ static uint64_t monotonic_milliseconds(void) {
 static const char *protocol_name(const edge_acquisition_device *device) {
     if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651)
         return "SL651";
-    return device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ? "S7" : "Modbus";
+    return device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ? "S7" :
+        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? "MC" :
+        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS ? "FINS" :
+        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645 ? "DLT645" : "Modbus";
 }
 
 static const char *log_source(const edge_acquisition_device *device) {
     if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651)
         return "sl651";
-    return device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ? "s7" : "modbus";
+    return device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ? "s7" :
+        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? "mc" :
+        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS ? "fins" :
+        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645 ? "dlt645" : "modbus";
 }
 
 static const char *mode_name(iot_edge_v1_LinkMode mode) {
@@ -550,7 +563,8 @@ static bool write_all(edge_acquisition_device *device, const uint8_t *data, size
             continue;
         if (count <= 0)
             return false;
-        if (!device->debug_request) debug_packet(device, "TX", data + offset, (size_t)count, true, false);
+        if (!device->debug_request && device->config->protocol != iot_edge_v1_Protocol_PROTOCOL_DLT645)
+            debug_packet(device, "TX", data + offset, (size_t)count, true, false);
         offset += (size_t)count;
     }
     return true;
@@ -815,6 +829,8 @@ static edge_io_result device_connect(void *context) {
         log_io_result(device, EDGE_IO_OFFLINE, "connect");
         return EDGE_IO_OFFLINE;
     }
+    device->link->fins_ready = false;
+    ++device->link->generation;
     if (device->config->protocol != iot_edge_v1_Protocol_PROTOCOL_S7)
         log_io_result(device, EDGE_IO_OK, "connect");
     return EDGE_IO_OK;
@@ -825,6 +841,7 @@ static void device_disconnect(void *context) {
     close_fd(&device->link->fd);
     device->s7_pdu_length = 0U;
     device->s7_handshake_logged = false;
+    device->industrial = device->config->industrial;
 }
 
 static bool receive_modbus(edge_acquisition_device *device, uint8_t *frame,
@@ -896,6 +913,21 @@ static bool receive_s7(edge_acquisition_device *device, uint8_t *frame,
     return true;
 }
 
+static bool receive_industrial(edge_acquisition_device *device, uint8_t *frame,
+                                size_t capacity, size_t *size) {
+    size_t header = edge_industrial_header_size(device->config);
+    if (capacity < header || !read_exact(device, frame, 1)) return false;
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645) {
+        unsigned wake = 0;
+        while (frame[0] == 0xfe && ++wake <= 4)
+            if (!read_exact(device, frame, 1)) return false;
+    }
+    if (!read_exact(device, frame + 1, header - 1)) return false;
+    size_t length = edge_industrial_frame_size(device->config, frame, header);
+    if (length < header || length > capacity || !read_exact(device, frame + header, length - header)) return false;
+    *size = length; return true;
+}
+
 static bool modbus_tcp_response_matches_request(const uint8_t *request,
                                                  size_t request_size,
                                                  const uint8_t *response,
@@ -942,7 +974,15 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
                 break;
         }
     }
-    debug_request_begin(device, request, request_size);
+    uint8_t sanitized[EDGE_INDUSTRIAL_MAX_FRAME];
+    const uint8_t *logged_request = request;
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645) {
+        if (request_size > sizeof(sanitized)) return false;
+        memcpy(sanitized, request, request_size);
+        edge_industrial_redact(device->config->protocol, sanitized, request_size);
+        logged_request = sanitized;
+    }
+    debug_request_begin(device, logged_request, request_size);
     if (!write_all(device, request, request_size)) {
         debug_request_status(device, "failed", "socket_write_failed", true);
         if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET ||
@@ -954,11 +994,13 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
         return false;
     }
     device->last_activity_at_ms = current_ms();
-    edge_log_packet(log_source(device), "tx", device_label(device), request, request_size);
+    edge_log_packet(log_source(device), "tx", device_label(device), logged_request, request_size);
     debug_request_status(device, "waiting", "", false);
     bool received = false;
     if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
         received = receive_s7(device, response, capacity, response_size);
+    } else if (edge_industrial_protocol(device->config->protocol)) {
+        received = receive_industrial(device, response, capacity, response_size);
     } else {
         unsigned dropped = 0U;
         for (;;) {
@@ -977,13 +1019,20 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
         }
     }
     if (received) {
+        const uint8_t *logged_response = response;
+        if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645) {
+            memcpy(sanitized, response, *response_size);
+            edge_industrial_redact(device->config->protocol, sanitized, *response_size);
+            logged_response = sanitized;
+        }
         record_id((uint64_t)current_ms(), device->received_packet_id);
         device->received_packet_time = current_ms();
-        debug_packet_with_id(device, device->received_packet_id, "RX", response, *response_size, true, false);
+        debug_packet_with_id(device, device->received_packet_id, "RX", logged_response, *response_size, true, false);
         device->last_activity_at_ms = current_ms();
-        edge_log_packet(log_source(device), "rx", device_label(device), response,
+        edge_log_packet(log_source(device), "rx", device_label(device), logged_response,
                         *response_size);
-    } else if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
+    } else if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ||
+               edge_industrial_protocol(device->config->protocol)) {
         close_fd(&device->link->fd);
     }
     if (!received) debug_request_status(device, "failed", "response_timeout_or_connection_closed", true);
@@ -1004,6 +1053,30 @@ static bool parse_hex16(const char *text, uint16_t *value) {
 
 static edge_io_result device_handshake(void *context) {
     edge_acquisition_device *device = context;
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS) {
+        device->industrial = device->config->industrial;
+        if (device->link->fins_ready) {
+            if (device->industrial.fins_source_node &&
+                device->industrial.fins_source_node != device->link->fins_source_node) return EDGE_IO_PROTOCOL_ERROR;
+            device->industrial.fins_source_node = device->link->fins_source_node;
+            if (!device->industrial.fins_destination_node)
+                device->industrial.fins_destination_node = device->link->fins_destination_node;
+            device->industrial_generation = device->link->generation;
+            return EDGE_IO_OK;
+        }
+        uint8_t request[20], response[24]; size_t size = 0;
+        size_t sent = edge_fins_node_request((uint8_t)device->industrial.fins_source_node, request, sizeof(request));
+        if (!sent || !exchange(device, request, sent, response, sizeof(response), &size)) return EDGE_IO_NO_RESPONSE;
+        if (!edge_fins_node_response(response, size, &device->industrial)) {
+            debug_request_status(device, "failed", "fins_node_negotiation_failed", true);
+            close_fd(&device->link->fd); return EDGE_IO_OFFLINE;
+        }
+        device->link->fins_ready = true;
+        device->link->fins_source_node = device->industrial.fins_source_node;
+        device->link->fins_destination_node = response[23];
+        device->industrial_generation = device->link->generation;
+        debug_request_status(device, "success", "", true); return EDGE_IO_OK;
+    }
     uint16_t local = 0x0100U;
     uint16_t remote = 0U;
     if (strcmp(device->config->s7_connection_mode, "TSAP") == 0) {
@@ -1099,8 +1172,10 @@ static edge_s7_address s7_address(const iot_edge_v1_S7AreaConfig *point) {
 }
 
 static void release_response(edge_acquisition_response *response) {
-    if (response != NULL && --response->references == 0U)
+    if (response != NULL && --response->references == 0U) {
+        release_response(response->previous);
         free(response);
+    }
 }
 
 static bool retain_read_response(edge_acquisition_device *device,
@@ -1111,6 +1186,7 @@ static bool retain_read_response(edge_acquisition_device *device,
     if (response == NULL)
         return false;
     response->references = 1U;
+    response->previous = NULL;
     response->sequence = ++device->response_sequence;
     response->size = size;
     response->observed_at_ms = device->received_packet_time;
@@ -1119,6 +1195,43 @@ static bool retain_read_response(edge_acquisition_device *device,
     release_response(device->read_response);
     device->read_response = response;
     return true;
+}
+
+static edge_io_result read_industrial_point(edge_acquisition_device *device,
+    const iot_edge_v1_IndustrialPointConfig *point, uint8_t *data, size_t capacity, size_t *size) {
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS &&
+        device->industrial_generation != device->link->generation) {
+        edge_io_result ready = device_handshake(device);
+        if (ready != EDGE_IO_OK) return ready;
+    }
+    uint8_t request[EDGE_INDUSTRIAL_MAX_FRAME], response[EDGE_INDUSTRIAL_MAX_FRAME];
+    size_t wire_size = 0, total = 0;
+    for (unsigned sequence = 0; sequence <= 255; ++sequence) {
+        size_t request_size = edge_industrial_request(device->config, &device->industrial, point,
+            ++device->transaction, (uint8_t)sequence, NULL, 0, request, sizeof(request));
+        size_t response_size = 0, count = 0; bool more = false;
+        if (!request_size) return EDGE_IO_PROTOCOL_ERROR;
+        if (!exchange(device, request, request_size, response, sizeof(response), &response_size)) return EDGE_IO_NO_RESPONSE;
+        if (!edge_industrial_response(device->config, request, request_size, response, response_size,
+                data + total, capacity - total, &count, &more) || response_size > 4096 - wire_size) {
+            debug_request_status(device, "failed", "industrial_read_invalid", true);
+            close_fd(&device->link->fd); return EDGE_IO_OFFLINE;
+        }
+        edge_acquisition_response *previous = sequence ? device->read_response : NULL;
+        if (previous) ++previous->references;
+        if (!retain_read_response(device, response, response_size)) {
+            release_response(previous); return EDGE_IO_PROTOCOL_ERROR;
+        }
+        device->read_response->previous = previous;
+        wire_size += response_size; total += count;
+        if (total > edge_industrial_width(point) || (more && total == edge_industrial_width(point))) return EDGE_IO_PROTOCOL_ERROR;
+        debug_request_status(device, "success", "", true);
+        if (!more) {
+            if (total != edge_industrial_width(point)) return EDGE_IO_PROTOCOL_ERROR;
+            *size = total; return EDGE_IO_OK;
+        }
+    }
+    return EDGE_IO_PROTOCOL_ERROR;
 }
 
 static edge_io_result read_modbus_range(edge_acquisition_device *device,
@@ -1289,6 +1402,25 @@ static bool decode_scalar(const iot_edge_v1_ConfigItem *item, const uint8_t *raw
         decimals = point->decimals;
         order_bytes(ordered, raw, size, point->byte_order);
         raw = ordered;
+    } else if (item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag) {
+        const iot_edge_v1_IndustrialPointConfig *point = &item->item.industrial_point;
+        type = point->data_type;
+        if (!strcmp(type, "BCD") || !strcmp(type, "BCD_SIGNED") || !strcmp(type, "HEX")) {
+            *value = (iot_edge_v1_ScalarValue)iot_edge_v1_ScalarValue_init_zero;
+            if (!strcmp(type, "HEX")) {
+                if (size != point->length || size > sizeof(value->value.bytes_value.bytes)) return false;
+                value->kind = iot_edge_v1_ValueKind_VALUE_BYTES;
+                value->which_value = iot_edge_v1_ScalarValue_bytes_value_tag;
+                value->value.bytes_value.size = (pb_size_t)size;
+                memcpy(value->value.bytes_value.bytes, raw, size);
+                return true;
+            }
+            value->kind = iot_edge_v1_ValueKind_VALUE_DECIMAL;
+            value->which_value = iot_edge_v1_ScalarValue_decimal_value_tag;
+            return edge_meter_decode(point, raw, size, value->value.decimal_value, sizeof(value->value.decimal_value));
+        }
+        scale = point->scale; decimals = point->decimals;
+        order_bytes(ordered, raw, size, point->byte_order); raw = ordered;
     } else {
         const iot_edge_v1_S7AreaConfig *point = &item->item.s7_area;
         type = point->data_type;
@@ -1384,6 +1516,11 @@ static void fill_point_value(edge_acquisition_point *point, const uint8_t *raw, 
         copy_text(point->value.element_id, sizeof(point->value.element_id), config->element_id);
         copy_text(point->value.name, sizeof(point->value.name), config->name);
         copy_text(point->value.unit, sizeof(point->value.unit), config->unit);
+    } else if (point->item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag) {
+        const iot_edge_v1_IndustrialPointConfig *config = &point->item->item.industrial_point;
+        copy_text(point->value.element_id, sizeof(point->value.element_id), config->element_id);
+        copy_text(point->value.name, sizeof(point->value.name), config->name);
+        copy_text(point->value.unit, sizeof(point->value.unit), config->unit);
     } else {
         const iot_edge_v1_S7AreaConfig *config = &point->item->item.s7_area;
         copy_text(point->value.element_id, sizeof(point->value.element_id), config->element_id);
@@ -1446,8 +1583,9 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
         edge_acquisition_point *point = &device->points[index];
         uint8_t raw[EDGE_DEVICE_VALUE_MAX];
         size_t raw_size = 0U;
-        edge_io_result result = read_s7_point(device, &point->item->item.s7_area,
-                                              raw, sizeof(raw), &raw_size);
+        edge_io_result result = point->item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag
+            ? read_industrial_point(device, &point->item->item.industrial_point, raw, sizeof(raw), &raw_size)
+            : read_s7_point(device, &point->item->item.s7_area, raw, sizeof(raw), &raw_size);
         if (result != EDGE_IO_OK) {
             log_io_result(device, result, "read");
             return result;
@@ -1467,7 +1605,8 @@ static edge_acquisition_point *find_point(edge_acquisition_device *device,
         const iot_edge_v1_ConfigItem *item = device->points[index].item;
         const char *current = item->which_item == iot_edge_v1_ConfigItem_modbus_register_tag
                                   ? item->item.modbus_register.element_id
-                                  : item->item.s7_area.element_id;
+                                  : item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag
+                                      ? item->item.industrial_point.element_id : item->item.s7_area.element_id;
         if (strcmp(current, element_id) == 0)
             return &device->points[index];
     }
@@ -1520,6 +1659,11 @@ static bool encode_scalar(const iot_edge_v1_ConfigItem *item, const char *text,
         width = (size_t)item->item.modbus_register.quantity * 2U;
         if (strcmp(type, "BOOL") == 0)
             width = 1U;
+    } else if (item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag) {
+        const iot_edge_v1_IndustrialPointConfig *point = &item->item.industrial_point;
+        type = point->data_type; order = point->byte_order; width = edge_industrial_width(point);
+        if (!strcmp(type, "BCD") || !strcmp(type, "BCD_SIGNED") || !strcmp(type, "HEX"))
+            return edge_meter_encode(point, text, output, capacity, size);
     } else {
         type = item->item.s7_area.data_type;
         width = item->item.s7_area.size;
@@ -1634,6 +1778,27 @@ static edge_io_result write_s7(edge_acquisition_device *device,
     return read_s7_point(device, point, actual->bytes, sizeof(actual->bytes), &actual->size);
 }
 
+static edge_io_result write_industrial(edge_acquisition_device *device,
+    const iot_edge_v1_IndustrialPointConfig *point, const edge_write_command *command, edge_device_sample *actual) {
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS &&
+        device->industrial_generation != device->link->generation) {
+        edge_io_result ready = device_handshake(device);
+        if (ready != EDGE_IO_OK) return ready;
+    }
+    uint8_t request[EDGE_INDUSTRIAL_MAX_FRAME], response[EDGE_INDUSTRIAL_MAX_FRAME];
+    size_t n = edge_industrial_request(device->config, &device->industrial, point, ++device->transaction,
+        0, command->value, command->value_size, request, sizeof(request));
+    size_t received = 0, ignored = 0; bool more = false;
+    if (!n) return EDGE_IO_PROTOCOL_ERROR;
+    if (!exchange(device, request, n, response, sizeof(response), &received)) return EDGE_IO_NO_RESPONSE;
+    if (!edge_industrial_response(device->config, request, n, response, received, NULL, 0, &ignored, &more)) {
+        debug_request_status(device, "failed", "industrial_write_invalid", true);
+        close_fd(&device->link->fd); return EDGE_IO_OFFLINE;
+    }
+    debug_request_status(device, "success", "", true);
+    return read_industrial_point(device, point, actual->bytes, sizeof(actual->bytes), &actual->size);
+}
+
 static edge_io_result device_write_readback(void *context,
                                              const edge_write_command *command,
                                              edge_device_sample *actual) {
@@ -1648,6 +1813,8 @@ static edge_io_result device_write_readback(void *context,
                                       ? write_modbus(device,
                                             &point->item->item.modbus_register,
                                             command, actual)
+                                      : point->item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag
+                                          ? write_industrial(device, &point->item->item.industrial_point, command, actual)
                                       : write_s7(device, &point->item->item.s7_area,
                                             command, actual);
     if (result == EDGE_IO_OK)
@@ -2060,20 +2227,28 @@ static void device_report(void *context, const uint8_t platform_id[16],
     (void)sample;
     iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
     const size_t capacity = device->point_count;
+    size_t raw_capacity = 0;
+    for (size_t index = 0; index < capacity; ++index)
+        if (device->points[index].valid)
+            for (const edge_acquisition_response *part = device->points[index].response; part; part = part->previous)
+                ++raw_capacity;
+    if (raw_capacity > 512) { syslog(LOG_ERR, "acquisition cycle exceeds raw packet limit"); return; }
     record.values = calloc(capacity, sizeof(*record.values));
-    record.raw_payloads = calloc(capacity, sizeof(*record.raw_payloads));
-    record.raw_packet_ids = calloc(capacity, sizeof(*record.raw_packet_ids));
-    const edge_acquisition_response **responses = calloc(capacity, sizeof(*responses));
+    record.raw_payloads = calloc(raw_capacity, sizeof(*record.raw_payloads));
+    record.raw_packet_ids = calloc(raw_capacity, sizeof(*record.raw_packet_ids));
+    const edge_acquisition_response **responses = calloc(raw_capacity, sizeof(*responses));
     if (!record.values || !record.raw_payloads || !record.raw_packet_ids || !responses) goto cleanup;
     for (size_t index = 0; index < capacity; ++index) {
         const edge_acquisition_point *point = &device->points[index];
         if (!point->valid || !point->response) continue;
         record.values[record.values_count++] = point->value;
-        size_t raw = 0;
-        while (raw < record.raw_payloads_count && responses[raw] != point->response) ++raw;
-        if (raw < record.raw_payloads_count) continue;
-        responses[raw] = point->response;
-        ++record.raw_payloads_count;
+        for (const edge_acquisition_response *part = point->response; part; part = part->previous) {
+            size_t raw = 0;
+            while (raw < record.raw_payloads_count && responses[raw] != part) ++raw;
+            if (raw < record.raw_payloads_count) continue;
+            responses[raw] = part;
+            ++record.raw_payloads_count;
+        }
     }
     /* Point definitions may be in a different order from the read plan. */
     for (size_t i = 1; i < record.raw_payloads_count; ++i) {
@@ -2115,7 +2290,7 @@ static void device_report(void *context, const uint8_t platform_id[16],
     if (!publish_acquisition_cycle(device, platform_id, &record))
         syslog(LOG_ERR, "cannot queue complete acquisition cycle");
 cleanup:
-    for (size_t index = 0; index < capacity; ++index) {
+    for (size_t index = 0; index < raw_capacity; ++index) {
         if (record.raw_payloads) free(record.raw_payloads[index]);
         if (record.raw_packet_ids) free(record.raw_packet_ids[index]);
     }
@@ -2240,6 +2415,9 @@ static bool point_for_device(const iot_edge_v1_ConfigItem *item,
     if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS)
         return item->which_item == iot_edge_v1_ConfigItem_modbus_register_tag &&
                same_id(&item->item.modbus_register.device_id, device->device_id.bytes);
+    if (edge_industrial_protocol(device->protocol))
+        return item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag &&
+               same_id(&item->item.industrial_point.device_id, device->device_id.bytes);
     return item->which_item == iot_edge_v1_ConfigItem_s7_area_tag &&
            same_id(&item->item.s7_area.device_id, device->device_id.bytes);
 }
@@ -2358,11 +2536,11 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
             if (endpoint == NULL || !endpoint->enabled ||
                 (device->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
                  device->protocol != iot_edge_v1_Protocol_PROTOCOL_S7 &&
-                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651)) {
+                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651 && !edge_industrial_protocol(device->protocol))) {
                 free_devices(devices, output);
                 free_links(links, link_count);
                 set_error(error, error_size,
-                          "only enabled Modbus, S7 and SL651 endpoints are supported");
+                          "endpoint protocol is not supported");
                 return false;
             }
             if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 &&
@@ -2377,6 +2555,7 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
             runtime->owner = acquisition;
             runtime->endpoint = endpoint;
             runtime->config = device;
+            runtime->industrial = device->industrial;
             memcpy(runtime->platform_id, source->platform_id, 16U);
             runtime->link = assign_link(links, &link_count, endpoint, source);
             for (uint32_t point = 0U; point < config->item_count; ++point)
@@ -2501,7 +2680,9 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                 }
             const edge_device_protocol protocol =
                 device->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS
-                    ? EDGE_DEVICE_MODBUS : EDGE_DEVICE_S7;
+                    ? EDGE_DEVICE_MODBUS : device->protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? EDGE_DEVICE_MC :
+                    device->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS ? EDGE_DEVICE_FINS :
+                    device->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645 ? EDGE_DEVICE_DLT645 : EDGE_DEVICE_S7;
             if (!edge_device_runtime_init(&runtime->runtime, protocol,
                                           source->platform_id,
                                           device->device_id.bytes,
@@ -2600,7 +2781,8 @@ static edge_acquisition_device *find_device(edge_acquisition *acquisition,
 static bool writable_point(const edge_acquisition_point *point) {
     return point->item->which_item == iot_edge_v1_ConfigItem_modbus_register_tag
                ? point->item->item.modbus_register.writable
-               : point->item->item.s7_area.writable;
+               : point->item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag
+                   ? point->item->item.industrial_point.writable : point->item->item.s7_area.writable;
 }
 
 static bool build_write_command(edge_acquisition *acquisition,

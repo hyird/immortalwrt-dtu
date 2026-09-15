@@ -467,6 +467,112 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     close(listener);
 }
 
+static unsigned industrial_records, industrial_commands;
+static bool industrial_telemetry(void *context, const uint8_t platform[16], const iot_edge_v1_TelemetryRecord *record) {
+    (void)context; (void)platform;
+    assert(record->values_count == 1 && record->raw_payloads_count == 1);
+    const iot_edge_v1_ScalarValue *value = &record->values[0].value;
+    if (record->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645) {
+        assert(value->which_value == iot_edge_v1_ScalarValue_decimal_value_tag);
+        assert(!strcmp(value->value.decimal_value, "42.00") || !strcmp(value->value.decimal_value, "13.25"));
+    } else {
+        assert(value->which_value == iot_edge_v1_ScalarValue_unsigned_value_tag);
+        assert(value->value.unsigned_value == 42 || value->value.unsigned_value == 13);
+    }
+    ++industrial_records; return true;
+}
+static bool industrial_command(void *context, const uint8_t platform[16], const iot_edge_v1_CommandResult *result) {
+    (void)context; (void)platform;
+    assert(result->state == iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED);
+    ++industrial_commands; return true;
+}
+static void receive_bytes(int fd, uint8_t *data, size_t size) {
+    while (size) { ssize_t n = recv(fd, data, size, 0); assert(n > 0); data += n; size -= (size_t)n; }
+}
+static void verify_industrial_acquisition(iot_edge_v1_Protocol protocol, bool variant) {
+    int listener = socket(AF_INET, SOCK_STREAM, 0); assert(listener >= 0);
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
+    socklen_t length = sizeof(address); assert(getsockname(listener, (struct sockaddr *)&address, &length) == 0);
+    assert(listen(listener, 1) == 0);
+    iot_edge_v1_ConfigItem items[3]; edge_runtime_config config = make_config(items);
+    items[0].item.endpoint.protocol = protocol; items[0].item.endpoint.port = ntohs(address.sin_port);
+    iot_edge_v1_DeviceConfig *device = &items[1].item.device;
+    device->protocol = protocol; device->has_industrial = true; strcpy(device->device_code, "000000123456");
+    device->industrial.mc_four_e = variant; device->industrial.mc_station = 255;
+    device->industrial.mc_module_io = 1023; device->industrial.mc_monitoring_timer = 16;
+    device->industrial.dlt645_version = variant ? 1997 : 2007; device->industrial.dlt645_wakeup_bytes = 4;
+    device->industrial.dlt645_write_password.size = device->industrial.dlt645_operator_code.size = 4;
+    items[2] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+    items[2].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_INDUSTRIAL_POINT;
+    items[2].which_item = iot_edge_v1_ConfigItem_industrial_point_tag;
+    iot_edge_v1_IndustrialPointConfig *point = &items[2].item.industrial_point;
+    set_id(&point->device_id, device->device_id.bytes); strcpy(point->element_id, "value");
+    strcpy(point->area, "D"); strcpy(point->data_type, protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645 ? "BCD" : "UINT16");
+    strcpy(point->byte_order, protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? "LITTLE_ENDIAN" : "BIG_ENDIAN");
+    strcpy(point->identifier, variant ? "9010" : "00000000"); point->length = 4; point->digits = 2;
+    point->scale = 1; point->decimals = -1; point->writable = true;
+    industrial_records = industrial_commands = 0;
+    edge_acquisition *acquisition = edge_acquisition_create(industrial_telemetry, industrial_command, NULL);
+    char error[256] = {0}; assert(acquisition);
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    struct pollfd ready = {.fd = listener, .events = POLLIN}; assert(poll(&ready, 1, 3000) == 1);
+    int fd = accept(listener, NULL, NULL); assert(fd >= 0);
+    struct timeval timeout = {.tv_sec = 3}; assert(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+    uint8_t stored[4] = {0, 0x42, 0, 0};
+    if (protocol != iot_edge_v1_Protocol_PROTOCOL_DLT645) { stored[0] = protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? 42 : 0; stored[1] = protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? 0 : 42; }
+    unsigned writes = 0; bool queued = false;
+    uint64_t deadline = monotonic_ms() + 7000;
+    while (!industrial_commands && monotonic_ms() < deadline) {
+        struct pollfd event = {.fd = fd, .events = POLLIN};
+        if (poll(&event, 1, 30) == 1) {
+            uint8_t q[256], r[256] = {0}; receive_bytes(fd, q, 1);
+            while (q[0] == 0xfe) receive_bytes(fd, q, 1);
+            size_t h = protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? variant ? 13 : 9 : protocol == iot_edge_v1_Protocol_PROTOCOL_FINS ? 8 : 10;
+            receive_bytes(fd, q + 1, h - 1);
+            size_t n = protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? h + q[h-2] + (size_t)q[h-1]*256 :
+                protocol == iot_edge_v1_Protocol_PROTOCOL_FINS ? 8U + q[7] : 12U + q[9];
+            assert(n <= sizeof(q)); receive_bytes(fd, q + h, n - h);
+            size_t response_size;
+            if (protocol == iot_edge_v1_Protocol_PROTOCOL_MC) {
+                bool write = q[h+3] == 0x14;
+                if (write) { memcpy(stored, q+h+12, 2); ++writes; }
+                memcpy(r,q,h);r[0]=variant?0xd4:0xd0;r[h-2]=write?2:4;r[h-1]=0;
+                response_size=h+2+(write?0:2);if (!write)memcpy(r+h+2,stored,2);
+            } else if (protocol == iot_edge_v1_Protocol_PROTOCOL_FINS) {
+                memcpy(r,q,16);
+                if (q[11] == 0) {response_size=24;r[7]=16;r[11]=1;r[19]=10;r[23]=20;}
+                else {
+                    assert(q[20]==20 && q[23]==10);bool write=q[27]==2;
+                    if(write){memcpy(stored,q+34,2);++writes;}
+                    memcpy(r+16,q+16,12);r[16]=0xc0;memcpy(r+19,q+22,3);memcpy(r+22,q+19,3);
+                    response_size=write?30:32;r[7]=(uint8_t)(response_size-8);if(!write)memcpy(r+30,stored,2);
+                }
+            } else {
+                size_t id=variant?2:4;bool write=q[8]==(variant?4:0x14);
+                if(write){for(size_t i=0;i<4;++i)stored[i]=(uint8_t)(q[10+id+(variant?4:8)+i]-0x33);++writes;}
+                memcpy(r,q,8);r[8]=(uint8_t)(q[8]|0x80);r[9]=(uint8_t)(write?0:id+4);
+                if(!write){memcpy(r+10,q+10,id);for(size_t i=0;i<4;++i)r[10+id+i]=(uint8_t)(stored[i]+0x33);}
+                response_size=12+r[9];for(size_t i=0;i<response_size-2;++i)r[response_size-2]=(uint8_t)(r[response_size-2]+r[i]);r[response_size-1]=0x16;
+            }
+            assert(send(fd,r,3,0)==3);assert(send(fd,r+3,response_size-3,0)==(ssize_t)response_size-3);
+        }
+        edge_acquisition_tick(acquisition,monotonic_ms());
+        if (industrial_records && !queued) {
+            iot_edge_v1_CommandRequest request=iot_edge_v1_CommandRequest_init_zero;uint8_t command_id[16]={4};
+            set_id(&request.command_id,command_id);set_id(&request.device_id,device->device_id.bytes);
+            request.values_count=1;strcpy(request.values[0].element_id,"value");request.values[0].has_expected=true;
+            request.values[0].expected.kind=iot_edge_v1_ValueKind_VALUE_STRING;
+            request.values[0].expected.which_value=iot_edge_v1_ScalarValue_string_value_tag;
+            strcpy(request.values[0].expected.value.string_value,protocol==iot_edge_v1_Protocol_PROTOCOL_DLT645?"13.25":"13");
+            assert(edge_acquisition_command(acquisition,&request,error,sizeof(error)));queued=true;
+        }
+    }
+    assert(industrial_records && industrial_commands==1 && writes==1);
+    close(fd);edge_acquisition_destroy(acquisition);close(listener);
+}
+
 int main(void) {
     iot_edge_v1_ConfigItem values[3];
     edge_runtime_config config = make_config(values);
@@ -484,6 +590,11 @@ int main(void) {
     edge_acquisition_destroy(acquisition);
     verify_shared_resources();
     verify_sl651_commit();
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, false);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, true);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_FINS, false);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_DLT645, false);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_DLT645, true);
     for (unsigned flags = 0; flags < 4; ++flags) {
         verify_complete_acquisition_record(false, (flags & 1) != 0, (flags & 2) != 0);
         verify_complete_acquisition_record(true, (flags & 1) != 0, (flags & 2) != 0);

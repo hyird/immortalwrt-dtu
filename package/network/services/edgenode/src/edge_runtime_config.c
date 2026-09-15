@@ -1,4 +1,5 @@
 #include "edge_runtime_config.h"
+#include "edge_industrial.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,10 +82,14 @@ static bool valid_device(const edge_runtime_config *config,
         (value->io_interval_ms != 0U && value->io_interval_ms != 1000U) ||
         (value->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
          value->protocol != iot_edge_v1_Protocol_PROTOCOL_S7 &&
-         value->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651) || value->sl651_response_mode > 4)
+         value->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651 && !edge_industrial_protocol(value->protocol)) || value->sl651_response_mode > 4)
         return false;
     const iot_edge_v1_EndpointConfig *endpoint =
         edge_runtime_config_endpoint(config, value->endpoint_id.bytes);
+    if (edge_industrial_protocol(value->protocol) &&
+        (!edge_industrial_valid_device(value) || endpoint == NULL ||
+         (value->protocol != iot_edge_v1_Protocol_PROTOCOL_DLT645 &&
+          endpoint->transport != iot_edge_v1_Transport_TRANSPORT_ETHERNET))) return false;
     return endpoint != NULL && endpoint->protocol == value->protocol;
 }
 
@@ -144,6 +149,13 @@ static bool valid_point(const edge_runtime_config *config,
         device_id = &item->item.modbus_register.device_id;
         expected = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
         break;
+    }
+    case iot_edge_v1_ConfigItem_industrial_point_tag: {
+        const iot_edge_v1_IndustrialPointConfig *point = &item->item.industrial_point;
+        if (point->device_id.size != 16) return false;
+        const iot_edge_v1_DeviceConfig *device = edge_runtime_config_device(config, point->device_id.bytes);
+        return device != NULL && edge_industrial_protocol(device->protocol) &&
+               edge_industrial_valid_point(device, point);
     }
     case iot_edge_v1_ConfigItem_s7_area_tag: {
         const iot_edge_v1_S7AreaConfig *point = &item->item.s7_area;

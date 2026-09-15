@@ -11,6 +11,9 @@
 typedef enum {
     EDGE_DEVICE_MODBUS = 1,
     EDGE_DEVICE_S7 = 2,
+    EDGE_DEVICE_MC = 3,
+    EDGE_DEVICE_FINS = 4,
+    EDGE_DEVICE_DLT645 = 5,
 } edge_device_protocol;
 
 typedef enum {

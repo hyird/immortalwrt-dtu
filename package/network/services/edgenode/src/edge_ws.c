@@ -423,6 +423,13 @@ static bool send_capability_report(edge_ws_session *session) {
     iot_edge_v1_CapabilityReport *report = &envelope->payload.capability_report;
     safe_copy(report->network_stack, sizeof(report->network_stack), "netifd");
     report->ttyd_available = edge_capability_has_terminal();
+    report->supported_protocols_count = 6;
+    report->supported_protocols[0] = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
+    report->supported_protocols[1] = iot_edge_v1_Protocol_PROTOCOL_S7;
+    report->supported_protocols[2] = iot_edge_v1_Protocol_PROTOCOL_SL651;
+    report->supported_protocols[3] = iot_edge_v1_Protocol_PROTOCOL_MC;
+    report->supported_protocols[4] = iot_edge_v1_Protocol_PROTOCOL_FINS;
+    report->supported_protocols[5] = iot_edge_v1_Protocol_PROTOCOL_DLT645;
     (void)edge_capability_collect_network(report, session->app->config->wan_interface);
     report->has_vpn = edge_vpn_collect_capability(&report->vpn);
     if (session->app->config->serial_port[0] != '\0') {

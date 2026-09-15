@@ -22,6 +22,9 @@ enum Protocol {
   PROTOCOL_SL651 = 1;
   PROTOCOL_MODBUS = 2;
   PROTOCOL_S7 = 3;
+  PROTOCOL_MC = 4;
+  PROTOCOL_FINS = 5;
+  PROTOCOL_DLT645 = 6;
 }
 
 enum ConfigItemKind {
@@ -33,6 +36,7 @@ enum ConfigItemKind {
   CONFIG_ITEM_SL651_FUNCTION = 5;
   CONFIG_ITEM_SL651_ELEMENT = 6;
   CONFIG_ITEM_SL651_DICTIONARY = 7;
+  CONFIG_ITEM_INDUSTRIAL_POINT = 8;
 }
 
 enum ValueKind {
@@ -43,6 +47,7 @@ enum ValueKind {
   VALUE_DOUBLE = 4;
   VALUE_STRING = 5;
   VALUE_BYTES = 6;
+  VALUE_DECIMAL = 7;
 }
 
 enum CommandState {
@@ -217,6 +222,7 @@ message VpnCapabilities {
 }
 
 message CapabilityReport {
+  repeated Protocol supported_protocols = 7 [(nanopb).max_count = 6];
   repeated InterfaceCapability interfaces = 1 [(nanopb).max_count = 16];
   repeated SerialCapability serial_ports = 2 [(nanopb).max_count = 8];
   string network_stack = 3 [(nanopb).max_length = 32];
@@ -313,6 +319,7 @@ message EndpointConfig {
 }
 
 message DeviceConfig {
+  IndustrialConnectionConfig industrial = 27;
   bool debug_enabled = 26;
   reserved 23;
   reserved "registration_payload";
@@ -346,6 +353,43 @@ message DeviceConfig {
   bool enabled = 24;
   // 0 is the legacy default (M1); explicit modes use 1 through 4.
   uint32 sl651_response_mode = 25;
+}
+
+message IndustrialConnectionConfig {
+  bool mc_four_e = 1;
+  uint32 mc_network = 2;
+  uint32 mc_station = 3;
+  uint32 mc_module_io = 4;
+  uint32 mc_multidrop = 5;
+  uint32 mc_monitoring_timer = 6;
+  uint32 fins_source_network = 7;
+  uint32 fins_source_node = 8;
+  uint32 fins_source_unit = 9;
+  uint32 fins_destination_network = 10;
+  uint32 fins_destination_node = 11;
+  uint32 fins_destination_unit = 12;
+  uint32 dlt645_version = 13;
+  uint32 dlt645_wakeup_bytes = 14;
+  bytes dlt645_write_password = 15 [(nanopb).max_size = 4];
+  bytes dlt645_operator_code = 16 [(nanopb).max_size = 4];
+}
+
+message IndustrialPointConfig {
+  bytes device_id = 1 [(nanopb).max_size = 16];
+  string element_id = 2 [(nanopb).max_length = 64];
+  string name = 3 [(nanopb).max_length = 100];
+  string unit = 4 [(nanopb).max_length = 32];
+  string data_type = 5 [(nanopb).max_length = 24];
+  string area = 6 [(nanopb).max_length = 16];
+  uint32 address = 7;
+  uint32 bit = 8;
+  string byte_order = 9 [(nanopb).max_length = 24];
+  double scale = 10;
+  int32 decimals = 11;
+  string identifier = 12 [(nanopb).max_length = 8];
+  uint32 length = 13;
+  uint32 digits = 14;
+  bool writable = 15;
 }
 
 message ModbusRegisterConfig {
@@ -427,6 +471,7 @@ message ConfigItem {
     Sl651FunctionConfig sl651_function = 14;
     Sl651ElementConfig sl651_element = 15;
     Sl651DictionaryConfig sl651_dictionary = 16;
+    IndustrialPointConfig industrial_point = 17;
   }
 }
 
@@ -458,6 +503,8 @@ message ScalarValue {
     double double_value = 5;
     string string_value = 6 [(nanopb).max_length = 128];
     bytes bytes_value = 7 [(nanopb).max_size = 256];
+    // Exact decimal text for meter BCD; avoids binary floating-point rounding.
+    string decimal_value = 8 [(nanopb).max_length = 32];
   }
 }
 
@@ -485,10 +532,15 @@ message TelemetryRecord {
   repeated TelemetryValue values = 9 [(nanopb).type = FT_POINTER];
   bytes raw_payload = 10 [(nanopb).max_size = 2048];
   DeviceStatus device_status = 11;
+  // Absent in deployed v1 firmware: never infer provenance from current config.
   bytes model_id = 12 [(nanopb).max_size = 16];
+  // 已移除历史版本；保留字段编号，防止旧固件报文被误解释。
   reserved 13;
   reserved "model_revision";
+  // Ordered original protocol frames. Prefer this array over legacy raw_payload.
   repeated bytes raw_payloads = 14 [(nanopb).type = FT_POINTER];
+  // A bounded upload may contain only a subset of values or raw frames.
+  // All parts must be assembled before publishing a historical record.
   bytes report_id = 15 [(nanopb).max_size = 16];
   uint32 part_index = 16;
   uint32 part_count = 17;
@@ -506,6 +558,8 @@ message TelemetryAck {
 }
 
 message RawPacket {
+  bytes acquisition_id = 14 [(nanopb).max_size = 16];
+  string acquisition_state = 15 [(nanopb).max_length = 24];
   uint32 payload_offset = 12;
   bytes reply_to_packet_id = 13 [(nanopb).max_size = 16];
   string status = 10 [(nanopb).max_length = 32];

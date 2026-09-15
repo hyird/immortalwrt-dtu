@@ -49,6 +49,7 @@ add_test(NAME edge_protocol COMMAND edge_protocol_test)
 
 add_executable(edge_config_test
     edge_config_test.c
+    "${EDGENODE_ROOT}/src/edge_industrial.c"
     "${EDGENODE_ROOT}/src/edge_runtime_config.c")
 target_include_directories(edge_config_test PRIVATE "${EDGENODE_ROOT}/src")
 target_link_libraries(edge_config_test PRIVATE edgenode_nanopb)
@@ -116,6 +117,7 @@ add_test(NAME edge_status COMMAND edge_status_test)
 add_executable(edgenode_stability_x64
     edgenode_stability_test.c
     "${EDGENODE_ROOT}/src/edge_protocol.c"
+    "${EDGENODE_ROOT}/src/edge_industrial.c"
     "${EDGENODE_ROOT}/src/edge_runtime_config.c"
     "${EDGENODE_ROOT}/src/edge_device_runtime.c"
     "${EDGENODE_ROOT}/src/edge_modbus.c"
@@ -168,7 +170,8 @@ if(UNIX)
         "${EDGENODE_ROOT}/src/edge_sl651.c"
         edge_acquisition_test.c
         "${EDGENODE_ROOT}/src/edge_acquisition.c"
-        "${EDGENODE_ROOT}/src/edge_runtime_config.c"
+        "${EDGENODE_ROOT}/src/edge_industrial.c"
+    "${EDGENODE_ROOT}/src/edge_runtime_config.c"
         "${EDGENODE_ROOT}/src/edge_device_runtime.c"
         "${EDGENODE_ROOT}/src/edge_modbus.c"
         "${EDGENODE_ROOT}/src/edge_s7.c"
@@ -186,3 +189,8 @@ if(NOT MSVC)
     target_link_libraries(edge_sl651_test PRIVATE m)
 endif()
 add_test(NAME edge_sl651 COMMAND edge_sl651_test)
+
+add_executable(edge_industrial_test edge_industrial_test.c "${EDGENODE_ROOT}/src/edge_industrial.c")
+target_include_directories(edge_industrial_test PRIVATE "${EDGENODE_ROOT}/src")
+target_link_libraries(edge_industrial_test PRIVATE edgenode_nanopb)
+add_test(NAME edge_industrial COMMAND edge_industrial_test)

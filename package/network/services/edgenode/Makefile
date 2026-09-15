@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.45
+PKG_VERSION:=0.3.46
 PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
@@ -76,6 +76,7 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/edge/src/edge_device_runtime.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_modbus.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_s7.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_industrial.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_sl651.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_modem.c \
 		$(PKG_BUILD_DIR)/edge/src/main.c \

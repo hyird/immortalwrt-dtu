@@ -6,6 +6,21 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 Implemented foundations:
 
+工业协议（0.3.46）：新增 MC/SLMP 二进制 3E/4E、FINS/TCP 和 DL/T645 1997/2007。
+MC、FINS 使用以太网；DL/T645 支持串口及 TCP 透传。协议共用原有物理 I/O 调度、
+一秒采集周期、按设备类型配置的上报周期、单点写入与回读比较、命令结果及报文追踪。
+FINS 在建立连接时协商节点地址；超时后重建连接，迟到报文不用于确认下一条命令。
+
+点位数据类型与平台保持一致。DL/T645 支持有符号/无符号 BCD、HEX、后续帧读取，
+BCD 使用精确十进制字段上报，避免浮点舍入；写入认证字节从配置下发，发送日志隐藏
+密码及操作者代码。一次点位读取累计报文最多 4096 字节，一轮原始报文最多 512 帧，
+超限拒绝上报，不截断数值。DL/T645 地址为 12 位十进制表号，数据标识为 4/8 位十六进制。
+
+`CapabilityReport.supported_protocols` 声明实际支持的六种协议；新增字段及枚举保留旧编号，
+协议版本仍为 6，保留 0.3.44 升级兼容路径。平台应依据能力声明下发新协议。
+主机测试覆盖 MC 3E/4E、FINS 节点协商、DL/T645 两个版本的真实 TCP 读取与写后回读，
+以及畸形报文、校验和、BCD 精度及越界拒绝。实际 PLC、电表和串口硬件互通仍需现场验收。
+
 SL651（0.3.45）：串口及 TCP Client/Server 接入支持 HEX/BCD M1–M4；M2 的
 ETB/ETX 分别返回 ACK/EOT，M3 按 SYN 序号重组、逐个 NAK 请求缺包，M4 支持
 ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功，最终 EOT 还须
