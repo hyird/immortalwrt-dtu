@@ -297,6 +297,7 @@ message SerialSettings {
 }
 
 message EndpointConfig {
+  bool debug_enabled = 11;
   bytes endpoint_id = 1 [(nanopb).max_size = 16];
   string name = 2 [(nanopb).max_length = 100];
   Transport transport = 3;
@@ -312,6 +313,7 @@ message EndpointConfig {
 }
 
 message DeviceConfig {
+  bool debug_enabled = 26;
   reserved 23;
   reserved "registration_payload";
   bytes device_id = 1 [(nanopb).max_size = 16];
@@ -481,6 +483,13 @@ message TelemetryRecord {
   repeated TelemetryValue values = 9 [(nanopb).type = FT_POINTER];
   bytes raw_payload = 10 [(nanopb).max_size = 2048];
   DeviceStatus device_status = 11;
+  bytes model_id = 12 [(nanopb).max_size = 16];
+  reserved 13;
+  reserved "model_revision";
+  repeated bytes raw_payloads = 14 [(nanopb).type = FT_POINTER];
+  bytes report_id = 15 [(nanopb).max_size = 16];
+  uint32 part_index = 16;
+  uint32 part_count = 17;
 }
 
 message TelemetryBatch {
@@ -495,6 +504,10 @@ message TelemetryAck {
 }
 
 message RawPacket {
+  bool device_only = 9;
+  // Debug-only transport bytes; never enters historical telemetry.
+  bool debug = 7;
+  string direction = 8 [(nanopb).max_length = 16];
   bytes packet_id = 1 [(nanopb).max_size = 16];
   bytes endpoint_id = 2 [(nanopb).max_size = 16];
   bytes device_id = 3 [(nanopb).max_size = 16];

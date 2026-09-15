@@ -60,7 +60,7 @@ static size_t packet(uint8_t *out, unsigned total, unsigned sequence, uint8_t en
 }
 static void test_missing_packets_and_timeout(void) {
     const uint8_t station[5] = {0, 0, 0, 0, 1}, time[6] = {0x24, 1, 2, 3, 4, 5};
-    edge_sl651_callbacks callbacks = {send_bytes, report, command};
+    edge_sl651_callbacks callbacks = {send_bytes, report, command, NULL};
     edge_sl651_session *s = edge_sl651_create(3, station, callbacks, NULL);
     uint8_t input[64], body[12] = {0, 1, 0x24, 1, 2, 3, 4, 5, 0xAB, 0x12, 0x12, 0x34};
     reports = commands = failures = 0;
@@ -74,6 +74,20 @@ static void test_missing_packets_and_timeout(void) {
     n = packet(input, 3, 2, 3, body + 8, 2);
     edge_sl651_receive(s, input, n, 1002, time);
     assert(reports == 1 && sent[sent_size - 3] == 0x15);
+    assert(edge_sl651_report_frame_count(s) == 3);
+    for (size_t index = 0; index < 3; ++index) {
+        const uint8_t *raw;
+        size_t raw_size;
+        assert(edge_sl651_report_frame(s, index, &raw, &raw_size));
+        edge_sl651_frame original;
+        assert(edge_sl651_parse(raw, raw_size, &original));
+        assert(original.sequence == index + 1 && original.total == 3);
+        uint8_t expected[64];
+        size_t expected_size = packet(expected, 3, (unsigned)index + 1, 3,
+                                      body + (index == 0 ? 0 : index == 1 ? 8 : 10),
+                                      index == 0 ? 8 : 2);
+        assert(raw_size == expected_size && memcmp(raw, expected, raw_size) == 0);
+    }
     edge_sl651_commit(s, token + 1, 1002, time);
     assert(sent[sent_size - 3] == 0x15);
     edge_sl651_commit(s, token, 1002, time);
@@ -111,7 +125,7 @@ int main(void) {
     for (unsigned mode = 1; mode <= 4; ++mode) {
         reports = commands = 0;
         sent_size = 0;
-        edge_sl651_callbacks callbacks = {send_bytes, report, command};
+        edge_sl651_callbacks callbacks = {send_bytes, report, command, NULL};
         edge_sl651_session *s = edge_sl651_create(mode, station, callbacks, NULL);
         assert(s);
         uint8_t input[64];

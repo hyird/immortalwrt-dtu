@@ -271,6 +271,17 @@ static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                                 UWSC_OP_BINARY) == 0;
 }
 
+static void acquisition_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
+    edge_ws_app *app = context;
+    edge_ws_session *session = session_for_platform(app, platform_id);
+    if (!session || !session->websocket_open || !session->enrolled) return;
+    iot_edge_v1_Envelope *envelope = &app->envelope;
+    if (!init_envelope(session, envelope)) return;
+    envelope->which_payload = iot_edge_v1_Envelope_raw_packet_tag;
+    envelope->payload.raw_packet = *packet;
+    (void)send_envelope(session, envelope);
+}
+
 static bool acquisition_telemetry(void *context,
                                   const uint8_t platform_id[16],
                                   const iot_edge_v1_TelemetryRecord *record) {
@@ -290,6 +301,8 @@ static bool acquisition_telemetry(void *context,
     // The callback borrows values from the acquisition IPC decoder.
     envelope->payload.telemetry_batch.records[0].values = NULL;
     envelope->payload.telemetry_batch.records[0].values_count = 0U;
+    envelope->payload.telemetry_batch.records[0].raw_payloads = NULL;
+    envelope->payload.telemetry_batch.records[0].raw_payloads_count = 0U;
     return queued;
 }
 
@@ -696,6 +709,7 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     candidate_acquisition = edge_acquisition_create(acquisition_telemetry,
                                                      acquisition_command_result,
                                                      session->app);
+    edge_acquisition_set_debug_callback(candidate_acquisition, acquisition_debug);
     if (candidate_acquisition == NULL ||
         !edge_acquisition_apply_multi(candidate_acquisition, sources, source_count,
                                       monotonic_ms(), apply_error,
@@ -1947,6 +1961,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
     const size_t source_count = build_acquisition_sources(app, NULL, NULL, sources);
     app->acquisition = edge_acquisition_create(
         acquisition_telemetry, acquisition_command_result, app);
+    edge_acquisition_set_debug_callback(app->acquisition, acquisition_debug);
     char acquisition_error[256] = {0};
     if (app->acquisition == NULL ||
         !edge_acquisition_apply_multi(app->acquisition, sources, source_count,

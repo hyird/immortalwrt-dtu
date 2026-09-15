@@ -12,6 +12,8 @@ typedef struct {
     uint16_t total, sequence;
     const uint8_t *body;
     size_t body_size;
+    const uint8_t *raw;
+    size_t raw_size;
 } edge_sl651_frame;
 
 typedef struct edge_sl651_session edge_sl651_session;
@@ -20,6 +22,7 @@ typedef struct {
     /* A report token is committed only after all its records reach the node outbox. */
     bool (*report)(void *context, uint64_t token, const edge_sl651_frame *frame);
     void (*command)(void *context, const uint8_t id[16], bool success, const char *reason);
+    void (*trace)(void *context, const uint8_t *bytes, size_t size);
 } edge_sl651_callbacks;
 
 uint16_t edge_sl651_crc(const uint8_t *bytes, size_t size);
@@ -41,6 +44,9 @@ void edge_sl651_commit(edge_sl651_session *session, uint64_t token, uint64_t now
                        const uint8_t time[6]);
 void edge_sl651_quarantine(edge_sl651_session *session);
 bool edge_sl651_ready(const edge_sl651_session *session);
+size_t edge_sl651_report_frame_count(const edge_sl651_session *session);
+bool edge_sl651_report_frame(const edge_sl651_session *session, size_t index,
+                              const uint8_t **bytes, size_t *size);
 void edge_sl651_command_committed(edge_sl651_session *session, const uint8_t id[16], uint64_t now,
                                   const uint8_t time[6]);
 bool edge_sl651_query(edge_sl651_session *session, const uint8_t id[16], uint8_t function,

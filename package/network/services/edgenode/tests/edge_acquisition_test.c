@@ -174,9 +174,24 @@ static void verify_shared_resources(void) {
 
 static bool sl651_allow_report, sl651_allow_command;
 static unsigned sl651_reports, sl651_results, sl651_images;
+static unsigned sl651_raw_frames;
 static bool sl651_store_report(void *context, const uint8_t platform[16], const iot_edge_v1_TelemetryRecord *record) {
     (void)context; (void)platform;
-    assert(record->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651 && record->values_count == 1);
+    assert(record->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651);
+    assert(record->report_id.size == 16 && record->part_count >= 2 && record->part_index < record->part_count);
+    if (record->raw_payloads_count) {
+        assert(record->values_count == 0);
+        for (pb_size_t index = 0; index < record->raw_payloads_count; ++index) {
+            edge_sl651_frame frame;
+            assert(edge_sl651_parse(record->raw_payloads[index]->bytes,
+                                     record->raw_payloads[index]->size, &frame));
+            if (frame.total)
+                assert(frame.sequence == index + 1);
+            ++sl651_raw_frames;
+        }
+        return sl651_allow_report;
+    }
+    assert(record->values_count == 1);
     if (!strcmp(record->function_code, "36")) {
         assert(!record->values[0].has_value && record->values[0].encoded_value);
         assert(!strcmp(record->values[0].encoding, "JPEG"));
@@ -287,8 +302,166 @@ static void verify_sl651_commit(void) {
         offset += length;
     }
     n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
-    assert(sl651_images && n == 28 && bytes[n-3] == 4 && bytes[16] == 3);
+    assert(sl651_images && sl651_raw_frames >= 3 && n == 28 && bytes[n-3] == 4 && bytes[16] == 3);
     close(fd); edge_acquisition_destroy(acquisition);
+}
+
+static unsigned response_records;
+static uint8_t expected_responses[2][27];
+static size_t expected_response_size;
+static bool s7_responses;
+
+static bool store_response_record(void *context, const uint8_t platform_id[16],
+                                  const iot_edge_v1_TelemetryRecord *record) {
+    (void)context;
+    (void)platform_id;
+    assert(response_records < 2U);
+    const unsigned index = response_records++;
+    assert(record->protocol == (s7_responses ? iot_edge_v1_Protocol_PROTOCOL_S7
+                                            : iot_edge_v1_Protocol_PROTOCOL_MODBUS));
+    assert(record->values_count == (!s7_responses && index == 0U ? 2U : 1U));
+    assert(strcmp(record->values[0].element_id, index == 0U ? "holding-1" : "holding-2") == 0);
+    assert(record->values[0].value.which_value == iot_edge_v1_ScalarValue_double_value_tag);
+    assert(record->values[0].value.value.double_value == 100.0 + index);
+    if (record->values_count == 2U) {
+        assert(strcmp(record->values[1].element_id, "holding-copy") == 0);
+        assert(record->values[1].value.value.double_value == 100.0);
+    }
+    assert(record->raw_payload.size == expected_response_size);
+    assert(record->raw_payloads_count == 1);
+    assert(record->raw_payloads[0]->size == expected_response_size);
+    assert(memcmp(record->raw_payloads[0]->bytes, expected_responses[index], expected_response_size) == 0);
+    assert(memcmp(record->raw_payload.bytes, expected_responses[index],
+                  expected_response_size) == 0);
+    assert(record->observed_at_ms > 0);
+    return true;
+}
+
+static void receive_s7_request(int fd, uint8_t request[1024]) {
+    assert(recv(fd, request, 4, MSG_WAITALL) == 4);
+    const size_t size = (size_t)request[2] * 256U + request[3];
+    assert(size >= 4 && size <= 1024);
+    assert(recv(fd, request + 4, size - 4, MSG_WAITALL) == (ssize_t)(size - 4));
+}
+
+static unsigned debug_rx, debug_tx;
+static void record_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
+    (void)context; (void)platform_id;
+    assert(packet->debug && packet->packet_id.size == 16 && packet->device_id.size == 16);
+    assert(packet->device_id.bytes[0] == 2 && packet->endpoint_id.bytes[0] == 1);
+    assert(packet->payload.size > 0 && packet->payload.size <= 4096);
+    if (!strcmp(packet->direction, "RX")) debug_rx += packet->payload.size;
+    else { assert(!strcmp(packet->direction, "TX")); debug_tx += packet->payload.size; }
+}
+static void verify_separate_response_records(bool s7, bool link_debug, bool device_debug) {
+    debug_rx = debug_tx = 0;
+    response_records = 0;
+    s7_responses = s7;
+    expected_response_size = s7 ? 27 : 11;
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    struct sockaddr_in address = {.sin_family = AF_INET,
+                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
+    socklen_t length = sizeof(address);
+    assert(getsockname(listener, (struct sockaddr *)&address, &length) == 0);
+    assert(listen(listener, 1) == 0);
+    iot_edge_v1_ConfigItem values[5];
+    edge_runtime_config config = make_config(values);
+    values[0].item.endpoint.port = ntohs(address.sin_port);
+    values[0].item.endpoint.debug_enabled = link_debug;
+    values[1].item.device.debug_enabled = device_debug;
+    values[3] = values[2];
+    values[3].item.modbus_register.address = 100;
+    copy_text(values[3].item.modbus_register.element_id,
+              sizeof(values[3].item.modbus_register.element_id), "holding-2");
+    config.item_count = 4;
+    if (!s7) {
+        values[4] = values[2];
+        copy_text(values[4].item.modbus_register.element_id,
+                  sizeof(values[4].item.modbus_register.element_id), "holding-copy");
+        config.item_count = 5;
+    }
+    if (s7) {
+        values[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
+        values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
+        for (unsigned index = 2; index < 4; ++index) {
+            values[index] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+            values[index].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_S7_AREA;
+            values[index].which_item = iot_edge_v1_ConfigItem_s7_area_tag;
+            iot_edge_v1_S7AreaConfig *point = &values[index].item.s7_area;
+            set_id(&point->device_id, values[1].item.device.device_id.bytes);
+            copy_text(point->element_id, sizeof(point->element_id),
+                      index == 2 ? "holding-1" : "holding-2");
+            copy_text(point->area, sizeof(point->area), "DB");
+            copy_text(point->data_type, sizeof(point->data_type), "UINT16");
+            point->db_number = 1;
+            point->start = (index - 2) * 10;
+            point->size = 2;
+            point->scale = 1.0;
+        }
+    }
+    edge_acquisition *acquisition = edge_acquisition_create(store_response_record, command, NULL);
+    edge_acquisition_set_debug_callback(acquisition, record_debug);
+    assert(acquisition != NULL);
+    char error[256] = {0};
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    struct pollfd connection = {.fd = listener, .events = POLLIN};
+    assert(poll(&connection, 1, 3000) == 1);
+    int fd = accept(listener, NULL, NULL);
+    assert(fd >= 0);
+    struct timeval timeout = {.tv_sec = 3};
+    assert(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+    if (s7) {
+        uint8_t request[1024];
+        receive_s7_request(fd, request);
+        const uint8_t cotp[] = {3,0,0,11,6,0xd0,0,1,0,6,0};
+        assert(send(fd, cotp, sizeof(cotp), 0) == (ssize_t)sizeof(cotp));
+        receive_s7_request(fd, request);
+        uint8_t setup[] = {3,0,0,27,2,0xf0,0x80,0x32,3,0,0,0,0,0,8,0,0,0,0,
+                           0xf0,0,0,1,0,1,1,0xe0};
+        setup[11] = request[11]; setup[12] = request[12];
+        assert(send(fd, setup, sizeof(setup), 0) == (ssize_t)sizeof(setup));
+    }
+    for (unsigned index = 0; index < 2; ++index) {
+        if (s7) {
+            uint8_t request[1024];
+            receive_s7_request(fd, request);
+            assert(request[17] == 4);
+            uint8_t response[] = {3,0,0,27,2,0xf0,0x80,0x32,3,0,0,0,0,0,2,0,6,0,0,
+                                  4,1,0xff,4,0,16,0,0};
+            response[11] = request[11]; response[12] = request[12];
+            response[26] = (uint8_t)(100 + index);
+            memcpy(expected_responses[index], response, sizeof(response));
+            assert(send(fd, response, sizeof(response), 0) == (ssize_t)sizeof(response));
+            continue;
+        }
+        uint8_t request[12];
+        assert(recv(fd, request, sizeof(request), MSG_WAITALL) == (ssize_t)sizeof(request));
+        assert(request[7] == 3);
+        assert(request[9] == (index == 0 ? 0 : 100));
+        uint8_t *response = expected_responses[index];
+        memcpy(response, request, 7);
+        response[5] = 5;
+        response[7] = 3;
+        response[8] = 2;
+        response[9] = 0;
+        response[10] = (uint8_t)(100 + index);
+        assert(send(fd, response, 11, 0) == 11);
+    }
+    const uint64_t deadline = monotonic_ms() + 3000;
+    while (response_records < 2 && monotonic_ms() < deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+        (void)poll(&event, 1, 100);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(response_records == 2);
+    if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); }
+    else { assert(debug_rx == 0 && debug_tx == 0); }
+    edge_acquisition_destroy(acquisition);
+    close(fd);
+    close(listener);
 }
 
 int main(void) {
@@ -308,5 +481,9 @@ int main(void) {
     edge_acquisition_destroy(acquisition);
     verify_shared_resources();
     verify_sl651_commit();
+    for (unsigned flags = 0; flags < 4; ++flags) {
+        verify_separate_response_records(false, (flags & 1) != 0, (flags & 2) != 0);
+        verify_separate_response_records(true, (flags & 1) != 0, (flags & 2) != 0);
+    }
     return 0;
 }

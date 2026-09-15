@@ -36,6 +36,8 @@ bool edge_sl651_parse(const uint8_t *p, size_t n, edge_sl651_frame *f) {
         if (!decimal_byte(p[i]))
             return false;
     memset(f, 0, sizeof(*f));
+    f->raw = p;
+    f->raw_size = n;
     memcpy(f->station, p + 3, 5);
     f->center = p[2];
     memcpy(f->password, p + 8, 2);
@@ -173,6 +175,8 @@ bool edge_sl651_bcd(const uint8_t *p, size_t n, unsigned digits, double *value) 
 typedef struct {
     uint8_t *bytes;
     size_t size;
+    uint8_t *raw;
+    size_t raw_size;
     unsigned retries;
 } sl_packet;
 struct edge_sl651_session {
@@ -189,6 +193,8 @@ struct edge_sl651_session {
     size_t assembled_size;
     uint64_t packet_deadline;
     uint8_t *report_body;
+    uint8_t *report_raw;
+    size_t report_raw_size;
     bool awaiting_commit, report_submitted;
     uint64_t token, next_token, publication_deadline;
     uint64_t now;
@@ -206,8 +212,10 @@ struct edge_sl651_session {
 };
 static void packets_free(edge_sl651_session *s) {
     if (s->packets)
-        for (size_t i = 0; i < s->total; ++i)
+        for (size_t i = 0; i < s->total; ++i) {
             free(s->packets[i].bytes);
+            free(s->packets[i].raw);
+        }
     free(s->packets);
     s->packets = NULL;
     s->total = 0;
@@ -243,6 +251,9 @@ void edge_sl651_reset(edge_sl651_session *s) {
     query_finish(s, false, "SL651 disconnected");
     packets_free(s);
     free(s->report_body);
+    free(s->report_raw);
+    s->report_raw = NULL;
+    s->report_raw_size = 0;
     s->report_body = NULL;
     s->bound = s->quarantined = s->awaiting_commit = s->report_submitted = false;
     s->receive_size = 0;
@@ -294,6 +305,19 @@ static void submit(edge_sl651_session *s, const edge_sl651_frame *f, uint8_t *bo
         return;
     }
     s->report = *f;
+    s->report.raw = NULL;
+    s->report.raw_size = 0;
+    if (!f->total) {
+        uint8_t *raw = malloc(f->raw_size);
+        if (!raw) {
+            free(body);
+            return;
+        }
+        memcpy(raw, f->raw, f->raw_size);
+        free(s->report_raw);
+        s->report_raw = raw;
+        s->report_raw_size = f->raw_size;
+    }
     s->report.body = body;
     s->report.body_size = n;
     s->report_body = body;
@@ -350,6 +374,14 @@ static void consume_frame(edge_sl651_session *s, const edge_sl651_frame *f) {
         packet->bytes = malloc(f->body_size);
         if (!packet->bytes)
             return;
+        packet->raw = malloc(f->raw_size);
+        if (!packet->raw) {
+            free(packet->bytes);
+            packet->bytes = NULL;
+            return;
+        }
+        memcpy(packet->raw, f->raw, f->raw_size);
+        packet->raw_size = f->raw_size;
         memcpy(packet->bytes, f->body, f->body_size);
         packet->size = f->body_size;
         s->assembled_size += f->body_size;
@@ -393,6 +425,8 @@ static void drain(edge_sl651_session *s) {
         size_t n = (be16(s->receive + 11) & 0xFFFU) + 17;
         if (n > s->receive_size)
             break;
+        if (s->callbacks.trace && !memcmp(s->receive + 3, s->station, 5))
+            s->callbacks.trace(s->context, s->receive, n);
         edge_sl651_frame frame;
         if (edge_sl651_parse(s->receive, n, &frame))
             consume_frame(s, &frame);
@@ -447,6 +481,9 @@ void edge_sl651_commit(edge_sl651_session *s, uint64_t token, uint64_t now, cons
         ++s->seen_count;
     free(s->report_body);
     s->report_body = NULL;
+    free(s->report_raw);
+    s->report_raw = NULL;
+    s->report_raw_size = 0;
     s->awaiting_commit = s->report_submitted = false;
     drain(s);
 }
@@ -475,6 +512,19 @@ void edge_sl651_tick(edge_sl651_session *s, uint64_t now, const uint8_t time[6])
         }
     }
 }
+size_t edge_sl651_report_frame_count(const edge_sl651_session *s) {
+    return !s || !s->awaiting_commit ? 0 : s->report.total ? s->total : 1;
+}
+
+bool edge_sl651_report_frame(const edge_sl651_session *s, size_t index,
+                              const uint8_t **bytes, size_t *size) {
+    if (!bytes || !size || index >= edge_sl651_report_frame_count(s))
+        return false;
+    *bytes = s->report.total ? s->packets[index].raw : s->report_raw;
+    *size = s->report.total ? s->packets[index].raw_size : s->report_raw_size;
+    return *bytes != NULL && *size != 0;
+}
+
 bool edge_sl651_query(edge_sl651_session *s, const uint8_t id[16], uint8_t function,
                       const uint8_t *body, size_t size, uint64_t now, uint32_t timeout,
                       const uint8_t time[6]) {

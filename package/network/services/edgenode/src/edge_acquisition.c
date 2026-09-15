@@ -52,9 +52,17 @@ typedef struct edge_acquisition_device edge_acquisition_device;
 typedef struct edge_acquisition_link edge_acquisition_link;
 
 typedef struct {
+    size_t references;
+    size_t size;
+    int64_t observed_at_ms;
+    uint8_t bytes[];
+} edge_acquisition_response;
+
+typedef struct {
     const iot_edge_v1_ConfigItem *item;
     iot_edge_v1_TelemetryValue value;
     bool valid;
+    edge_acquisition_response *response;
 } edge_acquisition_point;
 
 struct edge_acquisition_link {
@@ -78,6 +86,7 @@ struct edge_acquisition_device {
     size_t modbus_point_count;
     edge_modbus_read_group *modbus_groups;
     size_t modbus_group_count;
+    edge_acquisition_response *read_response;
     edge_device_runtime runtime;
     edge_sl651_session *sl651;
     uint8_t sl651_station[5];
@@ -85,8 +94,8 @@ struct edge_acquisition_device {
     uint64_t sl651_token;
     bool sl651_report_encoded;
     uint32_t sl651_parts;
-    bool sl651_committed[128];
-    uint8_t sl651_record_ids[128][16];
+    bool sl651_committed[256];
+    uint8_t sl651_record_ids[256][16];
     iot_edge_v1_CommandResult sl651_result;
     bool sl651_result_pending;
     uint16_t transaction;
@@ -104,6 +113,7 @@ struct edge_acquisition_device {
 };
 
 struct edge_acquisition {
+    edge_acquisition_debug_callback debug;
     edge_acquisition_telemetry_callback telemetry;
     edge_acquisition_command_callback command;
     void *callback_context;
@@ -123,6 +133,7 @@ struct edge_acquisition {
 };
 
 typedef enum {
+    EDGE_ACQUISITION_EVENT_DEBUG = 9,
     EDGE_ACQUISITION_EVENT_TELEMETRY = 1,
     EDGE_ACQUISITION_EVENT_COMMAND_RESULT = 2,
     EDGE_ACQUISITION_EVENT_STATUS = 3,
@@ -142,6 +153,7 @@ typedef struct {
     uint8_t device_id[16];
     uint8_t platform_id[16];
     union {
+        iot_edge_v1_RawPacket debug;
         uint8_t telemetry[EDGENODE_MAX_WS_MESSAGE];
         iot_edge_v1_CommandResult command_result;
         iot_edge_v1_DeviceStatusReport status;
@@ -456,7 +468,29 @@ static int wait_fd(int fd, short events) {
     }
 }
 
-static bool write_all(int fd, const uint8_t *data, size_t size) {
+static void debug_packet(edge_acquisition_device *device, const char *direction,
+                         const uint8_t *data, size_t size, bool identified, bool device_only) {
+    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
+        !device->owner->debug || !data || !size) return;
+    for (size_t offset = 0; offset < size; offset += 4096U) {
+        iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
+        packet.debug = true;
+        packet.device_only = device_only;
+        packet.packet_id.size = 16;
+        record_id((uint64_t)current_ms(), packet.packet_id.bytes);
+        packet.endpoint_id.size = 16;
+        memcpy(packet.endpoint_id.bytes, device->endpoint->endpoint_id.bytes, 16);
+        if (identified) { packet.device_id.size = 16; memcpy(packet.device_id.bytes, device->config->device_id.bytes, 16); }
+        packet.observed_at_ms = current_ms();
+        copy_text(packet.direction, sizeof(packet.direction), direction);
+        packet.payload.size = (pb_size_t)((size-offset) > 4096U ? 4096U : (size-offset));
+        memcpy(packet.payload.bytes, data+offset, packet.payload.size);
+        device->owner->debug(device->owner->callback_context, device->platform_id, &packet);
+    }
+}
+
+static bool write_all(edge_acquisition_device *device, const uint8_t *data, size_t size) {
+    const int fd = device->link->fd;
     size_t offset = 0U;
     while (offset < size) {
         if (wait_fd(fd, POLLOUT) != 0)
@@ -466,6 +500,7 @@ static bool write_all(int fd, const uint8_t *data, size_t size) {
             continue;
         if (count <= 0)
             return false;
+        debug_packet(device, "TX", data + offset, (size_t)count, true, false);
         offset += (size_t)count;
     }
     return true;
@@ -495,7 +530,8 @@ static bool tcp_socket_is_broken(int fd) {
     }
 }
 
-static bool read_exact(int fd, uint8_t *data, size_t size) {
+static bool read_exact(edge_acquisition_device *device, uint8_t *data, size_t size) {
+    const int fd = device->link->fd;
     size_t offset = 0U;
     while (offset < size) {
         if (wait_fd(fd, POLLIN) != 0)
@@ -505,6 +541,7 @@ static bool read_exact(int fd, uint8_t *data, size_t size) {
             continue;
         if (count <= 0)
             return false;
+        debug_packet(device, "RX", data + offset, (size_t)count, true, false);
         offset += (size_t)count;
     }
     return true;
@@ -743,7 +780,7 @@ static void device_disconnect(void *context) {
 static bool receive_modbus(edge_acquisition_device *device, uint8_t *frame,
                             size_t capacity, size_t *size) {
     if (strcmp(device->config->modbus_mode, "RTU") == 0) {
-        if (!read_exact(device->link->fd, frame, 3U))
+        if (!read_exact(device, frame, 3U))
             return false;
         size_t remaining;
         if ((frame[1] & 0x80U) != 0U)
@@ -753,7 +790,7 @@ static bool receive_modbus(edge_acquisition_device *device, uint8_t *frame,
         else
             remaining = 5U;
         if (3U + remaining > capacity ||
-            !read_exact(device->link->fd, frame + 3U, remaining))
+            !read_exact(device, frame + 3U, remaining))
             return false;
         *size = 3U + remaining;
         return true;
@@ -772,7 +809,7 @@ static bool receive_modbus(edge_acquisition_device *device, uint8_t *frame,
     size_t discarded = 0U;
     while (discarded <= EDGE_MODBUS_TCP_RESYNC_BYTES) {
         uint8_t byte = 0U;
-        if (!read_exact(device->link->fd, &byte, 1U))
+        if (!read_exact(device, &byte, 1U))
             return false;
         if (header_size < sizeof(header))
             header[header_size++] = byte;
@@ -784,7 +821,7 @@ static bool receive_modbus(edge_acquisition_device *device, uint8_t *frame,
         const size_t length = ((size_t)header[4] << 8U) | header[5];
         if (protocol_id == 0U && length >= 2U && length + 6U <= capacity) {
             memcpy(frame, header, sizeof(header));
-            if (!read_exact(device->link->fd, frame + sizeof(header), length - 1U))
+            if (!read_exact(device, frame + sizeof(header), length - 1U))
                 return false;
             *size = length + 6U;
             return true;
@@ -799,11 +836,11 @@ static bool receive_modbus(edge_acquisition_device *device, uint8_t *frame,
 
 static bool receive_s7(edge_acquisition_device *device, uint8_t *frame,
                         size_t capacity, size_t *size) {
-    if (!read_exact(device->link->fd, frame, 4U))
+    if (!read_exact(device, frame, 4U))
         return false;
     const size_t length = ((size_t)frame[2] << 8U) | frame[3];
     if (length < 7U || length > capacity ||
-        !read_exact(device->link->fd, frame + 4U, length - 4U))
+        !read_exact(device, frame + 4U, length - 4U))
         return false;
     *size = length;
     return true;
@@ -851,11 +888,11 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
                 memcmp(heartbeat, device->config->heartbeat_payload.bytes,
                        heartbeat_size) != 0)
                 break;
-            if (!read_exact(device->link->fd, heartbeat, heartbeat_size))
+            if (!read_exact(device, heartbeat, heartbeat_size))
                 break;
         }
     }
-    if (!write_all(device->link->fd, request, request_size)) {
+    if (!write_all(device, request, request_size)) {
         if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET ||
             device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
             close_fd(&device->link->fd);
@@ -1000,6 +1037,27 @@ static edge_s7_address s7_address(const iot_edge_v1_S7AreaConfig *point) {
     return address;
 }
 
+static void release_response(edge_acquisition_response *response) {
+    if (response != NULL && --response->references == 0U)
+        free(response);
+}
+
+static bool retain_read_response(edge_acquisition_device *device,
+                                 const uint8_t *bytes, size_t size) {
+    if (size == 0U || size > sizeof(((iot_edge_v1_TelemetryRecord *)0)->raw_payload.bytes))
+        return false;
+    edge_acquisition_response *response = malloc(sizeof(*response) + size);
+    if (response == NULL)
+        return false;
+    response->references = 1U;
+    response->size = size;
+    response->observed_at_ms = current_ms();
+    memcpy(response->bytes, bytes, size);
+    release_response(device->read_response);
+    device->read_response = response;
+    return true;
+}
+
 static edge_io_result read_modbus_range(edge_acquisition_device *device,
                                         uint8_t function, uint16_t address,
                                         uint16_t quantity, uint8_t *data,
@@ -1024,6 +1082,8 @@ static edge_io_result read_modbus_range(edge_acquisition_device *device,
     const edge_modbus_result parsed = edge_modbus_parse_response(
         &request, response, response_size, NULL, 0U, data, capacity, data_size, &exception);
     if (parsed != EDGE_MODBUS_OK)
+        return EDGE_IO_PROTOCOL_ERROR;
+    if (!retain_read_response(device, response, response_size))
         return EDGE_IO_PROTOCOL_ERROR;
     return EDGE_IO_OK;
 }
@@ -1059,6 +1119,8 @@ static edge_io_result read_s7_point(edge_acquisition_device *device,
     const edge_s7_result result = edge_s7_parse_read(response, response_size, reference,
                                                      data, capacity, data_size, &return_code);
     if (result != EDGE_S7_OK)
+        return EDGE_IO_PROTOCOL_ERROR;
+    if (!retain_read_response(device, response, response_size))
         return EDGE_IO_PROTOCOL_ERROR;
     if (address.bit_access && *data_size != 0U) {
         data[0] = data[0] != 0U ? 1U : 0U;
@@ -1243,7 +1305,12 @@ static bool decode_scalar(const iot_edge_v1_ConfigItem *item, const uint8_t *raw
     return false;
 }
 
-static void fill_point_value(edge_acquisition_point *point, const uint8_t *raw, size_t size) {
+static void fill_point_value(edge_acquisition_point *point, const uint8_t *raw, size_t size,
+                              edge_acquisition_response *response) {
+    if (response != NULL)
+        ++response->references;
+    release_response(point->response);
+    point->response = response;
     point->value = (iot_edge_v1_TelemetryValue)iot_edge_v1_TelemetryValue_init_zero;
     if (point->item->which_item == iot_edge_v1_ConfigItem_modbus_register_tag) {
         const iot_edge_v1_ModbusRegisterConfig *config = &point->item->item.modbus_register;
@@ -1299,7 +1366,7 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
                                                 raw, sizeof(raw), &raw_size))
                     continue;
                 edge_acquisition_point *point = &device->points[planned->point_index];
-                fill_point_value(point, raw, raw_size);
+                fill_point_value(point, raw, raw_size, device->read_response);
                 any = any || point->valid;
             }
         }
@@ -1318,7 +1385,7 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
             log_io_result(device, result, "read");
             return result;
         }
-        fill_point_value(point, raw, raw_size);
+        fill_point_value(point, raw, raw_size, device->read_response);
         any = any || point->valid;
     }
     log_io_result(device, EDGE_IO_OK, "read");
@@ -1511,7 +1578,7 @@ static edge_io_result device_write_readback(void *context,
                                       : write_s7(device, &point->item->item.s7_area,
                                             command, actual);
     if (result == EDGE_IO_OK)
-        fill_point_value(point, actual->bytes, actual->size);
+        fill_point_value(point, actual->bytes, actual->size, device->read_response);
     return result;
 }
 
@@ -1565,9 +1632,13 @@ static bool sl651_send(void *context, const uint8_t *bytes, size_t size) {
             continue;
         if (n <= 0)
             return false;
+        debug_packet(device, "TX", bytes + offset, (size_t)n, true, false);
         offset += (size_t)n;
     }
     return true;
+}
+static void sl651_trace(void *context, const uint8_t *bytes, size_t size) {
+    debug_packet(context, "RX", bytes, size, true, true);
 }
 static bool sl651_value(const iot_edge_v1_Sl651ElementConfig *element, const uint8_t *bytes,
                         size_t size, iot_edge_v1_ScalarValue *value) {
@@ -1696,8 +1767,34 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         }
         starts[parts] = index;
     }
-    if (!parts)
-        parts = 1;
+    const size_t value_parts = parts;
+    const size_t frame_count = edge_sl651_report_frame_count(device->sl651);
+    pb_bytes_array_t **raw_frames = calloc(frame_count, sizeof(*raw_frames));
+    bool queued = false;
+    size_t raw_starts[257] = {0}, raw_parts = 0;
+    if (frame_count == 0 || raw_frames == NULL)
+        goto report_cleanup;
+    size_t raw_bytes = 0;
+    for (size_t index = 0; index < frame_count; ++index) {
+        const uint8_t *bytes;
+        size_t size;
+        if (!edge_sl651_report_frame(device->sl651, index, &bytes, &size))
+            goto report_cleanup;
+        if (raw_bytes && raw_bytes + size + 8 > 12000) {
+            raw_starts[++raw_parts] = index;
+            raw_bytes = 0;
+        }
+        if (raw_parts + value_parts >= 256)
+            goto report_cleanup;
+        raw_frames[index] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(size));
+        if (raw_frames[index] == NULL)
+            goto report_cleanup;
+        raw_frames[index]->size = (pb_size_t)size;
+        memcpy(raw_frames[index]->bytes, bytes, size);
+        raw_bytes += size + 8;
+    }
+    raw_starts[++raw_parts] = frame_count;
+    parts = value_parts + raw_parts;
     if (device->sl651_token != token) {
         device->sl651_token = token;
         device->sl651_parts = (uint32_t)parts;
@@ -1706,7 +1803,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             record_id((uint64_t)current_ms(), device->sl651_record_ids[i]);
     }
     device->sl651_report_encoded = true;
-    bool queued = true;
+    queued = true;
     device->observed_at_ms = sl651_observed(device, frame->body);
     device->last_activity_at_ms = current_ms();
     for (size_t part = 0; part < parts; ++part) {
@@ -1715,6 +1812,10 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
         edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes),
                                 device->sl651_record_ids[part], 16);
+        edge_protocol_set_bytes(&record.report_id, sizeof(record.report_id.bytes),
+                                device->sl651_record_ids[0], 16);
+        record.part_index = (uint32_t)part;
+        record.part_count = (uint32_t)parts;
         edge_protocol_set_bytes(&record.device_id, sizeof(record.device_id.bytes),
                                 device->config->device_id.bytes, 16);
         edge_protocol_set_bytes(&record.endpoint_id, sizeof(record.endpoint_id.bytes),
@@ -1723,10 +1824,22 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         record.observed_at_ms = device->observed_at_ms;
         copy_text(record.function_code, sizeof(record.function_code), function);
         copy_text(record.direction, sizeof(record.direction), "UP");
-        record.values = values + starts[part];
-        record.values_count = (pb_size_t)(starts[part + 1] - starts[part]);
+        if (part < value_parts) {
+            record.values = values + starts[part];
+            record.values_count = (pb_size_t)(starts[part + 1] - starts[part]);
+        } else {
+            size_t raw_part = part - value_parts;
+            record.raw_payloads = raw_frames + raw_starts[raw_part];
+            record.raw_payloads_count = (pb_size_t)(raw_starts[raw_part + 1] - raw_starts[raw_part]);
+        }
         if (!worker_sl651_report(device, &record, (uint32_t)part))
             queued = false;
+    }
+report_cleanup:
+    if (raw_frames != NULL) {
+        for (size_t index = 0; index < frame_count; ++index)
+            free(raw_frames[index]);
+        free(raw_frames);
     }
     for (size_t j = 0; j < count; ++j)
         free(values[j].encoded_value);
@@ -1794,6 +1907,13 @@ static void sl651_poll(edge_acquisition_device *device, uint64_t now) {
         edge_acquisition_device *other = &device->owner->devices[i];
         if (!other->sl651 || other->link != device->link)
             continue;
+        bool first = true;
+        for (size_t j = 0; j < i; ++j) {
+            edge_acquisition_device *previous = &device->owner->devices[j];
+            if (previous->link == other->link && !memcmp(previous->platform_id, other->platform_id, 16)) first = false;
+        }
+        if (first && other->endpoint->debug_enabled)
+            debug_packet(other, "RX", bytes, (size_t)n, false, false);
         sl651_time(other, time);
         edge_sl651_receive(other->sl651, bytes, (size_t)n, now, time);
     }
@@ -1803,10 +1923,24 @@ static void device_report(void *context, const uint8_t platform_id[16],
                           const uint8_t device_id[16],
                           const edge_device_sample *sample) {
     edge_acquisition_device *device = context;
-    (void)device_id;
-    device->observed_at_ms = sample->sampled_at_ms;
-    size_t index = 0U;
-    if (device->point_count != 0U) {
+    (void)sample;
+    for (size_t first = 0U; first < device->point_count; ++first) {
+        const edge_acquisition_point *point = &device->points[first];
+        if (!point->valid || point->response == NULL)
+            continue;
+        bool already_reported = false;
+        for (size_t previous = 0U; previous < first; ++previous) {
+            if (device->points[previous].valid &&
+                device->points[previous].response == point->response) {
+                already_reported = true;
+                break;
+            }
+        }
+        if (already_reported)
+            continue;
+        const edge_acquisition_response *response = point->response;
+        if (response->observed_at_ms > device->observed_at_ms)
+            device->observed_at_ms = response->observed_at_ms;
         iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
         record.values = calloc(device->point_count, sizeof(*record.values));
         if (record.values == NULL) {
@@ -1828,11 +1962,21 @@ static void device_report(void *context, const uint8_t platform_id[16],
                       ? "POLL" : "READ");
         copy_text(record.function_name, sizeof(record.function_name), "定时采集");
         copy_text(record.direction, sizeof(record.direction), "UP");
-        record.observed_at_ms = device->observed_at_ms;
-        while (index < device->point_count) {
-            if (device->points[index].valid)
+        record.observed_at_ms = response->observed_at_ms;
+        edge_protocol_set_bytes(&record.raw_payload, sizeof(record.raw_payload.bytes),
+                                response->bytes, response->size);
+        pb_bytes_array_t *raw_frame = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(response->size));
+        if (raw_frame == NULL) {
+            free(record.values);
+            return;
+        }
+        raw_frame->size = (pb_size_t)response->size;
+        memcpy(raw_frame->bytes, response->bytes, response->size);
+        record.raw_payloads = &raw_frame;
+        record.raw_payloads_count = 1;
+        for (size_t index = first; index < device->point_count; ++index) {
+            if (device->points[index].valid && device->points[index].response == response)
                 record.values[record.values_count++] = device->points[index].value;
-            ++index;
         }
         iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
         acquisition_status_local(device->owner, platform_id, &status);
@@ -1849,6 +1993,7 @@ static void device_report(void *context, const uint8_t platform_id[16],
         if (record.values_count != 0U)
             (void)device->owner->telemetry(device->owner->callback_context,
                                            platform_id, &record);
+        free(raw_frame);
         free(record.values);
     }
 }
@@ -1892,7 +2037,7 @@ static void device_command_complete(void *context, const uint8_t platform_id[16]
     const edge_write_command *command = &device->runtime.writes[device->runtime.write_head];
     edge_acquisition_point *point = find_point(device, command->element_id);
     if (point != NULL && actual != NULL && actual->size != 0U) {
-        fill_point_value(point, actual->bytes, actual->size);
+        fill_point_value(point, actual->bytes, actual->size, device->read_response);
         if (point->valid) {
             output.actual_values[0] = point->value;
             output.actual_values_count = 1U;
@@ -1919,6 +2064,10 @@ static void free_devices(edge_acquisition_device *devices, size_t count) {
             edge_sl651_destroy(devices[index].sl651);
         else
             edge_device_runtime_close(&devices[index].runtime);
+        for (size_t point = 0U; devices[index].points != NULL &&
+                                point < devices[index].point_count; ++point)
+            release_response(devices[index].points[point].response);
+        release_response(devices[index].read_response);
         free(devices[index].points);
         free(devices[index].modbus_points);
         free(devices[index].modbus_groups);
@@ -1934,6 +2083,10 @@ static void free_links(edge_acquisition_link *links, size_t count) {
         close_fd(&links[index].listen_fd);
     }
     free(links);
+}
+
+void edge_acquisition_set_debug_callback(edge_acquisition *acquisition, edge_acquisition_debug_callback callback) {
+    if (acquisition) acquisition->debug = callback;
 }
 
 edge_acquisition *edge_acquisition_create(
@@ -2172,7 +2325,7 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                     }
                 for (size_t i = 0; i < 5; ++i)
                     station[i] = (uint8_t)((padded[i * 2] - '0') * 16 + padded[i * 2 + 1] - '0');
-                edge_sl651_callbacks callbacks = {sl651_send, sl651_report, sl651_command_result};
+                edge_sl651_callbacks callbacks = {sl651_send, sl651_report, sl651_command_result, sl651_trace};
                 runtime->sl651 =
                     edge_sl651_create(device->sl651_response_mode, station, callbacks, runtime);
                 if (!runtime->sl651) {
@@ -2609,6 +2762,18 @@ static bool worker_sl651_report(edge_acquisition_device *device,
            (ssize_t)size;
 }
 
+static void worker_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
+    edge_acquisition *acquisition = context;
+    edge_acquisition_message message;
+    memset(&message, 0, sizeof(message));
+    message.magic = EDGE_ACQUISITION_MAGIC;
+    message.type = EDGE_ACQUISITION_EVENT_DEBUG;
+    message.payload_size = sizeof(*packet);
+    memcpy(message.platform_id, platform_id, 16);
+    message.payload.debug = *packet;
+    (void)send(acquisition->worker_fd, &message, acquisition_message_size(sizeof(*packet)), MSG_DONTWAIT | MSG_NOSIGNAL);
+}
+
 static bool worker_telemetry(void *context,
                              const uint8_t platform_id[16],
                              const iot_edge_v1_TelemetryRecord *record) {
@@ -2730,6 +2895,7 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
     acquisition->worker_child = true;
     acquisition->worker_pid = 0;
     acquisition->worker_fd = worker_fd;
+    acquisition->debug = worker_debug;
     acquisition->telemetry = worker_telemetry;
     acquisition->command = worker_command_result;
     acquisition->callback_context = acquisition;
@@ -2903,7 +3069,9 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY ||
+        if (message.type == EDGE_ACQUISITION_EVENT_DEBUG && message.payload_size == sizeof(iot_edge_v1_RawPacket)) {
+            if (acquisition->debug) acquisition->debug(acquisition->callback_context, message.platform_id, &message.payload.debug);
+        } else if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY ||
             message.type == EDGE_ACQUISITION_EVENT_SL651) {
             iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
             pb_istream_t stream = pb_istream_from_buffer(message.payload.telemetry,
