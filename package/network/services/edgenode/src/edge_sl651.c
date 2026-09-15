@@ -280,6 +280,19 @@ static void submit(edge_sl651_session *s, const edge_sl651_frame *f, uint8_t *bo
         free(body);
         return;
     }
+    uint8_t identity[9];
+    identity[0] = f->function;
+    memcpy(identity + 1, body, 8);
+    for (size_t i = 0; i < s->seen_count; ++i) {
+        if (memcmp(s->seen[i], identity, 9)) continue;
+        edge_sl651_frame previous = *f;
+        previous.body = body;
+        previous.body_size = n;
+        if ((s->mode == 2 || f->total || s->seen_confirm[i]) && f->function != 0x2F)
+            (void)confirm(s, &previous, f->total || f->ending == 3 ? 4 : 6, 0);
+        free(body);
+        return;
+    }
     s->report = *f;
     s->report.body = body;
     s->report.body_size = n;
@@ -287,16 +300,8 @@ static void submit(edge_sl651_session *s, const edge_sl651_frame *f, uint8_t *bo
     s->awaiting_commit = true;
     s->token = s->next_token++;
     s->publication_deadline = s->now + 3000;
-    uint8_t identity[9];
-    identity[0] = f->function;
-    memcpy(identity + 1, body, 8);
     s->report_matches = s->querying && s->query_function == f->function;
     s->report_confirm = false;
-    for (size_t i = 0; i < s->seen_count; ++i)
-        if (!memcmp(s->seen[i], identity, 9)) {
-            s->report_matches = false;
-            s->report_confirm = s->seen_confirm[i];
-        }
     s->report_submitted = s->callbacks.report(s->context, s->token, &s->report);
 }
 static void consume_frame(edge_sl651_session *s, const edge_sl651_frame *f) {

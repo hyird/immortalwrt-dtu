@@ -81,6 +81,7 @@ static void test_missing_packets_and_timeout(void) {
     /* A final packet repeated after EOT loss is safely confirmed again. */
     n = packet(input, 3, 3, 3, body + 10, 2);
     edge_sl651_receive(s, input, n, 1003, time);
+    assert(reports == 1);
     edge_sl651_commit(s, token, 1003, time);
     assert(sent[sent_size - 3] == 4 && sent[16] == 3);
     uint8_t id[16] = {1};
