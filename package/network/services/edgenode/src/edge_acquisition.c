@@ -1648,7 +1648,8 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             continue;
         iot_edge_v1_TelemetryValue *value = &values[count];
         bool binary =
-            !strcmp(element->encoding, "JPEG") || (!strcmp(element->encoding, "HEX") && size > 63);
+            !strcmp(element->encoding, "JPEG") ||
+            ((!strcmp(element->encoding, "HEX") || !strcmp(element->encoding, "DICT")) && size > 63);
         bool decoded = false;
         if (binary && size <= 8192 && size <= EDGE_SL651_BODY_MAX - binary_size) {
             value->encoded_value = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(size));

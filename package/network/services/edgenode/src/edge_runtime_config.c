@@ -99,7 +99,7 @@ static bool valid_sl651_function(const char *code) {
 static bool valid_sl651_element(const iot_edge_v1_Sl651ElementConfig *point) {
     if (!point->element_id[0] || !valid_sl651_function(point->function_code) ||
         point->digits > 7 || point->length > 65536 ||
-        (strcmp(point->encoding, "BCD") && strcmp(point->encoding, "HEX") &&
+        (strcmp(point->encoding, "BCD") && strcmp(point->encoding, "HEX") && strcmp(point->encoding, "DICT") &&
          strcmp(point->encoding, "JPEG") && strcmp(point->encoding, "TIME_YYMMDDHHMMSS")))
         return false;
     if (point->fixed_position)
