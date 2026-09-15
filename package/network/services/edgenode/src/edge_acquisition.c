@@ -1693,6 +1693,9 @@ static bool encode_scalar(const iot_edge_v1_ConfigItem *item, const char *text,
                strcmp(type, "UINT16") == 0 || strcmp(type, "WORD") == 0 ||
                strcmp(type, "UINT32") == 0 || strcmp(type, "DWORD") == 0 ||
                strcmp(type, "UINT64") == 0) {
+        if (item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag &&
+            (text[0] < '0' || text[0] > '9'))
+            return false;
         if (!parse_unsigned(text, &unsigned_value))
             return false;
         if (item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag && width < 8U &&

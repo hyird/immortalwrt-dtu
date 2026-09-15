@@ -567,6 +567,8 @@ static void verify_industrial_acquisition(iot_edge_v1_Protocol protocol, bool va
             request.values[0].expected.which_value=iot_edge_v1_ScalarValue_string_value_tag;
             strcpy(request.values[0].expected.value.string_value,protocol==iot_edge_v1_Protocol_PROTOCOL_DLT645?"1000000.00":"65536");
             assert(!edge_acquisition_command(acquisition,&request,error,sizeof(error)));
+            strcpy(request.values[0].expected.value.string_value,"-18446744073709551615");
+            assert(!edge_acquisition_command(acquisition,&request,error,sizeof(error)));
             strcpy(request.values[0].expected.value.string_value,protocol==iot_edge_v1_Protocol_PROTOCOL_DLT645?"13.25":"13");
             assert(edge_acquisition_command(acquisition,&request,error,sizeof(error)));queued=true;
         }
