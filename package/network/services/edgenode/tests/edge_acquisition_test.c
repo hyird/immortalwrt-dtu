@@ -327,7 +327,6 @@ static bool store_response_record(void *context, const uint8_t platform_id[16],
         assert(strcmp(record->values[2].element_id, "holding-copy") == 0);
         assert(record->values[2].value.value.double_value == 100.0);
     }
-    assert(record->raw_payload.size == 0);
     assert(record->raw_payloads_count == 2 && record->raw_packet_ids_count == 2);
     for (unsigned index = 0; index < 2; ++index) {
         assert(record->raw_payloads[index]->size == expected_response_size);
@@ -352,7 +351,13 @@ static void record_debug(void *context, const uint8_t platform_id[16], const iot
     if (!strcmp(packet->status, "success")) ++debug_success;
     assert(packet->debug && packet->packet_id.size == 16 && packet->device_id.size == 16);
     assert(packet->device_id.bytes[0] == 2 && packet->endpoint_id.bytes[0] == 1);
-    assert(packet->payload.size > 0 && packet->payload.size <= 4096);
+    assert(packet->acquisition_id.size == 16);
+    if (!packet->payload.size) {
+        assert(!strcmp(packet->acquisition_state, "running") || !strcmp(packet->acquisition_state, "success") ||
+               !strcmp(packet->acquisition_state, "partial") || !strcmp(packet->acquisition_state, "failed"));
+        return;
+    }
+    assert(packet->payload.size <= 4096);
     if (!strcmp(packet->direction, "RX")) debug_rx += packet->payload.size;
     else { assert(!strcmp(packet->direction, "TX")); debug_tx += packet->payload.size; }
 }

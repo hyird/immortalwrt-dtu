@@ -82,6 +82,8 @@ struct edge_acquisition_link {
 };
 
 struct edge_acquisition_device {
+    uint8_t acquisition_id[16];
+    bool acquisition_active;
     iot_edge_v1_RawPacket *debug_request;
     uint8_t received_packet_id[16];
     int64_t received_packet_time;
@@ -185,7 +187,11 @@ static void set_error(char *error, size_t size, const char *message) {
 static void copy_text(char *output, size_t capacity, const char *input) {
     if (capacity == 0U)
         return;
-    snprintf(output, capacity, "%s", input != NULL ? input : "");
+    const char *text = input != NULL ? input : "";
+    size_t length = strlen(text);
+    if (length >= capacity) length = capacity - 1;
+    memmove(output, text, length);
+    output[length] = '\0';
 }
 
 static bool same_id(const void *field, const uint8_t id[16]) {
@@ -291,13 +297,13 @@ static const char *device_label(const edge_acquisition_device *device) {
 static void device_detail(const edge_acquisition_device *device, const char *operation,
                           char *detail, size_t size) {
     if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL) {
-        snprintf(detail, size, "device=%s operation=%s protocol=%s serial=%s",
+        snprintf(detail, size, "device=%.32s operation=%.16s protocol=%.12s serial=%.64s",
                  device_label(device), operation, protocol_name(device),
                  device->endpoint->serial.channel);
         return;
     }
     snprintf(detail, size,
-             "device=%s operation=%s protocol=%s mode=%s endpoint=%s:%u interface=%s",
+             "device=%.32s operation=%.16s protocol=%.12s mode=%.12s endpoint=%.40s:%u interface=%.16s",
              device_label(device), operation, protocol_name(device),
              mode_name(device->endpoint->mode), device->endpoint->ip,
              device->endpoint->port, device->endpoint->interface_name);
@@ -487,6 +493,30 @@ static int wait_fd(int fd, short events) {
     }
 }
 
+static void debug_acquisition_state(edge_acquisition_device *device, const char *state) {
+    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) || !device->owner->debug) return;
+    iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
+    packet.debug = true;
+    packet.acquisition_id.size = 16;
+    memcpy(packet.acquisition_id.bytes, device->acquisition_id, 16);
+    packet.packet_id.size = 16;
+    record_id((uint64_t)current_ms(), packet.packet_id.bytes);
+    packet.endpoint_id.size = 16;
+    memcpy(packet.endpoint_id.bytes, device->endpoint->endpoint_id.bytes, 16);
+    packet.device_id.size = 16;
+    memcpy(packet.device_id.bytes, device->config->device_id.bytes, 16);
+    packet.observed_at_ms = current_ms();
+    copy_text(packet.direction, sizeof(packet.direction), "RX");
+    copy_text(packet.acquisition_state, sizeof(packet.acquisition_state), state);
+    device->owner->debug(device->owner->callback_context, device->platform_id, &packet);
+}
+
+static void finish_debug_acquisition(edge_acquisition_device *device, edge_io_result result) {
+    bool partial = false;
+    for (size_t index = 0; index < device->point_count; ++index) partial |= device->points[index].valid;
+    debug_acquisition_state(device, result == EDGE_IO_OK ? "success" : partial ? "partial" : "failed");
+}
+
 static void debug_packet_with_id(edge_acquisition_device *device, const uint8_t id[16], const char *direction,
                          const uint8_t *data, size_t size, bool identified, bool device_only) {
     if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
@@ -494,13 +524,23 @@ static void debug_packet_with_id(edge_acquisition_device *device, const uint8_t 
     for (size_t offset = 0; offset < size; offset += 4096U) {
         iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
         packet.debug = true;
+        packet.acquisition_id.size = 16;
+        memcpy(packet.acquisition_id.bytes, device->acquisition_id, 16);
         packet.device_only = device_only;
         packet.packet_id.size = 16;
         memcpy(packet.packet_id.bytes, id, 16);
         packet.payload_offset = (uint32_t)offset;
-        if (!strcmp(direction, "TX") && device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651) {
+        if (!strcmp(direction, "RX") && device->debug_request) {
             packet.reply_to_packet_id.size = 16;
-            memcpy(packet.reply_to_packet_id.bytes, device->received_packet_id, 16);
+            memcpy(packet.reply_to_packet_id.bytes, device->debug_request->packet_id.bytes, 16);
+        }
+        if (!strcmp(direction, "TX") && device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651) {
+            bool has_reply = false;
+            for (size_t index = 0; index < 16; ++index) has_reply |= device->received_packet_id[index] != 0;
+            if (has_reply) {
+                packet.reply_to_packet_id.size = 16;
+                memcpy(packet.reply_to_packet_id.bytes, device->received_packet_id, 16);
+            }
         }
         packet.endpoint_id.size = 16;
         memcpy(packet.endpoint_id.bytes, device->endpoint->endpoint_id.bytes, 16);
@@ -538,6 +578,8 @@ static void debug_request_begin(edge_acquisition_device *device, const uint8_t *
     iot_edge_v1_RawPacket *packet = calloc(1, sizeof(*packet));
     if (!packet) return;
     device->debug_request = packet;
+    packet->acquisition_id.size = 16;
+    memcpy(packet->acquisition_id.bytes, device->acquisition_id, 16);
     packet->debug = true;
     packet->packet_id.size = 16;
     record_id((uint64_t)current_ms(), packet->packet_id.bytes);
@@ -1051,7 +1093,7 @@ static bool parse_hex16(const char *text, uint16_t *value) {
     return true;
 }
 
-static edge_io_result device_handshake(void *context) {
+static edge_io_result handshake_acquisition(void *context) {
     edge_acquisition_device *device = context;
     if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS) {
         device->industrial = device->config->industrial;
@@ -1129,6 +1171,22 @@ static edge_io_result device_handshake(void *context) {
     return EDGE_IO_OK;
 }
 
+static edge_io_result device_handshake(void *context) {
+    edge_acquisition_device *device = context;
+    const bool standalone = !device->acquisition_active;
+    if (standalone) {
+        record_id((uint64_t)current_ms(), device->acquisition_id);
+        device->acquisition_active = true;
+        debug_acquisition_state(device, "running");
+    }
+    const edge_io_result result = handshake_acquisition(context);
+    if (standalone) {
+        finish_debug_acquisition(device, result);
+        device->acquisition_active = false;
+    }
+    return result;
+}
+
 static uint8_t modbus_function(const char *type) {
     if (strcmp(type, "COIL") == 0)
         return 1U;
@@ -1180,7 +1238,7 @@ static void release_response(edge_acquisition_response *response) {
 
 static bool retain_read_response(edge_acquisition_device *device,
                                  const uint8_t *bytes, size_t size) {
-    if (size == 0U || size > sizeof(((iot_edge_v1_TelemetryRecord *)0)->raw_payload.bytes))
+    if (size == 0U || size > 8192U)
         return false;
     edge_acquisition_response *response = malloc(sizeof(*response) + size);
     if (response == NULL)
@@ -1531,7 +1589,7 @@ static void fill_point_value(edge_acquisition_point *point, const uint8_t *raw, 
     point->valid = point->value.has_value;
 }
 
-static edge_io_result device_read(void *context, edge_device_sample *sample) {
+static edge_io_result read_acquisition(void *context, edge_device_sample *sample) {
     edge_acquisition_device *device = context;
     if (!prepare_serial_task(device))
         return EDGE_IO_OFFLINE;
@@ -1811,7 +1869,7 @@ static edge_io_result write_industrial(edge_acquisition_device *device,
     return read_industrial_point(device, point, actual->bytes, sizeof(actual->bytes), &actual->size);
 }
 
-static edge_io_result device_write_readback(void *context,
+static edge_io_result write_acquisition(void *context,
                                              const edge_write_command *command,
                                              edge_device_sample *actual) {
     edge_acquisition_device *device = context;
@@ -1831,6 +1889,31 @@ static edge_io_result device_write_readback(void *context,
                                             command, actual);
     if (result == EDGE_IO_OK)
         fill_point_value(point, actual->bytes, actual->size, device->read_response);
+    return result;
+}
+
+static edge_io_result device_read(void *context, edge_device_sample *sample) {
+    edge_acquisition_device *device = context;
+    record_id((uint64_t)current_ms(), device->acquisition_id);
+    device->acquisition_active = true;
+    debug_acquisition_state(device, "running");
+    for (size_t index = 0; index < device->point_count; ++index) device->points[index].valid = false;
+    const edge_io_result result = read_acquisition(context, sample);
+    finish_debug_acquisition(device, result);
+    device->acquisition_active = false;
+    return result;
+}
+
+static edge_io_result device_write_readback(void *context, const edge_write_command *command,
+                                           edge_device_sample *actual) {
+    edge_acquisition_device *device = context;
+    memcpy(device->acquisition_id, command->command_id, 16);
+    device->acquisition_active = true;
+    debug_acquisition_state(device, "running");
+    for (size_t index = 0; index < device->point_count; ++index) device->points[index].valid = false;
+    const edge_io_result result = write_acquisition(context, command, actual);
+    finish_debug_acquisition(device, result);
+    device->acquisition_active = false;
     return result;
 }
 
@@ -1871,8 +1954,12 @@ static int64_t sl651_observed(edge_acquisition_device *device, const uint8_t *bo
                        .tm_sec = (int)values[5]};
     return ((int64_t)timegm(&local) - sl651_timezone(device)) * 1000;
 }
-static bool sl651_send(void *context, const uint8_t *bytes, size_t size) {
+static bool sl651_send(void *context, const uint8_t *bytes, size_t size,
+                       const uint8_t acquisition_id[16], const uint8_t *reply_to_packet_id) {
     edge_acquisition_device *device = context;
+    memcpy(device->acquisition_id, acquisition_id, 16);
+    if (reply_to_packet_id) memcpy(device->received_packet_id, reply_to_packet_id, 16);
+    else memset(device->received_packet_id, 0, 16);
     if (!device->sl651_transmitter)
         return true;
     if (device->link->fd < 0)
@@ -1889,8 +1976,11 @@ static bool sl651_send(void *context, const uint8_t *bytes, size_t size) {
     }
     return true;
 }
-static void sl651_trace(void *context, const uint8_t *bytes, size_t size, uint8_t packet_id[16]) {
+static void sl651_trace(void *context, const uint8_t *bytes, size_t size, uint8_t packet_id[16], uint8_t acquisition_id[16]) {
     edge_acquisition_device *device = context;
+    static const uint8_t empty[16] = {0};
+    if (!memcmp(acquisition_id, empty, 16)) record_id((uint64_t)current_ms(), acquisition_id);
+    memcpy(device->acquisition_id, acquisition_id, 16);
     record_id((uint64_t)current_ms(), packet_id);
     memcpy(device->received_packet_id, packet_id, 16);
     debug_packet_with_id(device, packet_id, "RX", bytes, size, true, false);
@@ -2073,7 +2163,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes),
                                 device->sl651_record_ids[part], 16);
         edge_protocol_set_bytes(&record.report_id, sizeof(record.report_id.bytes),
-                                device->sl651_record_ids[0], 16);
+                                frame->acquisition_id, 16);
         record.part_index = (uint32_t)part;
         record.part_count = (uint32_t)parts;
         edge_protocol_set_bytes(&record.device_id, sizeof(record.device_id.bytes),
@@ -2107,6 +2197,10 @@ report_cleanup:
     for (size_t j = 0; j < count; ++j)
         free(values[j].encoded_value);
     free(values);
+    if (queued) {
+        memcpy(device->acquisition_id, frame->acquisition_id, 16);
+        finish_debug_acquisition(device, EDGE_IO_OK);
+    }
     return queued;
 }
 static void sl651_command_result(void *context, const uint8_t id[16], bool success,
@@ -2285,13 +2379,12 @@ static void device_report(void *context, const uint8_t platform_id[16],
     if (!record.values_count || !record.raw_payloads_count) goto cleanup;
     record.observed_at_ms = responses[0]->observed_at_ms;
     device->observed_at_ms = responses[record.raw_payloads_count-1]->observed_at_ms;
-    uint8_t id[16]; record_id((uint64_t)device->observed_at_ms, id);
-    edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes), id, 16);
+    edge_protocol_set_bytes(&record.record_id, sizeof(record.record_id.bytes), device->acquisition_id, 16);
     edge_protocol_set_bytes(&record.device_id, sizeof(record.device_id.bytes), device->config->device_id.bytes, 16);
     edge_protocol_set_bytes(&record.endpoint_id, sizeof(record.endpoint_id.bytes), device->config->endpoint_id.bytes, 16);
     record.protocol = device->config->protocol;
     copy_text(record.function_code, sizeof(record.function_code), "POLL");
-    copy_text(record.function_name, sizeof(record.function_name), "定时采集");
+    copy_text(record.function_name, sizeof(record.function_name), "瀹氭椂閲囬泦");
     copy_text(record.direction, sizeof(record.direction), "UP");
     iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
     acquisition_status_local(device->owner, platform_id, &status);

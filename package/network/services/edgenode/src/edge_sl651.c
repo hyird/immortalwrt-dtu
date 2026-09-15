@@ -209,6 +209,7 @@ struct edge_sl651_session {
     unsigned retries;
     bool seen_confirm[64];
     uint8_t seen[64][9];
+    uint8_t seen_acquisitions[64][16];
     size_t seen_count, seen_next;
 };
 static void packets_free(edge_sl651_session *s) {
@@ -270,7 +271,7 @@ static bool confirm(edge_sl651_session *s, const edge_sl651_frame *f, uint8_t en
                     uint16_t seq) {
     uint8_t out[32];
     size_t n = edge_sl651_confirm(f, ending, seq, s->time, out, sizeof(out));
-    return n && s->callbacks.send(s->context, out, n);
+    return n && s->callbacks.send(s->context, out, n, f->acquisition_id, f->packet_id);
 }
 static bool missing(edge_sl651_session *s) {
     for (uint16_t i = 0; i < s->total; ++i)
@@ -427,12 +428,27 @@ static void drain(edge_sl651_session *s) {
         size_t n = (be16(s->receive + 11) & 0xFFFU) + 17;
         if (n > s->receive_size)
             break;
-        uint8_t packet_id[16] = {0};
-        if (s->callbacks.trace && !memcmp(s->receive + 3, s->station, 5))
-            s->callbacks.trace(s->context, s->receive, n, packet_id);
+        uint8_t packet_id[16] = {0}, acquisition_id[16] = {0};
         edge_sl651_frame frame;
-        if (edge_sl651_parse(s->receive, n, &frame)) {
+        const bool valid = edge_sl651_parse(s->receive, n, &frame);
+        if (valid) {
+            if (s->querying && s->query_function == frame.function)
+                memcpy(acquisition_id, s->command_id, 16);
+            else if (frame.total && s->packets && s->total == frame.total && s->header.function == frame.function &&
+                (frame.sequence != 1 || !s->packets[0].bytes ||
+                 (s->packets[0].size == frame.body_size && !memcmp(s->packets[0].bytes, frame.body, frame.body_size))))
+                memcpy(acquisition_id, s->header.acquisition_id, 16);
+            else if (!frame.total && frame.body_size >= 8) {
+                for (size_t i = 0; i < s->seen_count; ++i)
+                    if (s->seen[i][0] == frame.function && !memcmp(s->seen[i]+1, frame.body, 8))
+                        memcpy(acquisition_id, s->seen_acquisitions[i], 16);
+            }
+        }
+        if (s->callbacks.trace && !memcmp(s->receive + 3, s->station, 5))
+            s->callbacks.trace(s->context, s->receive, n, packet_id, acquisition_id);
+        if (valid) {
             memcpy(frame.packet_id, packet_id, 16);
+            memcpy(frame.acquisition_id, acquisition_id, 16);
             consume_frame(s, &frame);
         }
         s->receive_size -= n;
@@ -481,6 +497,7 @@ void edge_sl651_commit(edge_sl651_session *s, uint64_t token, uint64_t now, cons
     uint8_t *seen = s->seen[s->seen_next];
     seen[0] = s->report.function;
     memcpy(seen + 1, s->report.body, 8);
+    memcpy(s->seen_acquisitions[s->seen_next], s->report.acquisition_id, 16);
     s->seen_next = (s->seen_next + 1) % 64;
     if (s->seen_count < 64)
         ++s->seen_count;
@@ -511,7 +528,7 @@ void edge_sl651_tick(edge_sl651_session *s, uint64_t now, const uint8_t time[6])
         else if (s->retries >= 2)
             query_finish(s, false, "SL651 query timeout");
         else {
-            (void)s->callbacks.send(s->context, s->query, s->query_size);
+            (void)s->callbacks.send(s->context, s->query, s->query_size, s->command_id, NULL);
             ++s->retries;
             s->query_deadline = now + s->timeout;
         }
@@ -549,7 +566,7 @@ bool edge_sl651_query(edge_sl651_session *s, const uint8_t id[16], uint8_t funct
     header.function = function;
     s->query_size =
         downlink(&header, 5, header.total, content, size + 8, s->query, sizeof(s->query));
-    if (!s->query_size || !s->callbacks.send(s->context, s->query, s->query_size))
+    if (!s->query_size || !s->callbacks.send(s->context, s->query, s->query_size, id, NULL))
         return false;
     s->command_requested = s->command_persisted = false;
     s->querying = true;

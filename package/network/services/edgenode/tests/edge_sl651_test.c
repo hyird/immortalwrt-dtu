@@ -5,10 +5,14 @@
 #include <string.h>
 static uint8_t sent[EDGE_SL651_FRAME_MAX];
 static size_t sent_size;
+static uint8_t sent_acquisition[16], reported_acquisition[16];
+static unsigned trace_sequence;
 static unsigned reports, commands;
 static unsigned failures;
 static uint64_t token;
-static bool send_bytes(void *context, const uint8_t *bytes, size_t size) {
+static bool send_bytes(void *context, const uint8_t *bytes, size_t size,
+                       const uint8_t acquisition_id[16], const uint8_t *reply_to_packet_id) {
+    memcpy(sent_acquisition, acquisition_id, 16); (void)reply_to_packet_id;
     (void)context;
     memcpy(sent, bytes, size);
     sent_size = size;
@@ -17,9 +21,19 @@ static bool send_bytes(void *context, const uint8_t *bytes, size_t size) {
 static bool report(void *context, uint64_t value, const edge_sl651_frame *frame) {
     (void)context;
     assert(frame->body_size >= 8);
+    memcpy(reported_acquisition, frame->acquisition_id, 16);
     token = value;
     ++reports;
     return true;
+}
+static void trace_packet(void *context, const uint8_t *bytes, size_t size,
+                         uint8_t packet_id[16], uint8_t acquisition_id[16]) {
+    (void)context; (void)bytes; (void)size;
+    memset(packet_id, 0, 16);
+    packet_id[0] = (uint8_t)++trace_sequence;
+    bool assigned = false;
+    for (size_t index = 0; index < 16; ++index) assigned |= acquisition_id[index] != 0;
+    if (!assigned) { memcpy(acquisition_id, packet_id, 16); acquisition_id[15] = 1; }
 }
 static void command(void *context, const uint8_t id[16], bool success, const char *reason) {
     (void)context;
@@ -60,7 +74,7 @@ static size_t packet(uint8_t *out, unsigned total, unsigned sequence, uint8_t en
 }
 static void test_missing_packets_and_timeout(void) {
     const uint8_t station[5] = {0, 0, 0, 0, 1}, time[6] = {0x24, 1, 2, 3, 4, 5};
-    edge_sl651_callbacks callbacks = {send_bytes, report, command, NULL};
+    edge_sl651_callbacks callbacks = {send_bytes, report, command, trace_packet};
     edge_sl651_session *s = edge_sl651_create(3, station, callbacks, NULL);
     uint8_t input[64], body[12] = {0, 1, 0x24, 1, 2, 3, 4, 5, 0xAB, 0x12, 0x12, 0x34};
     reports = commands = failures = 0;
@@ -91,6 +105,7 @@ static void test_missing_packets_and_timeout(void) {
     edge_sl651_commit(s, token + 1, 1002, time);
     assert(sent[sent_size - 3] == 0x15);
     edge_sl651_commit(s, token, 1002, time);
+    assert(reported_acquisition[15] == 1 && !memcmp(sent_acquisition, reported_acquisition, 16));
     assert(sent[sent_size - 3] == 4 && sent[16] == 3 && sent[18] == 1);
     /* A final packet repeated after EOT loss is safely confirmed again. */
     n = packet(input, 3, 3, 3, body + 10, 2);
@@ -125,7 +140,7 @@ int main(void) {
     for (unsigned mode = 1; mode <= 4; ++mode) {
         reports = commands = 0;
         sent_size = 0;
-        edge_sl651_callbacks callbacks = {send_bytes, report, command, NULL};
+        edge_sl651_callbacks callbacks = {send_bytes, report, command, trace_packet};
         edge_sl651_session *s = edge_sl651_create(mode, station, callbacks, NULL);
         assert(s);
         uint8_t input[64];
