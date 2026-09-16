@@ -229,6 +229,7 @@ message CapabilityReport {
   bool ttyd_available = 4;
   repeated NetworkCapability networks = 5 [(nanopb).max_count = 8];
   VpnCapabilities vpn = 6;
+  bool supports_serial_debug = 8;
 }
 
 message Heartbeat {
@@ -816,6 +817,30 @@ message TerminalClose {
   string reason = 3 [(nanopb).max_length = 128];
 }
 
+// Session-scoped serial diagnostics. OPEN only observes existing acquisition.
+// MANUAL pauses this physical port across platforms until MONITOR/CLOSE/expiry.
+message SerialDebugRequest {
+  bytes session_id = 1 [(nanopb).max_size = 16];
+  uint64 request_sequence = 2;
+  string action = 3 [(nanopb).max_length = 12];
+  SerialSettings settings = 4;
+  bytes data = 5 [(nanopb).max_size = 1024];
+}
+
+message SerialDebugEvent {
+  bytes session_id = 1 [(nanopb).max_size = 16];
+  uint64 request_sequence = 2;
+  string kind = 3 [(nanopb).max_length = 12];
+  bool manual = 4;
+  string direction = 5 [(nanopb).max_length = 2];
+  bytes data = 6 [(nanopb).max_size = 1024];
+  int64 occurred_at_ms = 7;
+  string message = 8 [(nanopb).max_length = 128];
+  uint64 sequence = 9;
+  uint64 dropped_bytes = 10;
+  SerialSettings settings = 11;
+}
+
 message Ping {
   uint64 nonce = 1;
 }
@@ -887,6 +912,8 @@ message Envelope {
     FirmwareChunk firmware_chunk = 79;
     Ping ping = 80;
     Pong pong = 81;
+    SerialDebugRequest serial_debug_request = 86;
+    SerialDebugEvent serial_debug_event = 87;
     Error error = 90;
   }
 }

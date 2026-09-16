@@ -1,5 +1,9 @@
+#define _GNU_SOURCE
 #undef NDEBUG
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -601,7 +605,151 @@ static void verify_industrial_acquisition(iot_edge_v1_Protocol protocol, bool va
     close(fd);edge_acquisition_destroy(acquisition);close(listener);
 }
 
+static iot_edge_v1_SerialDebugEvent serial_events[512];
+static size_t serial_event_count;
+static void serial_event(void *context, const uint8_t platform[16], const iot_edge_v1_SerialDebugEvent *event) {
+    (void)context; (void)platform;
+    assert(serial_event_count < 512);
+    serial_events[serial_event_count++] = *event;
+}
+static const iot_edge_v1_SerialDebugEvent *await_serial_event(edge_acquisition *acquisition,
+    uint8_t session, uint64_t request, const char *kind, size_t start) {
+    const uint64_t deadline = monotonic_ms() + 5000;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        for (size_t i = start; i < serial_event_count; ++i)
+            if (serial_events[i].session_id.bytes[0] == session &&
+                serial_events[i].request_sequence == request && !strcmp(serial_events[i].kind, kind))
+                return &serial_events[i];
+        usleep(10000);
+    }
+    fprintf(stderr, "missing serial event: session=%u request=%llu kind=%s\n", session,
+            (unsigned long long)request, kind);
+    abort();
+}
+static iot_edge_v1_SerialDebugRequest serial_request(uint8_t id, uint64_t sequence,
+    const char *action, const char *path) {
+    iot_edge_v1_SerialDebugRequest request = iot_edge_v1_SerialDebugRequest_init_zero;
+    const uint8_t session[16] = {id};
+    set_id(&request.session_id, session);
+    request.request_sequence = sequence;
+    copy_text(request.action, sizeof(request.action), action);
+    request.has_settings = true;
+    copy_text(request.settings.channel, sizeof(request.settings.channel), path);
+    request.settings.baud_rate = 9600; request.settings.data_bits = 8; request.settings.stop_bits = 1;
+    strcpy(request.settings.parity, "none");
+    return request;
+}
+static void verify_serial_debug(void) {
+    serial_event_count = 0;
+    const int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+    char path[97];
+    copy_text(path, sizeof(path), ptsname(master));
+    const uint8_t platform[16] = {0}, other_platform[16] = {9};
+    iot_edge_v1_ConfigItem values[3];
+    edge_runtime_config config = make_config(values);
+    make_serial_config(values, 9600);
+    copy_text(values[0].item.endpoint.serial.channel, sizeof(values[0].item.endpoint.serial.channel), path);
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry, command, NULL);
+    edge_acquisition_enable_serial_debug(acquisition, path, false, serial_event);
+    char error[256] = {0};
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    iot_edge_v1_SerialDebugRequest request = serial_request(1, 1, "open", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    assert(!await_serial_event(acquisition, 1, 1, "state", 0)->manual);
+    const iot_edge_v1_SerialDebugEvent *automatic = await_serial_event(acquisition, 1, 0, "data", 0);
+    assert(!strcmp(automatic->direction, "TX") && automatic->data.size > 0);
+    request = serial_request(1, 2, "write", path);
+    request.data.size = 1; request.data.bytes[0] = 0xff;
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 1, 2, "error", 0);
+    request = serial_request(1, 3, "manual", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    assert(await_serial_event(acquisition, 1, 3, "state", 0)->manual);
+    uint8_t bytes[128];
+    while (read(master, bytes, sizeof(bytes)) > 0) {}
+    const uint8_t raw[] = {0x00, 0xff, 0x0a, 0x80};
+    request = serial_request(1, 4, "write", path);
+    request.data.size = sizeof(raw); memcpy(request.data.bytes, raw, sizeof(raw));
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 1, 4, "sent", 0);
+    assert(read(master, bytes, sizeof(bytes)) == (ssize_t)sizeof(raw) && !memcmp(bytes, raw, sizeof(raw)));
+    // Duplicate delivery must never send the manual bytes twice.
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    usleep(200000);
+    edge_acquisition_tick(acquisition, monotonic_ms());
+    assert(read(master, bytes, sizeof(bytes)) < 0 && errno == EAGAIN);
+    size_t start = serial_event_count;
+    assert(write(master, raw, sizeof(raw)) == (ssize_t)sizeof(raw));
+    const iot_edge_v1_SerialDebugEvent *received = await_serial_event(acquisition, 1, 0, "data", start);
+    assert(!strcmp(received->direction, "RX") && received->data.size == sizeof(raw) &&
+           !memcmp(received->data.bytes, raw, sizeof(raw)));
+    request = serial_request(2, 1, "open", path);
+    assert(edge_acquisition_serial_request(acquisition, other_platform, &request));
+    (void)await_serial_event(acquisition, 2, 1, "state", 0);
+    request = serial_request(2, 2, "manual", path);
+    assert(edge_acquisition_serial_request(acquisition, other_platform, &request));
+    (void)await_serial_event(acquisition, 2, 2, "error", 0);
+    request = serial_request(1, 5, "close", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 1, 5, "closed", 0);
+    request = serial_request(2, 3, "manual", path);
+    assert(edge_acquisition_serial_request(acquisition, other_platform, &request));
+    assert(await_serial_event(acquisition, 2, 3, "state", 0)->manual);
+    request = serial_request(3, 1, "open", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 3, 1, "state", 0);
+    request = serial_request(1, UINT64_MAX, "close", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    request = serial_request(3, 2, "keepalive", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 3, 2, "state", 0);
+    start = serial_event_count;
+    request = serial_request(2, 4, "monitor", path);
+    assert(edge_acquisition_serial_request(acquisition, other_platform, &request));
+    assert(!await_serial_event(acquisition, 2, 4, "state", start)->manual);
+    automatic = await_serial_event(acquisition, 3, 0, "data", start);
+    assert(!strcmp(automatic->direction, "TX"));
+    // A worker restart releases manual ownership and invalidates the old identity.
+    request = serial_request(2, 5, "manual", path);
+    assert(edge_acquisition_serial_request(acquisition, other_platform, &request));
+    (void)await_serial_event(acquisition, 2, 5, "state", 0);
+    edge_acquisition_stop(acquisition);
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    request = serial_request(2, 6, "keepalive", path);
+    assert(edge_acquisition_serial_request(acquisition, other_platform, &request));
+    (void)await_serial_event(acquisition, 2, 6, "closed", 0);
+    // Losing both browser and platform cleanup still releases the physical port after its lease.
+    request = serial_request(4, 1, "open", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 4, 1, "state", 0);
+    request = serial_request(4, 2, "manual", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 4, 2, "state", 0);
+    const uint64_t lease_deadline = monotonic_ms() + 65000;
+    bool expired = false;
+    start = serial_event_count;
+    while (!expired && monotonic_ms() < lease_deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        for (size_t i = start; i < serial_event_count; ++i)
+            if (serial_events[i].session_id.bytes[0] == 4 && !strcmp(serial_events[i].kind, "closed"))
+                expired = !strcmp(serial_events[i].message, "serial debug lease expired");
+        usleep(20000);
+    }
+    assert(expired);
+    request = serial_request(5, 1, "open", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &request));
+    (void)await_serial_event(acquisition, 5, 1, "state", start);
+    automatic = await_serial_event(acquisition, 5, 0, "data", start);
+    assert(!strcmp(automatic->direction, "TX"));
+    edge_acquisition_destroy(acquisition);
+    close(master);
+}
+
 int main(void) {
+    verify_serial_debug();
     iot_edge_v1_ConfigItem values[3];
     edge_runtime_config config = make_config(values);
     edge_acquisition *acquisition = edge_acquisition_create(telemetry, command, NULL);

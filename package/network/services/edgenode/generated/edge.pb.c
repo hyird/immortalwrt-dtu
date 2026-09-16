@@ -204,6 +204,12 @@ PB_BIND(iot_edge_v1_TerminalResize, iot_edge_v1_TerminalResize, AUTO)
 PB_BIND(iot_edge_v1_TerminalClose, iot_edge_v1_TerminalClose, AUTO)
 
 
+PB_BIND(iot_edge_v1_SerialDebugRequest, iot_edge_v1_SerialDebugRequest, 2)
+
+
+PB_BIND(iot_edge_v1_SerialDebugEvent, iot_edge_v1_SerialDebugEvent, 2)
+
+
 PB_BIND(iot_edge_v1_Ping, iot_edge_v1_Ping, AUTO)
 
 

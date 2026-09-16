@@ -16,6 +16,13 @@ typedef void (*edge_acquisition_debug_callback)(void *context, const uint8_t pla
     const iot_edge_v1_RawPacket *packet);
 void edge_acquisition_set_debug_callback(edge_acquisition *acquisition, edge_acquisition_debug_callback callback);
 
+typedef void (*edge_acquisition_serial_callback)(void *context, const uint8_t platform_id[16],
+    const iot_edge_v1_SerialDebugEvent *event);
+void edge_acquisition_enable_serial_debug(edge_acquisition *acquisition, const char *path,
+    bool rs485, edge_acquisition_serial_callback callback);
+bool edge_acquisition_serial_request(edge_acquisition *acquisition, const uint8_t platform_id[16],
+    const iot_edge_v1_SerialDebugRequest *request);
+
 typedef bool (*edge_acquisition_command_callback)(
     void *context, const uint8_t platform_id[16],
     const iot_edge_v1_CommandResult *result);

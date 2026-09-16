@@ -32,6 +32,9 @@ typedef struct {
     char transport_url[EDGE_URL_MAX + 32U];
     uint8_t node_id[16];
     uint8_t terminal_id[16];
+    uint8_t serial_debug_id[16];
+    bool serial_debug_active;
+    uint64_t serial_debug_sequence;
     uint8_t terminal_output[4096];
     uint64_t session_epoch;
     uint64_t active_revision;

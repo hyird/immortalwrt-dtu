@@ -127,7 +127,22 @@ struct edge_acquisition_device {
     bool link_up;
 };
 
+typedef struct {
+    bool active, manual;
+    int fd;
+    uint8_t platform_id[16], id[16];
+    uint64_t last_request, event_sequence, expires_ms, dropped_bytes;
+    iot_edge_v1_SerialSettings settings;
+    uint8_t pending[1024];
+    size_t pending_size, pending_offset;
+    uint64_t pending_request, pending_deadline;
+} edge_serial_session;
+
 struct edge_acquisition {
+    edge_acquisition_serial_callback serial_callback;
+    char serial_path[97];
+    bool serial_rs485;
+    edge_serial_session serial_sessions[4];
     edge_acquisition_debug_callback debug;
     edge_acquisition_telemetry_callback telemetry;
     edge_acquisition_command_callback command;
@@ -148,6 +163,8 @@ struct edge_acquisition {
 };
 
 typedef enum {
+    EDGE_ACQUISITION_CONTROL_SERIAL = 10,
+    EDGE_ACQUISITION_EVENT_SERIAL = 11,
     EDGE_ACQUISITION_EVENT_DEBUG = 9,
     EDGE_ACQUISITION_EVENT_TELEMETRY = 1,
     EDGE_ACQUISITION_EVENT_COMMAND_RESULT = 2,
@@ -172,8 +189,18 @@ typedef struct {
         iot_edge_v1_CommandResult command_result;
         iot_edge_v1_DeviceStatusReport status;
         iot_edge_v1_CommandRequest command_request;
+        iot_edge_v1_SerialDebugRequest serial_request;
+        iot_edge_v1_SerialDebugEvent serial_event;
     } payload;
 } edge_acquisition_message;
+
+static void serial_observe(edge_acquisition *acquisition, const char *path,
+    const iot_edge_v1_SerialSettings *settings, const char *direction,
+    const uint8_t *bytes, size_t size);
+static bool serial_paused(const edge_acquisition_device *device);
+static void serial_control(edge_acquisition *acquisition, const uint8_t platform_id[16],
+    const iot_edge_v1_SerialDebugRequest *request);
+static void serial_tick(edge_acquisition *acquisition, uint64_t now);
 
 static bool worker_sl651_report(edge_acquisition_device *device,
                                 const iot_edge_v1_TelemetryRecord *record, uint32_t part);
@@ -594,6 +621,7 @@ static void debug_request_begin(edge_acquisition_device *device, const uint8_t *
 }
 
 static bool write_all(edge_acquisition_device *device, const uint8_t *data, size_t size) {
+    if (serial_paused(device)) return false;
     const int fd = device->link->fd;
     size_t offset = 0U;
     while (offset < size) {
@@ -604,6 +632,9 @@ static bool write_all(edge_acquisition_device *device, const uint8_t *data, size
             continue;
         if (count <= 0)
             return false;
+        if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
+            serial_observe(device->owner, device->endpoint->serial.channel,
+                &device->endpoint->serial, "TX", data + offset, (size_t)count);
         if (!device->debug_request && device->config->protocol != iot_edge_v1_Protocol_PROTOCOL_DLT645)
             debug_packet(device, "TX", data + offset, (size_t)count, true, false);
         offset += (size_t)count;
@@ -647,6 +678,9 @@ static bool read_exact(edge_acquisition_device *device, uint8_t *data, size_t si
         if (count <= 0)
             return false;
         /* The completed protocol frame receives one ID in exchange(). */
+        if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
+            serial_observe(device->owner, device->endpoint->serial.channel,
+                &device->endpoint->serial, "RX", data + offset, (size_t)count);
         offset += (size_t)count;
     }
     return true;
@@ -667,6 +701,12 @@ static speed_t baud_rate(uint32_t value) {
 #endif
 #ifdef B115200
     case 115200U: return B115200;
+#endif
+#ifdef B230400
+    case 230400U: return B230400;
+#endif
+#ifdef B460800
+    case 460800U: return B460800;
 #endif
     default: return (speed_t)0;
     }
@@ -852,6 +892,7 @@ static int accept_tcp_client(edge_acquisition_device *device) {
 
 static edge_io_result device_connect(void *context) {
     edge_acquisition_device *device = context;
+    if (serial_paused(device)) return EDGE_IO_OFFLINE;
     if (device->link->fd >= 0)
         return EDGE_IO_OK;
     if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&
@@ -1977,6 +2018,7 @@ static int64_t sl651_observed(edge_acquisition_device *device, const uint8_t *bo
 static bool sl651_send(void *context, const uint8_t *bytes, size_t size,
                        const uint8_t acquisition_id[16], const uint8_t *reply_to_packet_id) {
     edge_acquisition_device *device = context;
+    if (serial_paused(device)) return false;
     memcpy(device->acquisition_id, acquisition_id, 16);
     if (reply_to_packet_id) memcpy(device->received_packet_id, reply_to_packet_id, 16);
     else memset(device->received_packet_id, 0, 16);
@@ -1992,6 +2034,9 @@ static bool sl651_send(void *context, const uint8_t *bytes, size_t size,
         if (n <= 0)
             return false;
         debug_packet(device, "TX", bytes + offset, (size_t)n, true, false);
+        if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
+            serial_observe(device->owner, device->endpoint->serial.channel,
+                &device->endpoint->serial, "TX", bytes + offset, (size_t)n);
         offset += (size_t)n;
     }
     return true;
@@ -2278,6 +2323,9 @@ static void sl651_poll(edge_acquisition_device *device, uint64_t now) {
         return;
     uint8_t bytes[4096];
     ssize_t n = read(device->link->fd, bytes, sizeof(bytes));
+    if (n > 0 && device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
+        serial_observe(device->owner, device->endpoint->serial.channel,
+            &device->endpoint->serial, "RX", bytes, (size_t)n);
     if (n <= 0) {
         close_fd(&device->link->fd);
         for (size_t i = 0; i < device->owner->device_count; ++i)
@@ -2517,6 +2565,16 @@ static void free_links(edge_acquisition_link *links, size_t count) {
 
 void edge_acquisition_set_debug_callback(edge_acquisition *acquisition, edge_acquisition_debug_callback callback) {
     if (acquisition) acquisition->debug = callback;
+}
+
+void edge_acquisition_enable_serial_debug(edge_acquisition *acquisition, const char *path,
+    bool rs485, edge_acquisition_serial_callback callback) {
+    if (!acquisition) return;
+    copy_text(acquisition->serial_path, sizeof(acquisition->serial_path), path);
+    acquisition->serial_rs485 = rs485;
+    acquisition->serial_callback = callback;
+    for (size_t i = 0; i < 4; ++i) acquisition->serial_sessions[i].fd = -1;
+    if (path && path[0]) acquisition->worker_required = true;
 }
 
 edge_acquisition *edge_acquisition_create(
@@ -2840,7 +2898,7 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
         acquisition->cached_status[index] =
             (iot_edge_v1_DeviceStatusReport)iot_edge_v1_DeviceStatusReport_init_zero;
     }
-    acquisition->worker_required = output != 0U;
+    acquisition->worker_required = output != 0U || acquisition->serial_path[0] != '\0';
     char detail[96];
     snprintf(detail, sizeof(detail), "platforms=%zu devices=%zu resources=%zu",
              source_count, output, link_count);
@@ -3135,6 +3193,10 @@ static bool acquisition_command_local(edge_acquisition *acquisition,
     if (request && request->device_id.size == 16) {
         edge_acquisition_device *station =
             find_device(acquisition, platform_id, request->device_id.bytes);
+        if (station && serial_paused(station)) {
+            set_error(error, error_size, "serial port is paused for manual debugging");
+            return false;
+        }
         if (station && station->sl651)
             return sl651_query_request(station, request, error, error_size);
     }
@@ -3255,6 +3317,260 @@ static void worker_send_command_failure(edge_acquisition *acquisition,
     (void)worker_command_result(acquisition, platform_id, &result);
 }
 
+static bool serial_paused(const edge_acquisition_device *device) {
+    if (device->endpoint->transport != iot_edge_v1_Transport_TRANSPORT_SERIAL) return false;
+    for (size_t i = 0; i < 4; ++i) {
+        const edge_serial_session *session = &device->owner->serial_sessions[i];
+        if (session->active && session->manual &&
+            !strcmp(session->settings.channel, device->endpoint->serial.channel)) return true;
+    }
+    return false;
+}
+
+static void serial_emit(edge_acquisition *acquisition, edge_serial_session *session,
+    uint64_t request, const char *kind, const char *direction, const uint8_t *bytes,
+    size_t size, const char *reason) {
+    edge_acquisition_message message = {0};
+    message.magic = EDGE_ACQUISITION_MAGIC;
+    message.type = EDGE_ACQUISITION_EVENT_SERIAL;
+    message.payload_size = sizeof(message.payload.serial_event);
+    memcpy(message.platform_id, session->platform_id, 16);
+    iot_edge_v1_SerialDebugEvent *event = &message.payload.serial_event;
+    edge_protocol_set_bytes(&event->session_id, 16, session->id, 16);
+    event->request_sequence = request;
+    event->sequence = ++session->event_sequence;
+    event->manual = session->manual;
+    event->occurred_at_ms = current_ms();
+    event->dropped_bytes = session->dropped_bytes;
+    event->has_settings = true;
+    event->settings = session->settings;
+    copy_text(event->kind, sizeof(event->kind), kind);
+    copy_text(event->direction, sizeof(event->direction), direction);
+    copy_text(event->message, sizeof(event->message), reason);
+    edge_protocol_set_bytes(&event->data, sizeof(event->data.bytes), bytes, size);
+    const size_t wire_size = acquisition_message_size(message.payload_size);
+    if (send(acquisition->worker_fd, &message, wire_size, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)wire_size)
+        session->dropped_bytes += size;
+}
+
+static void serial_observe(edge_acquisition *acquisition, const char *path,
+    const iot_edge_v1_SerialSettings *settings, const char *direction,
+    const uint8_t *bytes, size_t size) {
+    for (size_t i = 0; i < 4; ++i) {
+        edge_serial_session *session = &acquisition->serial_sessions[i];
+        if (!session->active || strcmp(session->settings.channel, path)) continue;
+        if (!session->manual) session->settings = *settings;
+        for (size_t offset = 0; offset < size;) {
+            const size_t part = size - offset > 1024 ? 1024 : size - offset;
+            serial_emit(acquisition, session, 0, "data", direction, bytes + offset, part, "");
+            offset += part;
+        }
+    }
+}
+
+static void serial_release(edge_acquisition *acquisition, edge_serial_session *session,
+    uint64_t request, const char *reason) {
+    if (session->fd >= 0) close(session->fd);
+    session->fd = -1;
+    session->manual = false;
+    serial_emit(acquisition, session, request, "closed", "", NULL, 0, reason);
+    memset(session, 0, sizeof(*session));
+    session->fd = -1;
+}
+
+static bool serial_configured(edge_acquisition *acquisition, edge_serial_session *session, bool update_settings) {
+    for (size_t i = 0; i < acquisition->device_count; ++i) {
+        const edge_acquisition_device *device = &acquisition->devices[i];
+        if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL &&
+            !strcmp(device->endpoint->serial.channel, session->settings.channel)) {
+            if (update_settings) session->settings = device->endpoint->serial;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool serial_settings_valid(const iot_edge_v1_SerialSettings *settings) {
+    return baud_rate(settings->baud_rate) != 0 && settings->data_bits >= 5 &&
+        settings->data_bits <= 8 && (settings->stop_bits == 1 || settings->stop_bits == 2) &&
+        (!strcmp(settings->parity, "none") || !strcmp(settings->parity, "even") || !strcmp(settings->parity, "odd"));
+}
+
+static void serial_control(edge_acquisition *acquisition, const uint8_t platform_id[16],
+    const iot_edge_v1_SerialDebugRequest *request) {
+    if (request->session_id.size != 16 || request->request_sequence == 0) return;
+    edge_serial_session *session = NULL;
+    for (size_t i = 0; i < 4; ++i)
+        if (acquisition->serial_sessions[i].active &&
+            !memcmp(acquisition->serial_sessions[i].platform_id, platform_id, 16)) {
+            session = &acquisition->serial_sessions[i]; break;
+        }
+    if (!strcmp(request->action, "open")) {
+        if (session) {
+            // Replaying OPEN never resets an existing session or its manual-write sequence.
+            if (!memcmp(session->id, request->session_id.bytes, 16)) {
+                serial_emit(acquisition, session, request->request_sequence, "state", "", NULL, 0, "");
+                return;
+            }
+            edge_serial_session rejected = {.fd = -1};
+            memcpy(rejected.platform_id, platform_id, 16);
+            memcpy(rejected.id, request->session_id.bytes, 16);
+            serial_emit(acquisition, &rejected, request->request_sequence, "closed", "", NULL, 0,
+                        "this platform already has a serial debug session");
+            return;
+        }
+        for (size_t i = 0; i < 4; ++i)
+            if (!acquisition->serial_sessions[i].active) { session = &acquisition->serial_sessions[i]; break; }
+        if (!session) return;
+        memset(session, 0, sizeof(*session));
+        session->fd = -1;
+        memcpy(session->platform_id, platform_id, 16);
+        memcpy(session->id, request->session_id.bytes, 16);
+        session->settings = request->settings;
+        if (!request->has_settings || acquisition->serial_path[0] == '\0' ||
+            strcmp(request->settings.channel, acquisition->serial_path)) {
+            serial_release(acquisition, session, request->request_sequence, "serial port is not advertised");
+            return;
+        }
+        session->active = true;
+        session->settings.baud_rate = 9600;
+        session->settings.data_bits = 8;
+        session->settings.stop_bits = 1;
+        session->settings.rs485 = acquisition->serial_rs485;
+        copy_text(session->settings.parity, sizeof(session->settings.parity), "none");
+        (void)serial_configured(acquisition, session, true);
+    } else if (!session || memcmp(session->id, request->session_id.bytes, 16)) {
+        if (strcmp(request->action, "close")) {
+            edge_serial_session missing = {.fd = -1};
+            memcpy(missing.platform_id, platform_id, 16); memcpy(missing.id, request->session_id.bytes, 16);
+            serial_emit(acquisition, &missing, request->request_sequence, "closed", "", NULL, 0,
+                        "serial debug session expired or acquisition restarted");
+        }
+        return;
+    }
+    if (request->request_sequence <= session->last_request) return;
+    session->last_request = request->request_sequence;
+    if (!strcmp(request->action, "close")) {
+        serial_release(acquisition, session, request->request_sequence, "serial debug closed"); return;
+    }
+    session->expires_ms = monotonic_milliseconds() + 60000;
+    if (!strcmp(request->action, "keepalive")) {
+        serial_emit(acquisition, session, request->request_sequence, "state", "", NULL, 0, ""); return;
+    }
+    if (session->pending_size) {
+        serial_emit(acquisition, session, request->request_sequence, "error", "", NULL, 0, "serial write still pending"); return;
+    }
+    if (!strcmp(request->action, "manual")) {
+        if (!request->has_settings || strcmp(request->settings.channel, session->settings.channel) ||
+            !serial_settings_valid(&request->settings)) {
+            serial_emit(acquisition, session, request->request_sequence, "error", "", NULL, 0, "invalid serial settings"); return;
+        }
+        for (size_t i = 0; i < 4; ++i)
+            if (&acquisition->serial_sessions[i] != session && acquisition->serial_sessions[i].active &&
+                acquisition->serial_sessions[i].manual &&
+                !strcmp(acquisition->serial_sessions[i].settings.channel, session->settings.channel)) {
+                serial_emit(acquisition, session, request->request_sequence, "error", "", NULL, 0,
+                            "another platform controls this serial port"); return;
+            }
+        for (size_t i = 0; i < acquisition->device_count; ++i) {
+            edge_acquisition_device *device = &acquisition->devices[i];
+            if (device->endpoint->transport != iot_edge_v1_Transport_TRANSPORT_SERIAL ||
+                strcmp(device->endpoint->serial.channel, session->settings.channel)) continue;
+            if (device->runtime.write_count || (device->sl651 &&
+                (!edge_sl651_ready(device->sl651) || device->sl651_query_active || device->sl651_result_pending))) {
+                serial_emit(acquisition, session, request->request_sequence, "error", "", NULL, 0,
+                            "device transaction pending; retry after it completes"); return;
+            }
+        }
+        for (size_t i = 0; i < acquisition->device_count; ++i) {
+            edge_acquisition_device *device = &acquisition->devices[i];
+            if (device->endpoint->transport != iot_edge_v1_Transport_TRANSPORT_SERIAL ||
+                strcmp(device->endpoint->serial.channel, session->settings.channel)) continue;
+            edge_device_runtime_close(&device->runtime);
+            close_fd(&device->link->fd);
+            if (device->sl651) edge_sl651_reset(device->sl651);
+        }
+        for (size_t i = 0; i < 4; ++i)
+            if (acquisition->serial_sessions[i].active &&
+                !strcmp(acquisition->serial_sessions[i].settings.channel, session->settings.channel))
+                close_fd(&acquisition->serial_sessions[i].fd);
+        session->settings = request->settings;
+        session->fd = open_serial(&session->settings);
+        if (session->fd < 0) {
+            session->manual = false;
+            serial_emit(acquisition, session, request->request_sequence, "error", "", NULL, 0, "cannot configure serial port"); return;
+        }
+        session->manual = true;
+    } else if (!strcmp(request->action, "monitor")) {
+        close_fd(&session->fd);
+        session->manual = false;
+        (void)serial_configured(acquisition, session, true);
+    } else if (!strcmp(request->action, "write")) {
+        if (!session->manual || request->data.size == 0 || request->data.size > sizeof(session->pending)) {
+            serial_emit(acquisition, session, request->request_sequence, "error", "", NULL, 0,
+                        "pause automatic acquisition before manual sending"); return;
+        }
+        memcpy(session->pending, request->data.bytes, request->data.size);
+        session->pending_size = request->data.size;
+        session->pending_offset = 0;
+        session->pending_request = request->request_sequence;
+        session->pending_deadline = monotonic_milliseconds() + 10000;
+        return;
+    } else if (strcmp(request->action, "open")) {
+        serial_emit(acquisition, session, request->request_sequence, "error", "", NULL, 0, "unknown serial action"); return;
+    }
+    serial_emit(acquisition, session, request->request_sequence, "state", "", NULL, 0, "");
+}
+
+static void serial_tick(edge_acquisition *acquisition, uint64_t now) {
+    for (size_t i = 0; i < 4; ++i) {
+        edge_serial_session *session = &acquisition->serial_sessions[i];
+        if (!session->active) continue;
+        if (now >= session->expires_ms) { serial_release(acquisition, session, 0, "serial debug lease expired"); continue; }
+        if (session->fd < 0 && !session->manual) {
+            if (serial_configured(acquisition, session, false)) continue;
+            bool held = false;
+            for (size_t j = 0; j < 4; ++j)
+                if (i != j && acquisition->serial_sessions[j].active &&
+                    acquisition->serial_sessions[j].fd >= 0 &&
+                    !strcmp(acquisition->serial_sessions[j].settings.channel, session->settings.channel)) held = true;
+            if (held) continue;
+            session->fd = open_serial(&session->settings);
+            if (session->fd < 0) { serial_release(acquisition, session, 0, "cannot open serial port"); continue; }
+        }
+        if (session->pending_size) {
+            const ssize_t count = write(session->fd, session->pending + session->pending_offset,
+                session->pending_size - session->pending_offset);
+            if (count > 0) {
+                serial_observe(acquisition, session->settings.channel, &session->settings, "TX",
+                    session->pending + session->pending_offset, (size_t)count);
+                session->pending_offset += (size_t)count;
+            } else if ((count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) ||
+                       now >= session->pending_deadline) {
+                serial_release(acquisition, session, session->pending_request,
+                    "serial write failed; some bytes may have been sent"); continue;
+            }
+            if (session->pending_offset == session->pending_size) {
+                session->pending_size = session->pending_offset = 0;
+                serial_emit(acquisition, session, session->pending_request, "sent", "", NULL, 0, "");
+            }
+        }
+        if (session->fd < 0) continue;
+        struct pollfd descriptor = {.fd = session->fd, .events = POLLIN};
+        if (poll(&descriptor, 1, 0) <= 0) continue;
+        if (descriptor.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+            serial_release(acquisition, session, 0, "serial device disconnected"); continue;
+        }
+        if (descriptor.revents & POLLIN) {
+            uint8_t bytes[1024];
+            const ssize_t count = read(session->fd, bytes, sizeof(bytes));
+            if (count > 0) serial_observe(acquisition, session->settings.channel, &session->settings, "RX", bytes, (size_t)count);
+            else if (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+                serial_release(acquisition, session, 0, "serial read failed");
+        }
+    }
+}
+
 static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
     edge_acquisition_message message;
     const ssize_t size = recv(acquisition->worker_fd, &message, sizeof(message),
@@ -3317,6 +3633,11 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
         *stop = true;
         return true;
     }
+    if (message.type == EDGE_ACQUISITION_CONTROL_SERIAL &&
+        message.payload_size == sizeof(message.payload.serial_request)) {
+        serial_control(acquisition, message.platform_id, &message.payload.serial_request);
+        return true;
+    }
     if (message.type != EDGE_ACQUISITION_CONTROL_COMMAND ||
         message.payload_size != sizeof(message.payload.command_request))
         return false;
@@ -3352,8 +3673,8 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
     while (!stop) {
         const uint64_t current = monotonic_milliseconds();
         int timeout = current >= next_tick ? 0 : (int)(next_tick - current);
-        if (timeout > 1000)
-            timeout = 1000;
+        if (timeout > 20)
+            timeout = 20;
         struct pollfd descriptors[2] = {
             {.fd = worker_fd, .events = POLLIN},
             {.fd = link_fd, .events = POLLIN},
@@ -3380,10 +3701,13 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
         if (stop)
             break;
         const uint64_t schedule_ms = monotonic_milliseconds();
+        serial_tick(acquisition, schedule_ms);
         if (schedule_ms < next_tick)
             continue;
         for (size_t index = 0U; index < acquisition->device_count && !stop; ++index) {
-            if (acquisition->devices[index].sl651)
+            if (serial_paused(&acquisition->devices[index])) {
+                /* Manual control owns the port; leave other physical links running. */
+            } else if (acquisition->devices[index].sl651)
                 sl651_poll(&acquisition->devices[index], schedule_ms);
             else
                 edge_device_runtime_tick(&acquisition->devices[index].runtime, schedule_ms,
@@ -3512,7 +3836,12 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_DEBUG) {
+        if (message.type == EDGE_ACQUISITION_EVENT_SERIAL &&
+            message.payload_size == sizeof(message.payload.serial_event)) {
+            if (acquisition->serial_callback)
+                acquisition->serial_callback(acquisition->callback_context, message.platform_id,
+                    &message.payload.serial_event);
+        } else if (message.type == EDGE_ACQUISITION_EVENT_DEBUG) {
             iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
             pb_istream_t stream = pb_istream_from_buffer(message.payload.telemetry, message.payload_size);
             if (pb_decode(&stream, iot_edge_v1_RawPacket_fields, &packet) && acquisition->debug)
@@ -3657,6 +3986,19 @@ bool edge_acquisition_command_for_platform(
         return false;
     }
     return true;
+}
+
+bool edge_acquisition_serial_request(edge_acquisition *acquisition, const uint8_t platform_id[16],
+    const iot_edge_v1_SerialDebugRequest *request) {
+    if (!acquisition || acquisition->worker_fd < 0 || !platform_id || !request) return false;
+    edge_acquisition_message message = {0};
+    message.magic = EDGE_ACQUISITION_MAGIC;
+    message.type = EDGE_ACQUISITION_CONTROL_SERIAL;
+    message.payload_size = sizeof(message.payload.serial_request);
+    memcpy(message.platform_id, platform_id, 16);
+    message.payload.serial_request = *request;
+    const size_t size = acquisition_message_size(message.payload_size);
+    return send(acquisition->worker_fd, &message, size, MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)size;
 }
 
 void edge_acquisition_stop(edge_acquisition *acquisition) {

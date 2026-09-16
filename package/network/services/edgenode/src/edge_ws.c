@@ -271,6 +271,41 @@ static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                                 UWSC_OP_BINARY) == 0;
 }
 
+static void acquisition_serial(void *context, const uint8_t platform_id[16],
+                               const iot_edge_v1_SerialDebugEvent *event) {
+    edge_ws_app *app = context;
+    edge_ws_session *session = session_for_platform(app, platform_id);
+    if (!session || !session->websocket_open || !session->enrolled ||
+        !session->serial_debug_active || event->session_id.size != 16 ||
+        memcmp(session->serial_debug_id, event->session_id.bytes, 16)) return;
+    session->serial_debug_sequence = event->sequence;
+    if (!strcmp(event->kind, "closed")) session->serial_debug_active = false;
+    // Sequence gaps identify discarded monitoring samples without blocking acquisition.
+    if (buffer_length(&session->client.wb) >= 65536) return;
+    iot_edge_v1_Envelope *envelope = &app->envelope;
+    if (!init_envelope(session, envelope)) return;
+    envelope->which_payload = iot_edge_v1_Envelope_serial_debug_event_tag;
+    envelope->payload.serial_debug_event = *event;
+    (void)send_envelope(session, envelope);
+}
+
+static void close_serial_debug(edge_ws_session *session, const char *reason) {
+    if (!session->serial_debug_active) return;
+    iot_edge_v1_SerialDebugRequest request = iot_edge_v1_SerialDebugRequest_init_zero;
+    edge_protocol_set_bytes(&request.session_id, 16, session->serial_debug_id, 16);
+    request.request_sequence = UINT64_MAX;
+    safe_copy(request.action, sizeof(request.action), "close");
+    (void)edge_acquisition_serial_request(session->app->acquisition, session->config->id, &request);
+    iot_edge_v1_SerialDebugEvent event = iot_edge_v1_SerialDebugEvent_init_zero;
+    edge_protocol_set_bytes(&event.session_id, 16, session->serial_debug_id, 16);
+    event.sequence = ++session->serial_debug_sequence;
+    event.occurred_at_ms = now_ms();
+    safe_copy(event.kind, sizeof(event.kind), "closed");
+    safe_copy(event.message, sizeof(event.message), reason);
+    acquisition_serial(session->app, session->config->id, &event);
+    session->serial_debug_active = false;
+}
+
 static void acquisition_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
     edge_ws_app *app = context;
     edge_ws_session *session = session_for_platform(app, platform_id);
@@ -423,6 +458,7 @@ static bool send_capability_report(edge_ws_session *session) {
     iot_edge_v1_CapabilityReport *report = &envelope->payload.capability_report;
     safe_copy(report->network_stack, sizeof(report->network_stack), "netifd");
     report->ttyd_available = edge_capability_has_terminal();
+    report->supports_serial_debug = session->app->config->serial_port[0] != '\0';
     report->supported_protocols_count = 6;
     report->supported_protocols[0] = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
     report->supported_protocols[1] = iot_edge_v1_Protocol_PROTOCOL_S7;
@@ -516,6 +552,7 @@ static void arm_reconnect_timer(edge_ws_session *session) {
 }
 
 static void schedule_reconnect(edge_ws_session *session) {
+    close_serial_debug(session, "platform connection closed");
     edge_spool_outbox_reset(&session->spool);
     session->websocket_open = false;
     session->enrolled = false;
@@ -717,6 +754,8 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                                                      acquisition_command_result,
                                                      session->app);
     edge_acquisition_set_debug_callback(candidate_acquisition, acquisition_debug);
+    edge_acquisition_enable_serial_debug(candidate_acquisition, session->app->config->serial_port,
+        session->app->config->serial_rs485, acquisition_serial);
     if (candidate_acquisition == NULL ||
         !edge_acquisition_apply_multi(candidate_acquisition, sources, source_count,
                                       monotonic_ms(), apply_error,
@@ -728,6 +767,8 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
         return;
     }
     ev_io_stop(session->app->loop, &session->app->acquisition_io);
+    for (size_t i = 0; i < session->app->config->platform_count; ++i)
+        close_serial_debug(&session->app->sessions[i], "device configuration changed; reopen serial debug");
     edge_acquisition_stop(session->app->acquisition);
     if (!edge_acquisition_start(candidate_acquisition,
                                 apply_error, sizeof(apply_error))) {
@@ -1418,6 +1459,32 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         if (session->enrolled)
             handle_log_level_request(session, envelope);
         break;
+    case iot_edge_v1_Envelope_serial_debug_request_tag: {
+        const iot_edge_v1_SerialDebugRequest request = envelope->payload.serial_debug_request;
+        if (!session->enrolled || request.session_id.size != 16) break;
+        if (!strcmp(request.action, "open") && !session->serial_debug_active) {
+            memcpy(session->serial_debug_id, request.session_id.bytes, 16);
+            session->serial_debug_active = true;
+            session->serial_debug_sequence = 0;
+        }
+        if (!session->serial_debug_active || memcmp(session->serial_debug_id, request.session_id.bytes, 16)) {
+            iot_edge_v1_SerialDebugEvent rejected = iot_edge_v1_SerialDebugEvent_init_zero;
+            edge_protocol_set_bytes(&rejected.session_id, 16, request.session_id.bytes, 16);
+            rejected.sequence = 1;
+            rejected.request_sequence = request.request_sequence;
+            safe_copy(rejected.kind, sizeof(rejected.kind), "closed");
+            safe_copy(rejected.message, sizeof(rejected.message), "another serial session is active or this session expired");
+            if (init_envelope(session, envelope)) {
+                envelope->which_payload = iot_edge_v1_Envelope_serial_debug_event_tag;
+                envelope->payload.serial_debug_event = rejected;
+                (void)send_envelope(session, envelope);
+            }
+            break;
+        }
+        if (!edge_acquisition_serial_request(session->app->acquisition, session->config->id, &request))
+            close_serial_debug(session, "acquisition worker unavailable");
+        break;
+    }
     case iot_edge_v1_Envelope_terminal_open_tag:
         if (session->enrolled && edge_capability_has_terminal())
             handle_terminal_open(session, &envelope->payload.terminal_open);
@@ -1969,6 +2036,8 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
     app->acquisition = edge_acquisition_create(
         acquisition_telemetry, acquisition_command_result, app);
     edge_acquisition_set_debug_callback(app->acquisition, acquisition_debug);
+    edge_acquisition_enable_serial_debug(app->acquisition, config->serial_port,
+        config->serial_rs485, acquisition_serial);
     char acquisition_error[256] = {0};
     if (app->acquisition == NULL ||
         !edge_acquisition_apply_multi(app->acquisition, sources, source_count,
