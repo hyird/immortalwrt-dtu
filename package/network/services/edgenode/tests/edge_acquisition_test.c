@@ -306,7 +306,9 @@ static void verify_sl651_commit(void) {
     close(fd); edge_acquisition_destroy(acquisition);
 }
 
-static unsigned response_records;
+static unsigned response_records, debug_values;
+static uint8_t debug_response_ids[16][16];
+static unsigned debug_response_count;
 static uint8_t expected_responses[2][27];
 static size_t expected_response_size;
 static bool s7_responses;
@@ -352,17 +354,34 @@ static void record_debug(void *context, const uint8_t platform_id[16], const iot
     assert(packet->debug && packet->packet_id.size == 16 && packet->device_id.size == 16);
     assert(packet->device_id.bytes[0] == 2 && packet->endpoint_id.bytes[0] == 1);
     assert(packet->acquisition_id.size == 16);
+    if (packet->has_parsed_value) {
+        assert(!strcmp(packet->direction, "RX"));
+        assert(response_records == 0);
+        assert(packet->parsed_value.has_value);
+        assert(packet->parsed_value.value.value.double_value ==
+            (!strcmp(packet->parsed_value.element_id, "holding-2") ? 101.0 : 100.0));
+        bool matched = false;
+        for (unsigned i = 0; i < debug_response_count; ++i)
+            if (!memcmp(packet->packet_id.bytes, debug_response_ids[i], 16)) matched = true;
+        assert(matched);
+        ++debug_values;
+        return;
+    }
     if (!packet->payload.size) {
         assert(!strcmp(packet->acquisition_state, "running") || !strcmp(packet->acquisition_state, "success") ||
                !strcmp(packet->acquisition_state, "partial") || !strcmp(packet->acquisition_state, "failed"));
         return;
     }
     assert(packet->payload.size <= 4096);
-    if (!strcmp(packet->direction, "RX")) debug_rx += packet->payload.size;
+    if (!strcmp(packet->direction, "RX")) {
+        debug_rx += packet->payload.size;
+        assert(debug_response_count < 16);
+        memcpy(debug_response_ids[debug_response_count++], packet->packet_id.bytes, 16);
+    }
     else { assert(!strcmp(packet->direction, "TX")); debug_tx += packet->payload.size; }
 }
 static void verify_complete_acquisition_record(bool s7, bool link_debug, bool device_debug) {
-    debug_rx = debug_tx = debug_success = 0;
+    debug_rx = debug_tx = debug_success = debug_values = debug_response_count = 0;
     response_records = 0;
     s7_responses = s7;
     expected_response_size = s7 ? 27 : 11;
@@ -465,8 +484,8 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
         edge_acquisition_tick(acquisition, monotonic_ms());
     }
     assert(response_records == 1);
-    if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); }
-    else { assert(debug_rx == 0 && debug_tx == 0); }
+    if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); assert(debug_values == (s7 ? 2U : 3U)); }
+    else { assert(debug_rx == 0 && debug_tx == 0 && debug_values == 0); }
     edge_acquisition_destroy(acquisition);
     close(fd);
     close(listener);

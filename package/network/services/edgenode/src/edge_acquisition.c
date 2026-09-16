@@ -168,7 +168,6 @@ typedef struct {
     uint8_t device_id[16];
     uint8_t platform_id[16];
     union {
-        iot_edge_v1_RawPacket debug;
         uint8_t telemetry[EDGENODE_MAX_WS_MESSAGE];
         iot_edge_v1_CommandResult command_result;
         iot_edge_v1_DeviceStatusReport status;
@@ -1562,7 +1561,27 @@ static bool decode_scalar(const iot_edge_v1_ConfigItem *item, const uint8_t *raw
     return false;
 }
 
-static void fill_point_value(edge_acquisition_point *point, const uint8_t *raw, size_t size,
+/* Share the decoded value with debug before history policy or outbox work. */
+static void publish_debug_value(edge_acquisition_device *device, const uint8_t packet_id[16],
+                                const iot_edge_v1_TelemetryValue *value) {
+    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) || !device->owner->debug)
+        return;
+    iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
+    packet.debug = true;
+    packet.packet_id.size = packet.endpoint_id.size = packet.device_id.size = packet.acquisition_id.size = 16;
+    memcpy(packet.packet_id.bytes, packet_id, 16);
+    memcpy(packet.endpoint_id.bytes, device->endpoint->endpoint_id.bytes, 16);
+    memcpy(packet.device_id.bytes, device->config->device_id.bytes, 16);
+    memcpy(packet.acquisition_id.bytes, device->acquisition_id, 16);
+    copy_text(packet.direction, sizeof(packet.direction), "RX");
+    copy_text(packet.status, sizeof(packet.status), "received");
+    packet.observed_at_ms = current_ms();
+    packet.has_parsed_value = true;
+    packet.parsed_value = *value;
+    device->owner->debug(device->owner->callback_context, device->platform_id, &packet);
+}
+
+static void fill_point_value(edge_acquisition_device *device, edge_acquisition_point *point, const uint8_t *raw, size_t size,
                               edge_acquisition_response *response) {
     if (response != NULL)
         ++response->references;
@@ -1587,6 +1606,7 @@ static void fill_point_value(edge_acquisition_point *point, const uint8_t *raw, 
     }
     point->value.has_value = decode_scalar(point->item, raw, size, &point->value.value);
     point->valid = point->value.has_value;
+    if (point->valid && response) publish_debug_value(device, response->packet_id, &point->value);
 }
 
 static edge_io_result read_acquisition(void *context, edge_device_sample *sample) {
@@ -1628,7 +1648,7 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
                                                 raw, sizeof(raw), &raw_size))
                     continue;
                 edge_acquisition_point *point = &device->points[planned->point_index];
-                fill_point_value(point, raw, raw_size, device->read_response);
+                fill_point_value(device, point, raw, raw_size, device->read_response);
                 any = any || point->valid;
             }
         }
@@ -1648,7 +1668,7 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
             log_io_result(device, result, "read");
             return result;
         }
-        fill_point_value(point, raw, raw_size, device->read_response);
+        fill_point_value(device, point, raw, raw_size, device->read_response);
         any = any || point->valid;
     }
     log_io_result(device, EDGE_IO_OK, "read");
@@ -1888,7 +1908,7 @@ static edge_io_result write_acquisition(void *context,
                                       : write_s7(device, &point->item->item.s7_area,
                                             command, actual);
     if (result == EDGE_IO_OK)
-        fill_point_value(point, actual->bytes, actual->size, device->read_response);
+        fill_point_value(device, point, actual->bytes, actual->size, device->read_response);
     return result;
 }
 
@@ -2092,6 +2112,11 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         value->has_value = !binary;
         ++count;
     }
+    /* Multipart reports become decodable on the final received frame. */
+    const size_t raw_count = edge_sl651_report_frame_count(device->sl651);
+    const uint8_t *parsed_packet = raw_count ? edge_sl651_report_packet_id(device->sl651, raw_count - 1) : frame->packet_id;
+    if (parsed_packet) for (size_t index = 0; index < count; ++index)
+        publish_debug_value(device, parsed_packet, &values[index]);
     size_t starts[129] = {0}, parts = 0;
     for (size_t index = 0; index < count;) {
         if (parts == 128) {
@@ -2441,7 +2466,7 @@ static void device_command_complete(void *context, const uint8_t platform_id[16]
     const edge_write_command *command = &device->runtime.writes[device->runtime.write_head];
     edge_acquisition_point *point = find_point(device, command->element_id);
     if (point != NULL && actual != NULL && actual->size != 0U) {
-        fill_point_value(point, actual->bytes, actual->size, device->read_response);
+        fill_point_value(device, point, actual->bytes, actual->size, device->read_response);
         if (point->valid) {
             output.actual_values[0] = point->value;
             output.actual_values_count = 1U;
@@ -3180,10 +3205,16 @@ static void worker_debug(void *context, const uint8_t platform_id[16], const iot
     memset(&message, 0, sizeof(message));
     message.magic = EDGE_ACQUISITION_MAGIC;
     message.type = EDGE_ACQUISITION_EVENT_DEBUG;
-    message.payload_size = sizeof(*packet);
     memcpy(message.platform_id, platform_id, 16);
-    message.payload.debug = *packet;
-    (void)send(acquisition->worker_fd, &message, acquisition_message_size(sizeof(*packet)), MSG_DONTWAIT | MSG_NOSIGNAL);
+    pb_ostream_t stream = pb_ostream_from_buffer(message.payload.telemetry, sizeof(message.payload.telemetry));
+    if (!pb_encode(&stream, iot_edge_v1_RawPacket_fields, packet)) {
+        syslog(LOG_WARNING, "debug packet dropped: worker encoding limit");
+        return;
+    }
+    message.payload_size = (uint32_t)stream.bytes_written;
+    const size_t size = acquisition_message_size(message.payload_size);
+    if (send(acquisition->worker_fd, &message, size, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)size)
+        syslog(LOG_WARNING, "debug packet dropped: acquisition worker backpressure");
 }
 
 static bool worker_telemetry(void *context,
@@ -3481,8 +3512,12 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_DEBUG && message.payload_size == sizeof(iot_edge_v1_RawPacket)) {
-            if (acquisition->debug) acquisition->debug(acquisition->callback_context, message.platform_id, &message.payload.debug);
+        if (message.type == EDGE_ACQUISITION_EVENT_DEBUG) {
+            iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
+            pb_istream_t stream = pb_istream_from_buffer(message.payload.telemetry, message.payload_size);
+            if (pb_decode(&stream, iot_edge_v1_RawPacket_fields, &packet) && acquisition->debug)
+                acquisition->debug(acquisition->callback_context, message.platform_id, &packet);
+            pb_release(iot_edge_v1_RawPacket_fields, &packet);
         } else if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY ||
             message.type == EDGE_ACQUISITION_EVENT_SL651) {
             iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;

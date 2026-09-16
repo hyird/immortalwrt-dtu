@@ -559,6 +559,9 @@ message TelemetryAck {
 }
 
 message RawPacket {
+  // Reuses the already-decoded value; no second protocol parser.
+  // Separate debug update: no history upload or persistence prerequisite.
+  TelemetryValue parsed_value = 16;
   bytes acquisition_id = 14 [(nanopb).max_size = 16];
   string acquisition_state = 15 [(nanopb).max_length = 24];
   uint32 payload_offset = 12;
