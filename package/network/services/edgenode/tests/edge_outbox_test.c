@@ -68,7 +68,27 @@ int main(void) {
                        telemetry_one, 16U) == 0,
             "find oldest evictable telemetry");
 
+    /* Only expired records are retried, without reconnecting or deleting payloads. */
+    require(edge_memory_outbox_next(&outbox, 33000U) != NULL, "send second telemetry");
+    require(edge_memory_outbox_retry_expired(&outbox, 31999U, 30000U, 2U) == 0U,
+            "backwards clock must not trigger a retry");
+    require(edge_memory_outbox_retry_expired(&outbox, 62000U, 30000U, 2U) == 1U,
+            "retry only first telemetry at its deadline");
+    require(outbox.count == 2U && outbox.bytes == 6U && outbox.in_flight == 1U,
+            "selective retry preserves payloads and unrelated in-flight messages");
+    next = edge_memory_outbox_next(&outbox, 62000U);
+    require(next != NULL && memcmp(next->message_id, telemetry_one, 16U) == 0 &&
+                next->timeout_retries == 1U, "retry retains identity");
+    require(edge_memory_outbox_ack(&outbox, telemetry_two), "unrelated ACK still succeeds");
+    require(edge_memory_outbox_retry_expired(&outbox, 92000U, 30000U, 2U) == 1U,
+            "second bounded retry");
+    require(edge_memory_outbox_next(&outbox, 92000U) != NULL, "send second retry");
+    require(edge_memory_outbox_retry_expired(&outbox, 122000U, 30000U, 2U) == SIZE_MAX,
+            "retry exhaustion requests connection recovery rather than an endless storm");
+    require(outbox.count == 1U && outbox.in_flight == 1U,
+            "retry exhaustion never discards unacknowledged data");
     edge_memory_outbox_reset(&outbox);
+    require(outbox.head->timeout_retries == 0U, "reconnect resets retry budget");
     require(outbox.in_flight == 0U, "reconnect resets all in-flight records");
     require(!edge_memory_outbox_timed_out(&outbox, UINT64_MAX, 1U),
             "reset deliveries retained stale ACK deadlines");

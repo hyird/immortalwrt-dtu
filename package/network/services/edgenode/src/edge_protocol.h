@@ -9,6 +9,16 @@
 #define EDGENODE_PROTOCOL_VERSION 6U
 #define EDGENODE_MAX_WS_MESSAGE 16384U
 
+typedef enum {
+    EDGE_CONFIG_NOT_REPLAY = 0,
+    EDGE_CONFIG_REPLAY_IGNORE,
+    EDGE_CONFIG_REPLAY_ACK,
+    EDGE_CONFIG_REPLAY_CONFLICT,
+} edge_config_replay;
+
+edge_config_replay edge_protocol_config_replay(const iot_edge_v1_Envelope *envelope,
+    uint64_t active_revision, const uint8_t active_digest[32]);
+
 void edge_protocol_release(iot_edge_v1_Envelope *envelope);
 
 bool edge_protocol_validate_imei(const char *imei);

@@ -16,6 +16,8 @@ typedef struct {
     uint64_t deadline_ms;
     uint32_t retry_delay_ms;
     uint32_t connect_timeout_ms;
+    uint32_t next_retry_delay_ms;
+    uint64_t connected_at_ms;
 } edge_retry;
 
 bool edge_retry_init(edge_retry *retry, uint32_t retry_delay_ms,

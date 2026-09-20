@@ -266,7 +266,7 @@ static void fake_complete(void *context, const uint8_t platform_id[16],
     fake->last_command_result = result;
 }
 
-static void test_fixed_io_and_reporting(void) {
+static void test_io_and_reporting(void) {
     uint8_t platform_id[16] = {1U};
     uint8_t device_id[16] = {2U};
     fake_device fake = {0};
@@ -279,10 +279,10 @@ static void test_fixed_io_and_reporting(void) {
                                  .command_complete = fake_complete};
     edge_device_runtime runtime;
     require_true(!edge_device_runtime_init(&runtime, EDGE_DEVICE_S7, platform_id, device_id,
-                                           2000U, 3U, 0U, &driver, &fake),
-                 "runtime accepted a non-one-second DTU interval");
+                                           500U, 3U, 0U, &driver, &fake),
+                 "runtime accepted an interval below scheduler resolution");
     require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7, platform_id, device_id,
-                                          EDGE_DTU_IO_PERIOD_MS, 3U, 0U, &driver, &fake),
+                                          EDGE_ACQUISITION_TICK_MS, 3U, 0U, &driver, &fake),
                  "runtime initialization failed");
 
     edge_device_runtime_tick(&runtime, 0U, 1000000);
@@ -322,7 +322,7 @@ static void test_fixed_io_and_reporting(void) {
     edge_device_runtime modbus_runtime;
     require_true(edge_device_runtime_init(&modbus_runtime, EDGE_DEVICE_MODBUS,
                                            platform_id, device_id,
-                                           EDGE_DTU_IO_PERIOD_MS, 3U, 0U,
+                                           EDGE_ACQUISITION_TICK_MS, 3U, 0U,
                                            &driver, &modbus),
                  "Modbus runtime initialization failed");
     edge_device_runtime_tick(&modbus_runtime, 0U, 1000000);
@@ -359,7 +359,7 @@ static void test_initial_report_waits_for_first_success(void) {
     edge_device_runtime runtime;
     require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
                                           platform_id, device_id,
-                                          EDGE_DTU_IO_PERIOD_MS, 3U, 0U,
+                                          EDGE_ACQUISITION_TICK_MS, 3U, 0U,
                                           &driver, &fake),
                  "initial-report runtime initialization failed");
 
@@ -392,7 +392,7 @@ static void test_fast_reporting_after_write(void) {
     edge_device_runtime runtime;
     require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_MODBUS,
                                           platform_id, device_id,
-                                          EDGE_DTU_IO_PERIOD_MS, 10U, 0U,
+                                          EDGE_ACQUISITION_TICK_MS, 10U, 0U,
                                           &driver, &fake),
                  "fast-report runtime initialization failed");
     edge_device_runtime_tick(&runtime, 0U, 2000000);
@@ -425,6 +425,42 @@ static void test_fast_reporting_after_write(void) {
     require_true(fake.reports == 6U,
                  "regular reporting did not resume after the fast-report window");
     edge_device_runtime_close(&runtime);
+}
+
+static void test_configured_read_interval(void) {
+    uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    edge_device_driver driver = {.connect = fake_connect, .handshake = fake_handshake,
+        .read = fake_read, .write_readback = fake_write, .disconnect = fake_disconnect,
+        .report = fake_report, .command_complete = fake_complete};
+    for (unsigned protocol = EDGE_DEVICE_MODBUS; protocol <= EDGE_DEVICE_DLT645; ++protocol) {
+        fake_device fake = {0};
+        edge_device_runtime runtime;
+        require_true(edge_device_runtime_init(&runtime, (edge_device_protocol)protocol,
+            platform_id, device_id, 0U, 30U, 0U, &driver, &fake), "configured runtime init failed");
+        for (uint64_t now = 0; now < 30000U; now += 1000U)
+            edge_device_runtime_tick(&runtime, now, (int64_t)now);
+        require_true(fake.reads == 1U, "scheduler tick overrode the configured 30-second read interval");
+        edge_device_runtime_tick(&runtime, 30000U, 30000);
+        require_true(fake.reads == 2U, "configured read deadline was skipped");
+        edge_device_runtime_tick(&runtime, 100000U, 100000);
+        require_true(fake.reads == 3U && runtime.next_io_at_ms == 120000U,
+            "late scheduling produced catch-up reads or lost the configured period");
+        edge_write_command command = {.value = {0x55U}, .value_size = 1U};
+        require_true(edge_device_runtime_enqueue_write(&runtime, &command), "write enqueue failed");
+        edge_device_runtime_tick(&runtime, 101000U, 101000);
+        require_true(fake.writes == 1U && runtime.next_io_at_ms == 120000U,
+            "configured read interval delayed a control command or changed its periodic deadline");
+        edge_device_runtime_close(&runtime);
+        memset(&fake, 0, sizeof(fake));
+        require_true(edge_device_runtime_init(&runtime, (edge_device_protocol)protocol,
+            platform_id, device_id, 5000U, 30U, 0U, &driver, &fake), "explicit interval rejected");
+        edge_device_runtime_tick(&runtime, 0U, 0);
+        edge_device_runtime_tick(&runtime, 1000U, 1000);
+        require_true(fake.reads == 1U, "explicit interval was replaced with one second");
+        edge_device_runtime_tick(&runtime, 5000U, 5000);
+        require_true(fake.reads == 2U, "explicit interval was not observed");
+        edge_device_runtime_close(&runtime);
+    }
 }
 
 static void test_s7_immediate_retry_is_bounded(void) {
@@ -467,9 +503,10 @@ static void test_s7_immediate_retry_is_bounded(void) {
 
 int main(void) {
     test_s7_immediate_retry_is_bounded();
+    test_configured_read_interval();
     test_modbus();
     test_s7();
-    test_fixed_io_and_reporting();
+    test_io_and_reporting();
     test_initial_report_waits_for_first_success();
     test_fast_reporting_after_write();
     puts("edge runtime tests passed");

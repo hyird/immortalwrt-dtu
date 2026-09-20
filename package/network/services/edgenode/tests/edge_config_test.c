@@ -1,3 +1,4 @@
+#include "edge_protocol.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,7 +98,7 @@ static void test_valid_snapshot(void) {
     values[2].item.modbus_register.decimals = 2;
     values[2].item.modbus_register.writable = true;
 
-    uint8_t payloads[3][iot_edge_v1_ConfigItem_size];
+    uint8_t payloads[3][EDGENODE_MAX_WS_MESSAGE];
     edge_memory_config_item items[3] = {0};
     for (size_t index = 0U; index < 3U; ++index) {
         items[index].payload = payloads[index];
@@ -116,6 +117,16 @@ static void test_valid_snapshot(void) {
                         "LITTLE_ENDIAN_BYTE_SWAP") == 0,
                  "nanopb byte order was truncated");
     edge_runtime_config_free(&runtime);
+
+    const uint32_t intervals[] = {0U, 1000U, 5000U, 30000U, 3600000U, 500U, 3600001U};
+    for (size_t i = 0; i < sizeof(intervals) / sizeof(intervals[0]); ++i) {
+        values[1].item.device.io_interval_ms = intervals[i];
+        items[1].payload_size = encode_item(&values[1], payloads[1], sizeof(payloads[1]));
+        bool loaded = edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error));
+        require_true(loaded == (i < 5U), "configured acquisition interval validation mismatch");
+        if (loaded) edge_runtime_config_free(&runtime);
+    }
+    values[1].item.device.io_interval_ms = 0U;
 
     values[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_SL651;
     values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_SL651;
@@ -153,7 +164,7 @@ static void test_unknown_item_rejected(void) {
     iot_edge_v1_ConfigItem value = iot_edge_v1_ConfigItem_init_zero;
     value.revision = 9U;
     value.index = 0U;
-    uint8_t payload[iot_edge_v1_ConfigItem_size];
+    uint8_t payload[EDGENODE_MAX_WS_MESSAGE];
     edge_memory_config_item item = {.payload = payload,
                                     .payload_size = encode_item(&value, payload, sizeof(payload)),
                                     .present = true};

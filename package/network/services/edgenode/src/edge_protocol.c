@@ -5,6 +5,34 @@
 #include "pb_decode.h"
 #include "pb_encode.h"
 
+edge_config_replay edge_protocol_config_replay(const iot_edge_v1_Envelope *envelope,
+    uint64_t active_revision, const uint8_t active_digest[32]) {
+    if (envelope == NULL || active_revision == 0 || active_digest == NULL)
+        return EDGE_CONFIG_NOT_REPLAY;
+    uint64_t revision;
+    const pb_byte_t *digest;
+    pb_size_t size;
+    if (envelope->which_payload == iot_edge_v1_Envelope_config_begin_tag) {
+        revision = envelope->payload.config_begin.revision;
+        digest = envelope->payload.config_begin.sha256.bytes;
+        size = envelope->payload.config_begin.sha256.size;
+    } else if (envelope->which_payload == iot_edge_v1_Envelope_config_commit_tag) {
+        revision = envelope->payload.config_commit.revision;
+        digest = envelope->payload.config_commit.sha256.bytes;
+        size = envelope->payload.config_commit.sha256.size;
+    } else if (envelope->which_payload == iot_edge_v1_Envelope_config_item_tag) {
+        return envelope->payload.config_item.revision == active_revision
+            ? EDGE_CONFIG_REPLAY_IGNORE : EDGE_CONFIG_NOT_REPLAY;
+    } else {
+        return EDGE_CONFIG_NOT_REPLAY;
+    }
+    if (revision != active_revision) return EDGE_CONFIG_NOT_REPLAY;
+    if (size != 32U || memcmp(digest, active_digest, 32U) != 0)
+        return EDGE_CONFIG_REPLAY_CONFLICT;
+    return envelope->which_payload == iot_edge_v1_Envelope_config_commit_tag
+        ? EDGE_CONFIG_REPLAY_ACK : EDGE_CONFIG_REPLAY_IGNORE;
+}
+
 void edge_protocol_release(iot_edge_v1_Envelope *envelope) {
     pb_release(iot_edge_v1_Envelope_fields, envelope);
     *envelope = (iot_edge_v1_Envelope)iot_edge_v1_Envelope_init_zero;

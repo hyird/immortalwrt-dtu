@@ -42,7 +42,9 @@ typedef enum _iot_edge_v1_ConfigItemKind {
     iot_edge_v1_ConfigItemKind_CONFIG_ITEM_SL651_FUNCTION = 5,
     iot_edge_v1_ConfigItemKind_CONFIG_ITEM_SL651_ELEMENT = 6,
     iot_edge_v1_ConfigItemKind_CONFIG_ITEM_SL651_DICTIONARY = 7,
-    iot_edge_v1_ConfigItemKind_CONFIG_ITEM_INDUSTRIAL_POINT = 8
+    iot_edge_v1_ConfigItemKind_CONFIG_ITEM_INDUSTRIAL_POINT = 8,
+    iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DTU = 9,
+    iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT = 10
 } iot_edge_v1_ConfigItemKind;
 
 typedef enum _iot_edge_v1_ValueKind {
@@ -175,6 +177,8 @@ typedef struct _iot_edge_v1_Hello {
     bool supports_logs;
     char log_level[9];
     bool supports_firmware_stream;
+    /* Supports 300s probes and a >=900s application watchdog; absent preserves legacy timing. */
+    bool supports_sparse_heartbeat;
 } iot_edge_v1_Hello;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_HelloAck_assigned_node_id_t;
@@ -247,6 +251,8 @@ typedef struct _iot_edge_v1_CapabilityReport {
     pb_size_t supported_protocols_count;
     iot_edge_v1_Protocol supported_protocols[6];
     bool supports_serial_debug;
+    bool supports_dtu;
+    bool supports_derived_points;
 } iot_edge_v1_CapabilityReport;
 
 typedef struct _iot_edge_v1_Heartbeat {
@@ -325,6 +331,55 @@ typedef struct _iot_edge_v1_SerialSettings {
     uint32_t rs485_rts_delay_after_us;
 } iot_edge_v1_SerialSettings;
 
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_DtuConfig_channel_id_t;
+typedef PB_BYTES_ARRAY_T(256) iot_edge_v1_DtuConfig_registration_t;
+typedef PB_BYTES_ARRAY_T(256) iot_edge_v1_DtuConfig_heartbeat_t;
+typedef struct _iot_edge_v1_DtuConfig {
+    iot_edge_v1_DtuConfig_channel_id_t channel_id;
+    char name[101];
+    bool enabled;
+    iot_edge_v1_LinkMode south_mode;
+    bool has_serial;
+    iot_edge_v1_SerialSettings serial;
+    char south_host[254];
+    uint32_t south_port;
+    char north_host[254];
+    uint32_t north_port;
+    uint32_t max_clients;
+    bool uplink_only;
+    iot_edge_v1_DtuConfig_registration_t registration;
+    uint32_t queue_bytes;
+    uint32_t serial_frame_ms;
+    bool debug_enabled;
+    iot_edge_v1_DtuConfig_heartbeat_t heartbeat;
+    uint32_t heartbeat_interval_sec;
+} iot_edge_v1_DtuConfig;
+
+typedef PB_BYTES_ARRAY_T(256) iot_edge_v1_DtuTrace_payload_t;
+typedef struct _iot_edge_v1_DtuTrace {
+    uint64_t sequence;
+    char direction[17];
+    uint32_t client_slot;
+    iot_edge_v1_DtuTrace_payload_t payload;
+    uint32_t total_bytes;
+    uint64_t monotonic_ms;
+} iot_edge_v1_DtuTrace;
+
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_DtuStatus_channel_id_t;
+typedef struct _iot_edge_v1_DtuStatus {
+    iot_edge_v1_DtuStatus_channel_id_t channel_id;
+    char north_state[25];
+    char south_state[25];
+    uint32_t client_count;
+    uint64_t upstream_bytes;
+    uint64_t downstream_bytes;
+    uint32_t queued_bytes;
+    char error[161];
+    pb_size_t traces_count;
+    iot_edge_v1_DtuTrace traces[8];
+    uint64_t omitted_traces;
+} iot_edge_v1_DtuStatus;
+
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_EndpointConfig_endpoint_id_t;
 typedef struct _iot_edge_v1_EndpointConfig {
     iot_edge_v1_EndpointConfig_endpoint_id_t endpoint_id;
@@ -374,12 +429,12 @@ typedef struct _iot_edge_v1_DeviceConfig {
     char name[101];
     iot_edge_v1_Protocol protocol;
     char timezone[65];
-    /* Southbound DTU I/O is fixed at 1000 ms in protocol v1. A value of zero means
- the same 1000 ms default; other values are rejected instead of silently
- changing the device sampling cadence. */
+    /* Southbound acquisition interval in milliseconds (1000..3600000).
+ Zero follows report_interval_sec on updated firmware. Legacy firmware accepts
+ zero/1000 only and keeps its historical one-second cadence until upgraded. */
     uint32_t io_interval_ms;
-    /* Telemetry reporting is deliberately independent from the one-second DTU I/O
- loop. Each origin platform may configure its own reporting interval. */
+    /* Each origin platform configures its own read/report interval in seconds.
+ An explicit nonzero io_interval_ms may override the acquisition interval. */
     uint32_t report_interval_sec;
     uint32_t online_timeout_sec;
     uint32_t modbus_slave_id;
@@ -494,6 +549,35 @@ typedef struct _iot_edge_v1_Sl651DictionaryConfig {
     char dependency_value[65];
 } iot_edge_v1_Sl651DictionaryConfig;
 
+typedef struct _iot_edge_v1_DerivedPointInput {
+    char alias[33];
+    char point_id[65];
+} iot_edge_v1_DerivedPointInput;
+
+typedef struct _iot_edge_v1_DerivedUnitRule {
+    char condition[513];
+    char unit[33];
+} iot_edge_v1_DerivedUnitRule;
+
+typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_DerivedPointConfig_device_id_t;
+typedef struct _iot_edge_v1_DerivedPointConfig {
+    iot_edge_v1_DerivedPointConfig_device_id_t device_id;
+    char point_id[65];
+    char name[101];
+    char unit[33];
+    char kind[17];
+    char expression[513];
+    bool boolean_result;
+    pb_size_t inputs_count;
+    struct _iot_edge_v1_DerivedPointInput *inputs;
+    pb_size_t unit_rules_count;
+    struct _iot_edge_v1_DerivedUnitRule *unit_rules;
+    char source_alias[33];
+    uint32_t window_seconds;
+    uint32_t max_age_seconds;
+    bool hidden;
+} iot_edge_v1_DerivedPointConfig;
+
 typedef PB_BYTES_ARRAY_T(32) iot_edge_v1_ConfigItem_sha256_t;
 typedef struct _iot_edge_v1_ConfigItem {
     uint64_t revision;
@@ -510,6 +594,8 @@ typedef struct _iot_edge_v1_ConfigItem {
         iot_edge_v1_Sl651ElementConfig sl651_element;
         iot_edge_v1_Sl651DictionaryConfig sl651_dictionary;
         iot_edge_v1_IndustrialPointConfig industrial_point;
+        iot_edge_v1_DtuConfig dtu;
+        iot_edge_v1_DerivedPointConfig derived_point;
     } item;
 } iot_edge_v1_ConfigItem;
 
@@ -559,6 +645,10 @@ typedef struct _iot_edge_v1_TelemetryValue {
     /* Bounded binary SL651 elements; absent in deployed 0.3.44 firmware. */
     pb_bytes_array_t *encoded_value;
     char encoding[17];
+    bool derived;
+    bool hidden;
+    char quality[25];
+    int64_t sample_time_ms;
 } iot_edge_v1_TelemetryValue;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_TelemetryRecord_record_id_t;
@@ -592,6 +682,7 @@ typedef struct _iot_edge_v1_TelemetryRecord {
     /* One immutable receive ID per original frame; absent in legacy firmware. */
     pb_size_t raw_packet_ids_count;
     pb_bytes_array_t **raw_packet_ids;
+    bool derived_update;
 } iot_edge_v1_TelemetryRecord;
 
 typedef struct _iot_edge_v1_TelemetryBatch {
@@ -1016,6 +1107,7 @@ typedef struct _iot_edge_v1_Envelope {
         iot_edge_v1_VpnConfigResult vpn_config_result;
         iot_edge_v1_SerialDebugRequest serial_debug_request;
         iot_edge_v1_SerialDebugEvent serial_debug_event;
+        iot_edge_v1_DtuStatus dtu_status;
         iot_edge_v1_Error error;
     } payload;
 } iot_edge_v1_Envelope;
@@ -1039,8 +1131,8 @@ extern "C" {
 #define _iot_edge_v1_Protocol_ARRAYSIZE ((iot_edge_v1_Protocol)(iot_edge_v1_Protocol_PROTOCOL_DLT645+1))
 
 #define _iot_edge_v1_ConfigItemKind_MIN iot_edge_v1_ConfigItemKind_CONFIG_ITEM_UNSPECIFIED
-#define _iot_edge_v1_ConfigItemKind_MAX iot_edge_v1_ConfigItemKind_CONFIG_ITEM_INDUSTRIAL_POINT
-#define _iot_edge_v1_ConfigItemKind_ARRAYSIZE ((iot_edge_v1_ConfigItemKind)(iot_edge_v1_ConfigItemKind_CONFIG_ITEM_INDUSTRIAL_POINT+1))
+#define _iot_edge_v1_ConfigItemKind_MAX iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT
+#define _iot_edge_v1_ConfigItemKind_ARRAYSIZE ((iot_edge_v1_ConfigItemKind)(iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT+1))
 
 #define _iot_edge_v1_ValueKind_MIN iot_edge_v1_ValueKind_VALUE_UNSPECIFIED
 #define _iot_edge_v1_ValueKind_MAX iot_edge_v1_ValueKind_VALUE_DECIMAL
@@ -1106,11 +1198,18 @@ extern "C" {
 
 
 
+#define iot_edge_v1_DtuConfig_south_mode_ENUMTYPE iot_edge_v1_LinkMode
+
+
+
 #define iot_edge_v1_EndpointConfig_transport_ENUMTYPE iot_edge_v1_Transport
 #define iot_edge_v1_EndpointConfig_mode_ENUMTYPE iot_edge_v1_LinkMode
 #define iot_edge_v1_EndpointConfig_protocol_ENUMTYPE iot_edge_v1_Protocol
 
 #define iot_edge_v1_DeviceConfig_protocol_ENUMTYPE iot_edge_v1_Protocol
+
+
+
 
 
 
@@ -1183,14 +1282,14 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define iot_edge_v1_Empty_init_default           {0}
-#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0}
+#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0}
 #define iot_edge_v1_HelloAck_init_default        {{0, {0}}, 0, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_default {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_default {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
 #define iot_edge_v1_NetworkCapability_init_default {"", _iot_edge_v1_NetworkAddressMode_MIN, "", 0, 0, 0, {"", "", "", "", "", "", "", ""}, "", 0, ""}
 #define iot_edge_v1_SerialCapability_init_default {"", "", 0, 0}
 #define iot_edge_v1_VpnCapabilities_init_default {0, "", "", ""}
-#define iot_edge_v1_CapabilityReport_init_default {0, {iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default}, 0, {iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default}, false, iot_edge_v1_VpnCapabilities_init_default, 0, {_iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN}, 0}
+#define iot_edge_v1_CapabilityReport_init_default {0, {iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default}, 0, {iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default}, false, iot_edge_v1_VpnCapabilities_init_default, 0, {_iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN}, 0, 0, 0}
 #define iot_edge_v1_Heartbeat_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, ""}
 #define iot_edge_v1_HeartbeatAck_init_default    {0, 0, 0}
 #define iot_edge_v1_DeviceStatus_init_default    {{0, {0}}, "", "", 0, 0, {"", "", "", "", "", "", "", ""}, 0}
@@ -1198,6 +1297,9 @@ extern "C" {
 #define iot_edge_v1_EventReport_init_default     {"", "", "", {0, {0}}, 0, ""}
 #define iot_edge_v1_ConfigBegin_init_default     {0, 0, {0, {0}}}
 #define iot_edge_v1_SerialSettings_init_default  {"", 0, 0, 0, "", 0, 0, 0}
+#define iot_edge_v1_DtuConfig_init_default       {{0, {0}}, "", 0, _iot_edge_v1_LinkMode_MIN, false, iot_edge_v1_SerialSettings_init_default, "", 0, "", 0, 0, 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0}
+#define iot_edge_v1_DtuTrace_init_default        {0, "", 0, {0, {0}}, 0, 0}
+#define iot_edge_v1_DtuStatus_init_default       {{0, {0}}, "", "", 0, 0, 0, 0, "", 0, {iot_edge_v1_DtuTrace_init_default, iot_edge_v1_DtuTrace_init_default, iot_edge_v1_DtuTrace_init_default, iot_edge_v1_DtuTrace_init_default, iot_edge_v1_DtuTrace_init_default, iot_edge_v1_DtuTrace_init_default, iot_edge_v1_DtuTrace_init_default, iot_edge_v1_DtuTrace_init_default}, 0}
 #define iot_edge_v1_EndpointConfig_init_default  {{0, {0}}, "", _iot_edge_v1_Transport_MIN, _iot_edge_v1_LinkMode_MIN, _iot_edge_v1_Protocol_MIN, "", 0, false, iot_edge_v1_SerialSettings_init_default, 0, "", 0}
 #define iot_edge_v1_DeviceConfig_init_default    {{0, {0}}, {0, {0}}, "", "", _iot_edge_v1_Protocol_MIN, "", 0, 0, 0, 0, "", 0, 0, "", "", 0, 0, "", "", 0, 0, {0, {0}}, 0, 0, 0, false, iot_edge_v1_IndustrialConnectionConfig_init_default}
 #define iot_edge_v1_IndustrialConnectionConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}}
@@ -1207,13 +1309,16 @@ extern "C" {
 #define iot_edge_v1_Sl651FunctionConfig_init_default {{0, {0}}, "", "", ""}
 #define iot_edge_v1_Sl651ElementConfig_init_default {{0, {0}}, "", "", "", "", "", 0, 0, {0, {0}}, 0, 0, 0, 0}
 #define iot_edge_v1_Sl651DictionaryConfig_init_default {{0, {0}}, "", "", "", "", "", "", ""}
+#define iot_edge_v1_DerivedPointInput_init_default {"", ""}
+#define iot_edge_v1_DerivedUnitRule_init_default {"", ""}
+#define iot_edge_v1_DerivedPointConfig_init_default {{0, {0}}, "", "", "", "", "", 0, 0, NULL, 0, NULL, "", 0, 0, 0}
 #define iot_edge_v1_ConfigItem_init_default      {0, 0, _iot_edge_v1_ConfigItemKind_MIN, {0, {0}}, 0, {iot_edge_v1_EndpointConfig_init_default}}
 #define iot_edge_v1_ConfigCommit_init_default    {0, {0, {0}}}
 #define iot_edge_v1_ConfigApplied_init_default   {0, {0, {0}}, 0, 0}
 #define iot_edge_v1_ConfigRejected_init_default  {0, "", "", 0}
 #define iot_edge_v1_ScalarValue_init_default     {_iot_edge_v1_ValueKind_MIN, 0, {0}}
-#define iot_edge_v1_TelemetryValue_init_default  {"", "", "", false, iot_edge_v1_ScalarValue_init_default, NULL, ""}
-#define iot_edge_v1_TelemetryRecord_init_default {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, false, iot_edge_v1_DeviceStatus_init_default, {0, {0}}, 0, NULL, {0, {0}}, 0, 0, 0, NULL}
+#define iot_edge_v1_TelemetryValue_init_default  {"", "", "", false, iot_edge_v1_ScalarValue_init_default, NULL, "", 0, 0, "", 0}
+#define iot_edge_v1_TelemetryRecord_init_default {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, false, iot_edge_v1_DeviceStatus_init_default, {0, {0}}, 0, NULL, {0, {0}}, 0, 0, 0, NULL, 0}
 #define iot_edge_v1_TelemetryBatch_init_default  {0, {iot_edge_v1_TelemetryRecord_init_default}}
 #define iot_edge_v1_TelemetryAck_init_default    {0, {{0, {0}}}}
 #define iot_edge_v1_RawPacket_init_default       {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", "", 0, {0, {0}}, {0, {0}}, "", false, iot_edge_v1_TelemetryValue_init_default}
@@ -1255,14 +1360,14 @@ extern "C" {
 #define iot_edge_v1_Error_init_default           {"", "", 0}
 #define iot_edge_v1_Envelope_init_default        {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, 0, {iot_edge_v1_Hello_init_default}}
 #define iot_edge_v1_Empty_init_zero              {0}
-#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0}
+#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0}
 #define iot_edge_v1_HelloAck_init_zero           {{0, {0}}, 0, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_zero   {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_zero {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
 #define iot_edge_v1_NetworkCapability_init_zero  {"", _iot_edge_v1_NetworkAddressMode_MIN, "", 0, 0, 0, {"", "", "", "", "", "", "", ""}, "", 0, ""}
 #define iot_edge_v1_SerialCapability_init_zero   {"", "", 0, 0}
 #define iot_edge_v1_VpnCapabilities_init_zero    {0, "", "", ""}
-#define iot_edge_v1_CapabilityReport_init_zero   {0, {iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero}, 0, {iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero}, false, iot_edge_v1_VpnCapabilities_init_zero, 0, {_iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN}, 0}
+#define iot_edge_v1_CapabilityReport_init_zero   {0, {iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero}, 0, {iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero}, false, iot_edge_v1_VpnCapabilities_init_zero, 0, {_iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN}, 0, 0, 0}
 #define iot_edge_v1_Heartbeat_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, ""}
 #define iot_edge_v1_HeartbeatAck_init_zero       {0, 0, 0}
 #define iot_edge_v1_DeviceStatus_init_zero       {{0, {0}}, "", "", 0, 0, {"", "", "", "", "", "", "", ""}, 0}
@@ -1270,6 +1375,9 @@ extern "C" {
 #define iot_edge_v1_EventReport_init_zero        {"", "", "", {0, {0}}, 0, ""}
 #define iot_edge_v1_ConfigBegin_init_zero        {0, 0, {0, {0}}}
 #define iot_edge_v1_SerialSettings_init_zero     {"", 0, 0, 0, "", 0, 0, 0}
+#define iot_edge_v1_DtuConfig_init_zero          {{0, {0}}, "", 0, _iot_edge_v1_LinkMode_MIN, false, iot_edge_v1_SerialSettings_init_zero, "", 0, "", 0, 0, 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0}
+#define iot_edge_v1_DtuTrace_init_zero           {0, "", 0, {0, {0}}, 0, 0}
+#define iot_edge_v1_DtuStatus_init_zero          {{0, {0}}, "", "", 0, 0, 0, 0, "", 0, {iot_edge_v1_DtuTrace_init_zero, iot_edge_v1_DtuTrace_init_zero, iot_edge_v1_DtuTrace_init_zero, iot_edge_v1_DtuTrace_init_zero, iot_edge_v1_DtuTrace_init_zero, iot_edge_v1_DtuTrace_init_zero, iot_edge_v1_DtuTrace_init_zero, iot_edge_v1_DtuTrace_init_zero}, 0}
 #define iot_edge_v1_EndpointConfig_init_zero     {{0, {0}}, "", _iot_edge_v1_Transport_MIN, _iot_edge_v1_LinkMode_MIN, _iot_edge_v1_Protocol_MIN, "", 0, false, iot_edge_v1_SerialSettings_init_zero, 0, "", 0}
 #define iot_edge_v1_DeviceConfig_init_zero       {{0, {0}}, {0, {0}}, "", "", _iot_edge_v1_Protocol_MIN, "", 0, 0, 0, 0, "", 0, 0, "", "", 0, 0, "", "", 0, 0, {0, {0}}, 0, 0, 0, false, iot_edge_v1_IndustrialConnectionConfig_init_zero}
 #define iot_edge_v1_IndustrialConnectionConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}}
@@ -1279,13 +1387,16 @@ extern "C" {
 #define iot_edge_v1_Sl651FunctionConfig_init_zero {{0, {0}}, "", "", ""}
 #define iot_edge_v1_Sl651ElementConfig_init_zero {{0, {0}}, "", "", "", "", "", 0, 0, {0, {0}}, 0, 0, 0, 0}
 #define iot_edge_v1_Sl651DictionaryConfig_init_zero {{0, {0}}, "", "", "", "", "", "", ""}
+#define iot_edge_v1_DerivedPointInput_init_zero  {"", ""}
+#define iot_edge_v1_DerivedUnitRule_init_zero    {"", ""}
+#define iot_edge_v1_DerivedPointConfig_init_zero {{0, {0}}, "", "", "", "", "", 0, 0, NULL, 0, NULL, "", 0, 0, 0}
 #define iot_edge_v1_ConfigItem_init_zero         {0, 0, _iot_edge_v1_ConfigItemKind_MIN, {0, {0}}, 0, {iot_edge_v1_EndpointConfig_init_zero}}
 #define iot_edge_v1_ConfigCommit_init_zero       {0, {0, {0}}}
 #define iot_edge_v1_ConfigApplied_init_zero      {0, {0, {0}}, 0, 0}
 #define iot_edge_v1_ConfigRejected_init_zero     {0, "", "", 0}
 #define iot_edge_v1_ScalarValue_init_zero        {_iot_edge_v1_ValueKind_MIN, 0, {0}}
-#define iot_edge_v1_TelemetryValue_init_zero     {"", "", "", false, iot_edge_v1_ScalarValue_init_zero, NULL, ""}
-#define iot_edge_v1_TelemetryRecord_init_zero    {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, false, iot_edge_v1_DeviceStatus_init_zero, {0, {0}}, 0, NULL, {0, {0}}, 0, 0, 0, NULL}
+#define iot_edge_v1_TelemetryValue_init_zero     {"", "", "", false, iot_edge_v1_ScalarValue_init_zero, NULL, "", 0, 0, "", 0}
+#define iot_edge_v1_TelemetryRecord_init_zero    {{0, {0}}, {0, {0}}, {0, {0}}, _iot_edge_v1_Protocol_MIN, "", "", "", 0, 0, NULL, false, iot_edge_v1_DeviceStatus_init_zero, {0, {0}}, 0, NULL, {0, {0}}, 0, 0, 0, NULL, 0}
 #define iot_edge_v1_TelemetryBatch_init_zero     {0, {iot_edge_v1_TelemetryRecord_init_zero}}
 #define iot_edge_v1_TelemetryAck_init_zero       {0, {{0, {0}}}}
 #define iot_edge_v1_RawPacket_init_zero          {{0, {0}}, {0, {0}}, {0, {0}}, "", 0, {0, {0}}, 0, "", 0, "", "", 0, {0, {0}}, {0, {0}}, "", false, iot_edge_v1_TelemetryValue_init_zero}
@@ -1361,6 +1472,7 @@ extern "C" {
 #define iot_edge_v1_Hello_supports_logs_tag      32
 #define iot_edge_v1_Hello_log_level_tag          33
 #define iot_edge_v1_Hello_supports_firmware_stream_tag 34
+#define iot_edge_v1_Hello_supports_sparse_heartbeat_tag 35
 #define iot_edge_v1_HelloAck_assigned_node_id_tag 1
 #define iot_edge_v1_HelloAck_session_epoch_tag   2
 #define iot_edge_v1_HelloAck_negotiated_protocol_version_tag 3
@@ -1403,6 +1515,8 @@ extern "C" {
 #define iot_edge_v1_CapabilityReport_vpn_tag     6
 #define iot_edge_v1_CapabilityReport_supported_protocols_tag 7
 #define iot_edge_v1_CapabilityReport_supports_serial_debug_tag 8
+#define iot_edge_v1_CapabilityReport_supports_dtu_tag 9
+#define iot_edge_v1_CapabilityReport_supports_derived_points_tag 10
 #define iot_edge_v1_Heartbeat_uptime_sec_tag     1
 #define iot_edge_v1_Heartbeat_active_config_version_tag 2
 #define iot_edge_v1_Heartbeat_managed_endpoint_count_tag 3
@@ -1453,6 +1567,39 @@ extern "C" {
 #define iot_edge_v1_SerialSettings_rs485_tag     6
 #define iot_edge_v1_SerialSettings_rs485_rts_delay_before_us_tag 7
 #define iot_edge_v1_SerialSettings_rs485_rts_delay_after_us_tag 8
+#define iot_edge_v1_DtuConfig_channel_id_tag     1
+#define iot_edge_v1_DtuConfig_name_tag           2
+#define iot_edge_v1_DtuConfig_enabled_tag        3
+#define iot_edge_v1_DtuConfig_south_mode_tag     4
+#define iot_edge_v1_DtuConfig_serial_tag         5
+#define iot_edge_v1_DtuConfig_south_host_tag     6
+#define iot_edge_v1_DtuConfig_south_port_tag     7
+#define iot_edge_v1_DtuConfig_north_host_tag     8
+#define iot_edge_v1_DtuConfig_north_port_tag     9
+#define iot_edge_v1_DtuConfig_max_clients_tag    10
+#define iot_edge_v1_DtuConfig_uplink_only_tag    11
+#define iot_edge_v1_DtuConfig_registration_tag   12
+#define iot_edge_v1_DtuConfig_queue_bytes_tag    13
+#define iot_edge_v1_DtuConfig_serial_frame_ms_tag 14
+#define iot_edge_v1_DtuConfig_debug_enabled_tag  15
+#define iot_edge_v1_DtuConfig_heartbeat_tag      16
+#define iot_edge_v1_DtuConfig_heartbeat_interval_sec_tag 17
+#define iot_edge_v1_DtuTrace_sequence_tag        1
+#define iot_edge_v1_DtuTrace_direction_tag       2
+#define iot_edge_v1_DtuTrace_client_slot_tag     3
+#define iot_edge_v1_DtuTrace_payload_tag         4
+#define iot_edge_v1_DtuTrace_total_bytes_tag     5
+#define iot_edge_v1_DtuTrace_monotonic_ms_tag    6
+#define iot_edge_v1_DtuStatus_channel_id_tag     1
+#define iot_edge_v1_DtuStatus_north_state_tag    2
+#define iot_edge_v1_DtuStatus_south_state_tag    3
+#define iot_edge_v1_DtuStatus_client_count_tag   4
+#define iot_edge_v1_DtuStatus_upstream_bytes_tag 5
+#define iot_edge_v1_DtuStatus_downstream_bytes_tag 6
+#define iot_edge_v1_DtuStatus_queued_bytes_tag   7
+#define iot_edge_v1_DtuStatus_error_tag          8
+#define iot_edge_v1_DtuStatus_traces_tag         9
+#define iot_edge_v1_DtuStatus_omitted_traces_tag 10
 #define iot_edge_v1_EndpointConfig_endpoint_id_tag 1
 #define iot_edge_v1_EndpointConfig_name_tag      2
 #define iot_edge_v1_EndpointConfig_transport_tag 3
@@ -1571,6 +1718,23 @@ extern "C" {
 #define iot_edge_v1_Sl651DictionaryConfig_dependency_element_id_tag 6
 #define iot_edge_v1_Sl651DictionaryConfig_dependency_operator_tag 7
 #define iot_edge_v1_Sl651DictionaryConfig_dependency_value_tag 8
+#define iot_edge_v1_DerivedPointInput_alias_tag  1
+#define iot_edge_v1_DerivedPointInput_point_id_tag 2
+#define iot_edge_v1_DerivedUnitRule_condition_tag 1
+#define iot_edge_v1_DerivedUnitRule_unit_tag     2
+#define iot_edge_v1_DerivedPointConfig_device_id_tag 1
+#define iot_edge_v1_DerivedPointConfig_point_id_tag 2
+#define iot_edge_v1_DerivedPointConfig_name_tag  3
+#define iot_edge_v1_DerivedPointConfig_unit_tag  4
+#define iot_edge_v1_DerivedPointConfig_kind_tag  5
+#define iot_edge_v1_DerivedPointConfig_expression_tag 6
+#define iot_edge_v1_DerivedPointConfig_boolean_result_tag 7
+#define iot_edge_v1_DerivedPointConfig_inputs_tag 8
+#define iot_edge_v1_DerivedPointConfig_unit_rules_tag 9
+#define iot_edge_v1_DerivedPointConfig_source_alias_tag 10
+#define iot_edge_v1_DerivedPointConfig_window_seconds_tag 11
+#define iot_edge_v1_DerivedPointConfig_max_age_seconds_tag 12
+#define iot_edge_v1_DerivedPointConfig_hidden_tag 13
 #define iot_edge_v1_ConfigItem_revision_tag      1
 #define iot_edge_v1_ConfigItem_index_tag         2
 #define iot_edge_v1_ConfigItem_kind_tag          3
@@ -1583,6 +1747,8 @@ extern "C" {
 #define iot_edge_v1_ConfigItem_sl651_element_tag 15
 #define iot_edge_v1_ConfigItem_sl651_dictionary_tag 16
 #define iot_edge_v1_ConfigItem_industrial_point_tag 17
+#define iot_edge_v1_ConfigItem_dtu_tag           18
+#define iot_edge_v1_ConfigItem_derived_point_tag 19
 #define iot_edge_v1_ConfigCommit_revision_tag    1
 #define iot_edge_v1_ConfigCommit_sha256_tag      2
 #define iot_edge_v1_ConfigApplied_revision_tag   1
@@ -1607,6 +1773,10 @@ extern "C" {
 #define iot_edge_v1_TelemetryValue_value_tag     4
 #define iot_edge_v1_TelemetryValue_encoded_value_tag 5
 #define iot_edge_v1_TelemetryValue_encoding_tag  6
+#define iot_edge_v1_TelemetryValue_derived_tag   7
+#define iot_edge_v1_TelemetryValue_hidden_tag    8
+#define iot_edge_v1_TelemetryValue_quality_tag   9
+#define iot_edge_v1_TelemetryValue_sample_time_ms_tag 10
 #define iot_edge_v1_TelemetryRecord_record_id_tag 1
 #define iot_edge_v1_TelemetryRecord_device_id_tag 2
 #define iot_edge_v1_TelemetryRecord_endpoint_id_tag 3
@@ -1623,6 +1793,7 @@ extern "C" {
 #define iot_edge_v1_TelemetryRecord_part_index_tag 16
 #define iot_edge_v1_TelemetryRecord_part_count_tag 17
 #define iot_edge_v1_TelemetryRecord_raw_packet_ids_tag 18
+#define iot_edge_v1_TelemetryRecord_derived_update_tag 19
 #define iot_edge_v1_TelemetryBatch_records_tag   1
 #define iot_edge_v1_TelemetryAck_accepted_record_ids_tag 1
 #define iot_edge_v1_RawPacket_packet_id_tag      1
@@ -1858,6 +2029,7 @@ extern "C" {
 #define iot_edge_v1_Envelope_vpn_config_result_tag 85
 #define iot_edge_v1_Envelope_serial_debug_request_tag 86
 #define iot_edge_v1_Envelope_serial_debug_event_tag 87
+#define iot_edge_v1_Envelope_dtu_status_tag      88
 #define iot_edge_v1_Envelope_error_tag           90
 
 /* Struct field encoding specification for nanopb */
@@ -1899,7 +2071,8 @@ X(a, STATIC,   SINGULAR, STRING,   mobile_ipv4,      30) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_modem_control,  31) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_logs,    32) \
 X(a, STATIC,   SINGULAR, STRING,   log_level,        33) \
-X(a, STATIC,   SINGULAR, BOOL,     supports_firmware_stream,  34)
+X(a, STATIC,   SINGULAR, BOOL,     supports_firmware_stream,  34) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_sparse_heartbeat,  35)
 #define iot_edge_v1_Hello_CALLBACK NULL
 #define iot_edge_v1_Hello_DEFAULT NULL
 
@@ -1969,7 +2142,9 @@ X(a, STATIC,   SINGULAR, BOOL,     ttyd_available,    4) \
 X(a, STATIC,   REPEATED, MESSAGE,  networks,          5) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  vpn,               6) \
 X(a, STATIC,   REPEATED, UENUM,    supported_protocols,   7) \
-X(a, STATIC,   SINGULAR, BOOL,     supports_serial_debug,   8)
+X(a, STATIC,   SINGULAR, BOOL,     supports_serial_debug,   8) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_dtu,      9) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_derived_points,  10)
 #define iot_edge_v1_CapabilityReport_CALLBACK NULL
 #define iot_edge_v1_CapabilityReport_DEFAULT NULL
 #define iot_edge_v1_CapabilityReport_interfaces_MSGTYPE iot_edge_v1_InterfaceCapability
@@ -2055,6 +2230,53 @@ X(a, STATIC,   SINGULAR, UINT32,   rs485_rts_delay_before_us,   7) \
 X(a, STATIC,   SINGULAR, UINT32,   rs485_rts_delay_after_us,   8)
 #define iot_edge_v1_SerialSettings_CALLBACK NULL
 #define iot_edge_v1_SerialSettings_DEFAULT NULL
+
+#define iot_edge_v1_DtuConfig_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    channel_id,        1) \
+X(a, STATIC,   SINGULAR, STRING,   name,              2) \
+X(a, STATIC,   SINGULAR, BOOL,     enabled,           3) \
+X(a, STATIC,   SINGULAR, UENUM,    south_mode,        4) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  serial,            5) \
+X(a, STATIC,   SINGULAR, STRING,   south_host,        6) \
+X(a, STATIC,   SINGULAR, UINT32,   south_port,        7) \
+X(a, STATIC,   SINGULAR, STRING,   north_host,        8) \
+X(a, STATIC,   SINGULAR, UINT32,   north_port,        9) \
+X(a, STATIC,   SINGULAR, UINT32,   max_clients,      10) \
+X(a, STATIC,   SINGULAR, BOOL,     uplink_only,      11) \
+X(a, STATIC,   SINGULAR, BYTES,    registration,     12) \
+X(a, STATIC,   SINGULAR, UINT32,   queue_bytes,      13) \
+X(a, STATIC,   SINGULAR, UINT32,   serial_frame_ms,  14) \
+X(a, STATIC,   SINGULAR, BOOL,     debug_enabled,    15) \
+X(a, STATIC,   SINGULAR, BYTES,    heartbeat,        16) \
+X(a, STATIC,   SINGULAR, UINT32,   heartbeat_interval_sec,  17)
+#define iot_edge_v1_DtuConfig_CALLBACK NULL
+#define iot_edge_v1_DtuConfig_DEFAULT NULL
+#define iot_edge_v1_DtuConfig_serial_MSGTYPE iot_edge_v1_SerialSettings
+
+#define iot_edge_v1_DtuTrace_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT64,   sequence,          1) \
+X(a, STATIC,   SINGULAR, STRING,   direction,         2) \
+X(a, STATIC,   SINGULAR, UINT32,   client_slot,       3) \
+X(a, STATIC,   SINGULAR, BYTES,    payload,           4) \
+X(a, STATIC,   SINGULAR, UINT32,   total_bytes,       5) \
+X(a, STATIC,   SINGULAR, UINT64,   monotonic_ms,      6)
+#define iot_edge_v1_DtuTrace_CALLBACK NULL
+#define iot_edge_v1_DtuTrace_DEFAULT NULL
+
+#define iot_edge_v1_DtuStatus_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    channel_id,        1) \
+X(a, STATIC,   SINGULAR, STRING,   north_state,       2) \
+X(a, STATIC,   SINGULAR, STRING,   south_state,       3) \
+X(a, STATIC,   SINGULAR, UINT32,   client_count,      4) \
+X(a, STATIC,   SINGULAR, UINT64,   upstream_bytes,    5) \
+X(a, STATIC,   SINGULAR, UINT64,   downstream_bytes,   6) \
+X(a, STATIC,   SINGULAR, UINT32,   queued_bytes,      7) \
+X(a, STATIC,   SINGULAR, STRING,   error,             8) \
+X(a, STATIC,   REPEATED, MESSAGE,  traces,            9) \
+X(a, STATIC,   SINGULAR, UINT64,   omitted_traces,   10)
+#define iot_edge_v1_DtuStatus_CALLBACK NULL
+#define iot_edge_v1_DtuStatus_DEFAULT NULL
+#define iot_edge_v1_DtuStatus_traces_MSGTYPE iot_edge_v1_DtuTrace
 
 #define iot_edge_v1_EndpointConfig_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, BYTES,    endpoint_id,       1) \
@@ -2212,6 +2434,37 @@ X(a, STATIC,   SINGULAR, STRING,   dependency_value,   8)
 #define iot_edge_v1_Sl651DictionaryConfig_CALLBACK NULL
 #define iot_edge_v1_Sl651DictionaryConfig_DEFAULT NULL
 
+#define iot_edge_v1_DerivedPointInput_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, STRING,   alias,             1) \
+X(a, STATIC,   SINGULAR, STRING,   point_id,          2)
+#define iot_edge_v1_DerivedPointInput_CALLBACK NULL
+#define iot_edge_v1_DerivedPointInput_DEFAULT NULL
+
+#define iot_edge_v1_DerivedUnitRule_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, STRING,   condition,         1) \
+X(a, STATIC,   SINGULAR, STRING,   unit,              2)
+#define iot_edge_v1_DerivedUnitRule_CALLBACK NULL
+#define iot_edge_v1_DerivedUnitRule_DEFAULT NULL
+
+#define iot_edge_v1_DerivedPointConfig_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    device_id,         1) \
+X(a, STATIC,   SINGULAR, STRING,   point_id,          2) \
+X(a, STATIC,   SINGULAR, STRING,   name,              3) \
+X(a, STATIC,   SINGULAR, STRING,   unit,              4) \
+X(a, STATIC,   SINGULAR, STRING,   kind,              5) \
+X(a, STATIC,   SINGULAR, STRING,   expression,        6) \
+X(a, STATIC,   SINGULAR, BOOL,     boolean_result,    7) \
+X(a, POINTER,  REPEATED, MESSAGE,  inputs,            8) \
+X(a, POINTER,  REPEATED, MESSAGE,  unit_rules,        9) \
+X(a, STATIC,   SINGULAR, STRING,   source_alias,     10) \
+X(a, STATIC,   SINGULAR, UINT32,   window_seconds,   11) \
+X(a, STATIC,   SINGULAR, UINT32,   max_age_seconds,  12) \
+X(a, STATIC,   SINGULAR, BOOL,     hidden,           13)
+#define iot_edge_v1_DerivedPointConfig_CALLBACK NULL
+#define iot_edge_v1_DerivedPointConfig_DEFAULT NULL
+#define iot_edge_v1_DerivedPointConfig_inputs_MSGTYPE iot_edge_v1_DerivedPointInput
+#define iot_edge_v1_DerivedPointConfig_unit_rules_MSGTYPE iot_edge_v1_DerivedUnitRule
+
 #define iot_edge_v1_ConfigItem_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT64,   revision,          1) \
 X(a, STATIC,   SINGULAR, UINT32,   index,             2) \
@@ -2224,7 +2477,9 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (item,s7_area,item.s7_area),  13) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (item,sl651_function,item.sl651_function),  14) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (item,sl651_element,item.sl651_element),  15) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (item,sl651_dictionary,item.sl651_dictionary),  16) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (item,industrial_point,item.industrial_point),  17)
+X(a, STATIC,   ONEOF,    MESSAGE,  (item,industrial_point,item.industrial_point),  17) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (item,dtu,item.dtu),  18) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (item,derived_point,item.derived_point),  19)
 #define iot_edge_v1_ConfigItem_CALLBACK NULL
 #define iot_edge_v1_ConfigItem_DEFAULT NULL
 #define iot_edge_v1_ConfigItem_item_endpoint_MSGTYPE iot_edge_v1_EndpointConfig
@@ -2235,6 +2490,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (item,industrial_point,item.industrial_point)
 #define iot_edge_v1_ConfigItem_item_sl651_element_MSGTYPE iot_edge_v1_Sl651ElementConfig
 #define iot_edge_v1_ConfigItem_item_sl651_dictionary_MSGTYPE iot_edge_v1_Sl651DictionaryConfig
 #define iot_edge_v1_ConfigItem_item_industrial_point_MSGTYPE iot_edge_v1_IndustrialPointConfig
+#define iot_edge_v1_ConfigItem_item_dtu_MSGTYPE iot_edge_v1_DtuConfig
+#define iot_edge_v1_ConfigItem_item_derived_point_MSGTYPE iot_edge_v1_DerivedPointConfig
 
 #define iot_edge_v1_ConfigCommit_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT64,   revision,          1) \
@@ -2276,7 +2533,11 @@ X(a, STATIC,   SINGULAR, STRING,   name,              2) \
 X(a, STATIC,   SINGULAR, STRING,   unit,              3) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  value,             4) \
 X(a, POINTER,  SINGULAR, BYTES,    encoded_value,     5) \
-X(a, STATIC,   SINGULAR, STRING,   encoding,          6)
+X(a, STATIC,   SINGULAR, STRING,   encoding,          6) \
+X(a, STATIC,   SINGULAR, BOOL,     derived,           7) \
+X(a, STATIC,   SINGULAR, BOOL,     hidden,            8) \
+X(a, STATIC,   SINGULAR, STRING,   quality,           9) \
+X(a, STATIC,   SINGULAR, INT64,    sample_time_ms,   10)
 #define iot_edge_v1_TelemetryValue_CALLBACK NULL
 #define iot_edge_v1_TelemetryValue_DEFAULT NULL
 #define iot_edge_v1_TelemetryValue_value_MSGTYPE iot_edge_v1_ScalarValue
@@ -2297,7 +2558,8 @@ X(a, POINTER,  REPEATED, BYTES,    raw_payloads,     14) \
 X(a, STATIC,   SINGULAR, BYTES,    report_id,        15) \
 X(a, STATIC,   SINGULAR, UINT32,   part_index,       16) \
 X(a, STATIC,   SINGULAR, UINT32,   part_count,       17) \
-X(a, POINTER,  REPEATED, BYTES,    raw_packet_ids,   18)
+X(a, POINTER,  REPEATED, BYTES,    raw_packet_ids,   18) \
+X(a, STATIC,   SINGULAR, BOOL,     derived_update,   19)
 #define iot_edge_v1_TelemetryRecord_CALLBACK NULL
 #define iot_edge_v1_TelemetryRecord_DEFAULT NULL
 #define iot_edge_v1_TelemetryRecord_values_MSGTYPE iot_edge_v1_TelemetryValue
@@ -2705,6 +2967,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,vpn_config_request,payload.vpn_confi
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,vpn_config_result,payload.vpn_config_result),  85) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,serial_debug_request,payload.serial_debug_request),  86) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,serial_debug_event,payload.serial_debug_event),  87) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,dtu_status,payload.dtu_status),  88) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,error,payload.error),  90)
 #define iot_edge_v1_Envelope_CALLBACK NULL
 #define iot_edge_v1_Envelope_DEFAULT NULL
@@ -2756,6 +3019,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,error,payload.error),  90)
 #define iot_edge_v1_Envelope_payload_vpn_config_result_MSGTYPE iot_edge_v1_VpnConfigResult
 #define iot_edge_v1_Envelope_payload_serial_debug_request_MSGTYPE iot_edge_v1_SerialDebugRequest
 #define iot_edge_v1_Envelope_payload_serial_debug_event_MSGTYPE iot_edge_v1_SerialDebugEvent
+#define iot_edge_v1_Envelope_payload_dtu_status_MSGTYPE iot_edge_v1_DtuStatus
 #define iot_edge_v1_Envelope_payload_error_MSGTYPE iot_edge_v1_Error
 
 extern const pb_msgdesc_t iot_edge_v1_Empty_msg;
@@ -2774,6 +3038,9 @@ extern const pb_msgdesc_t iot_edge_v1_DeviceStatusReport_msg;
 extern const pb_msgdesc_t iot_edge_v1_EventReport_msg;
 extern const pb_msgdesc_t iot_edge_v1_ConfigBegin_msg;
 extern const pb_msgdesc_t iot_edge_v1_SerialSettings_msg;
+extern const pb_msgdesc_t iot_edge_v1_DtuConfig_msg;
+extern const pb_msgdesc_t iot_edge_v1_DtuTrace_msg;
+extern const pb_msgdesc_t iot_edge_v1_DtuStatus_msg;
 extern const pb_msgdesc_t iot_edge_v1_EndpointConfig_msg;
 extern const pb_msgdesc_t iot_edge_v1_DeviceConfig_msg;
 extern const pb_msgdesc_t iot_edge_v1_IndustrialConnectionConfig_msg;
@@ -2783,6 +3050,9 @@ extern const pb_msgdesc_t iot_edge_v1_S7AreaConfig_msg;
 extern const pb_msgdesc_t iot_edge_v1_Sl651FunctionConfig_msg;
 extern const pb_msgdesc_t iot_edge_v1_Sl651ElementConfig_msg;
 extern const pb_msgdesc_t iot_edge_v1_Sl651DictionaryConfig_msg;
+extern const pb_msgdesc_t iot_edge_v1_DerivedPointInput_msg;
+extern const pb_msgdesc_t iot_edge_v1_DerivedUnitRule_msg;
+extern const pb_msgdesc_t iot_edge_v1_DerivedPointConfig_msg;
 extern const pb_msgdesc_t iot_edge_v1_ConfigItem_msg;
 extern const pb_msgdesc_t iot_edge_v1_ConfigCommit_msg;
 extern const pb_msgdesc_t iot_edge_v1_ConfigApplied_msg;
@@ -2848,6 +3118,9 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_EventReport_fields &iot_edge_v1_EventReport_msg
 #define iot_edge_v1_ConfigBegin_fields &iot_edge_v1_ConfigBegin_msg
 #define iot_edge_v1_SerialSettings_fields &iot_edge_v1_SerialSettings_msg
+#define iot_edge_v1_DtuConfig_fields &iot_edge_v1_DtuConfig_msg
+#define iot_edge_v1_DtuTrace_fields &iot_edge_v1_DtuTrace_msg
+#define iot_edge_v1_DtuStatus_fields &iot_edge_v1_DtuStatus_msg
 #define iot_edge_v1_EndpointConfig_fields &iot_edge_v1_EndpointConfig_msg
 #define iot_edge_v1_DeviceConfig_fields &iot_edge_v1_DeviceConfig_msg
 #define iot_edge_v1_IndustrialConnectionConfig_fields &iot_edge_v1_IndustrialConnectionConfig_msg
@@ -2857,6 +3130,9 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_Sl651FunctionConfig_fields &iot_edge_v1_Sl651FunctionConfig_msg
 #define iot_edge_v1_Sl651ElementConfig_fields &iot_edge_v1_Sl651ElementConfig_msg
 #define iot_edge_v1_Sl651DictionaryConfig_fields &iot_edge_v1_Sl651DictionaryConfig_msg
+#define iot_edge_v1_DerivedPointInput_fields &iot_edge_v1_DerivedPointInput_msg
+#define iot_edge_v1_DerivedUnitRule_fields &iot_edge_v1_DerivedUnitRule_msg
+#define iot_edge_v1_DerivedPointConfig_fields &iot_edge_v1_DerivedPointConfig_msg
 #define iot_edge_v1_ConfigItem_fields &iot_edge_v1_ConfigItem_msg
 #define iot_edge_v1_ConfigCommit_fields &iot_edge_v1_ConfigCommit_msg
 #define iot_edge_v1_ConfigApplied_fields &iot_edge_v1_ConfigApplied_msg
@@ -2906,6 +3182,8 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_Envelope_fields &iot_edge_v1_Envelope_msg
 
 /* Maximum encoded size of messages (where known) */
+/* iot_edge_v1_DerivedPointConfig_size depends on runtime parameters */
+/* iot_edge_v1_ConfigItem_size depends on runtime parameters */
 /* iot_edge_v1_TelemetryValue_size depends on runtime parameters */
 /* iot_edge_v1_TelemetryRecord_size depends on runtime parameters */
 /* iot_edge_v1_TelemetryBatch_size depends on runtime parameters */
@@ -2913,7 +3191,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 /* iot_edge_v1_CommandResult_size depends on runtime parameters */
 /* iot_edge_v1_Envelope_size depends on runtime parameters */
 #define IOT_EDGE_V1_EDGE_PB_H_MAX_SIZE           iot_edge_v1_LogResult_size
-#define iot_edge_v1_CapabilityReport_size        11501
+#define iot_edge_v1_CapabilityReport_size        11505
 #define iot_edge_v1_CommandProgress_size         215
 #define iot_edge_v1_CommandRequest_size          2724
 #define iot_edge_v1_CommandResultAck_size        18
@@ -2921,11 +3199,15 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_ConfigApplied_size           57
 #define iot_edge_v1_ConfigBegin_size             51
 #define iot_edge_v1_ConfigCommit_size            45
-#define iot_edge_v1_ConfigItem_size              865
 #define iot_edge_v1_ConfigRejected_size          310
+#define iot_edge_v1_DerivedPointInput_size       100
+#define iot_edge_v1_DerivedUnitRule_size         549
 #define iot_edge_v1_DeviceConfig_size            809
 #define iot_edge_v1_DeviceStatusReport_size      5784
 #define iot_edge_v1_DeviceStatus_size            720
+#define iot_edge_v1_DtuConfig_size               1339
+#define iot_edge_v1_DtuStatus_size               2790
+#define iot_edge_v1_DtuTrace_size                311
 #define iot_edge_v1_Empty_size                   0
 #define iot_edge_v1_EndpointConfig_size          379
 #define iot_edge_v1_EnrollmentStatus_size        229
@@ -2938,7 +3220,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_HeartbeatAck_size            15
 #define iot_edge_v1_Heartbeat_size               355
 #define iot_edge_v1_HelloAck_size                58
-#define iot_edge_v1_Hello_size                   715
+#define iot_edge_v1_Hello_size                   718
 #define iot_edge_v1_IndustrialConnectionConfig_size 93
 #define iot_edge_v1_IndustrialPointConfig_size   346
 #define iot_edge_v1_InterfaceCapability_size     424

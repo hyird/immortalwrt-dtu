@@ -54,6 +54,7 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/pb_decode.c \
 		$(PKG_BUILD_DIR)/edge/generated/edge.pb.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_protocol.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_report.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_retry.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_url.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_config.c \
@@ -72,6 +73,8 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/edge/src/edge_vpn.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_terminal.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_ws.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_derived.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_dtu.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_acquisition.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_device_runtime.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_modbus.c \

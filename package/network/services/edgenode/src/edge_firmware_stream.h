@@ -12,6 +12,9 @@ typedef enum {
     EDGE_FIRMWARE_STREAM_GAP = 4,
 } edge_firmware_stream_decision;
 
+bool edge_firmware_stream_request_due(uint64_t now_ms, uint64_t last_request_ms,
+    uint32_t retry_interval_ms, bool advanced);
+
 edge_firmware_stream_decision edge_firmware_stream_evaluate(
     uint64_t expected_offset, uint64_t total_size, uint64_t chunk_offset,
     size_t chunk_size, size_t maximum_chunk_size, bool eof);

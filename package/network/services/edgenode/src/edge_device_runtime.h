@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define EDGE_DTU_IO_PERIOD_MS 1000U
+#define EDGE_ACQUISITION_TICK_MS 1000U
 #define EDGE_DEVICE_VALUE_MAX 512U
 #define EDGE_DEVICE_WRITE_QUEUE 4U
 
@@ -66,6 +66,7 @@ typedef struct {
     uint8_t platform_id[16];
     uint8_t device_id[16];
     uint32_t report_interval_sec;
+    uint64_t io_interval_ms;
     uint64_t next_io_at_ms;
     uint64_t next_report_at_ms;
     uint64_t fast_report_until_ms;

@@ -8,6 +8,9 @@
 #include "edge_runtime_config.h"
 
 typedef struct edge_acquisition edge_acquisition;
+typedef void (*edge_acquisition_dtu_callback)(void *context, const uint8_t platform_id[16],
+    const iot_edge_v1_DtuStatus *status);
+void edge_acquisition_set_dtu_callback(edge_acquisition *acquisition, edge_acquisition_dtu_callback callback);
 
 typedef bool (*edge_acquisition_telemetry_callback)(
     void *context, const uint8_t platform_id[16],

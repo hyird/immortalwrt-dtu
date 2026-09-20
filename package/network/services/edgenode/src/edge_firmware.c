@@ -388,8 +388,8 @@ bool edge_firmware_chunk_request(const uint8_t platform_id[16],
         (void)fail_transfer("firmware WS transfer timed out", NULL, 0U);
         return false;
     }
-    if (!force && transfer.last_request_ms != 0U && now >= transfer.last_request_ms &&
-        now - transfer.last_request_ms < FIRMWARE_CHUNK_RETRY_MS)
+    if (!edge_firmware_stream_request_due(now, transfer.last_request_ms,
+            FIRMWARE_CHUNK_RETRY_MS, force))
         return false;
     memset(request, 0, sizeof(*request));
     request->request_id.size = 16U;
@@ -418,11 +418,11 @@ edge_firmware_chunk_result edge_firmware_receive_chunk(
         return fail_transfer("firmware WS chunk bounds are invalid", error, error_size);
     if (decision == EDGE_FIRMWARE_STREAM_DUPLICATE) {
         set_error(error, error_size, "duplicate firmware WS chunk ignored");
-        return EDGE_FIRMWARE_CHUNK_NEXT;
+        return EDGE_FIRMWARE_CHUNK_WAIT;
     }
     if (decision == EDGE_FIRMWARE_STREAM_GAP) {
         set_error(error, error_size, "firmware WS chunk gap; retrying");
-        return EDGE_FIRMWARE_CHUNK_NEXT;
+        return EDGE_FIRMWARE_CHUNK_WAIT;
     }
     const uint64_t next_offset = transfer.offset + chunk->data.size;
 

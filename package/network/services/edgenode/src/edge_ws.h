@@ -10,6 +10,7 @@
 #include "edge_acquisition.h"
 #include "edge_protocol.h"
 #include "edge_retry.h"
+#include "edge_report.h"
 #include "edge_runtime_config.h"
 #include "edge_spool.h"
 
@@ -38,6 +39,13 @@ typedef struct {
     uint8_t terminal_output[4096];
     uint64_t session_epoch;
     uint64_t active_revision;
+    iot_edge_v1_DtuStatus dtu_status[8];
+    size_t dtu_status_count;
+    bool dtu_status_dirty[8];
+    edge_report_snapshot capability_snapshot;
+    edge_report_snapshot device_snapshot;
+    edge_report_snapshot dtu_snapshots[8];
+    bool capability_config_retry_done;
     uint64_t network_probe_nonce;
     uint8_t firmware_request_id[16];
     uint64_t firmware_total_bytes;

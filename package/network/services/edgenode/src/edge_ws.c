@@ -1,3 +1,4 @@
+#include "edge_protocol.h"
 #include "edge_ws.h"
 
 #include <errno.h>
@@ -35,7 +36,7 @@
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
 #define EDGE_APPLICATION_MIN_TIMEOUT_MS 15000U
-#define EDGE_APPLICATION_MAX_TIMEOUT_MS 90000U
+#define EDGE_APPLICATION_MAX_TIMEOUT_MS 900000U
 #define EDGE_OUTBOX_ACK_TIMEOUT_MS 60000U
 #define EDGE_LIVENESS_CHECK_INTERVAL_SEC 1.0
 #define EDGE_TERMINAL_OUTPUT_POLL_INTERVAL 0.01
@@ -267,8 +268,68 @@ static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
         syslog(LOG_ERR, "cannot encode edge envelope: %s", error != NULL ? error : "closed");
         return false;
     }
-    return session->client.send(&session->client, session->app->wire, wire_size,
-                                UWSC_OP_BINARY) == 0;
+    const bool sent = session->client.send(&session->client, session->app->wire, wire_size,
+                                           UWSC_OP_BINARY) == 0;
+    /* Telemetry may update the same device state as a standalone snapshot. */
+    if (sent && envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag)
+        edge_report_free(&session->device_snapshot);
+    return sent;
+}
+
+static bool send_report(edge_ws_session *session, iot_edge_v1_Envelope *envelope,
+                         edge_report_snapshot *snapshot, bool force) {
+    edge_report_snapshot candidate = {0};
+    const edge_report_decision decision = edge_report_prepare(snapshot, envelope, force, &candidate);
+    if (decision == EDGE_REPORT_UNCHANGED) return true;
+    if (decision == EDGE_REPORT_ERROR) {
+        /* Allocation/encoding failure and event-bearing reports must not hide changes. */
+        edge_report_free(snapshot);
+        return send_envelope(session, envelope);
+    }
+    const bool sent = send_envelope(session, envelope);
+    if (sent) {
+        edge_report_free(snapshot);
+        *snapshot = candidate;
+    } else {
+        edge_report_free(&candidate);
+    }
+    return sent;
+}
+
+static void clear_report_snapshots(edge_ws_session *session) {
+    edge_report_free(&session->capability_snapshot);
+    edge_report_free(&session->device_snapshot);
+    for (size_t i = 0; i < 8; ++i) edge_report_free(&session->dtu_snapshots[i]);
+    session->capability_config_retry_done = false;
+}
+
+static void send_dtu_status(edge_ws_session *session) {
+    if (!session->websocket_open || !session->enrolled) return;
+    for (size_t i = 0; i < session->dtu_status_count; ++i) {
+        if (!session->dtu_status_dirty[i]) continue;
+        if (buffer_length(&session->client.wb) >= 65536) break;
+        iot_edge_v1_Envelope *envelope = &session->app->envelope;
+        if (!init_envelope(session, envelope)) return;
+        envelope->which_payload = iot_edge_v1_Envelope_dtu_status_tag;
+        envelope->payload.dtu_status = session->dtu_status[i];
+        if (send_report(session, envelope, &session->dtu_snapshots[i], false))
+            session->dtu_status_dirty[i] = false;
+    }
+}
+
+static void acquisition_dtu(void *context, const uint8_t platform_id[16],
+                            const iot_edge_v1_DtuStatus *status) {
+    edge_ws_app *app = context;
+    edge_ws_session *session = session_for_platform(app, platform_id);
+    if (!session) return;
+    size_t index = 0;
+    while (index < session->dtu_status_count &&
+           memcmp(session->dtu_status[index].channel_id.bytes, status->channel_id.bytes, 16)) ++index;
+    if (index >= 8) return;
+    if (index == session->dtu_status_count) ++session->dtu_status_count;
+    session->dtu_status[index] = *status;
+    session->dtu_status_dirty[index] = true;
+    send_dtu_status(session);
 }
 
 static void acquisition_serial(void *context, const uint8_t platform_id[16],
@@ -367,6 +428,8 @@ static void send_outbox_window(edge_ws_session *session) {
     if (!session->enrolled || !session->websocket_open)
         return;
     while (session->spool.outbox.in_flight < EDGE_OUTBOX_WINDOW) {
+        /* Do not start ACK deadlines for an unbounded local socket backlog. */
+        if (buffer_length(&session->client.wb) >= 65536) return;
         const edge_memory_message *message =
             edge_spool_outbox_next(&session->spool, monotonic_ms());
         if (message == NULL)
@@ -419,6 +482,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_terminal = edge_capability_has_terminal();
     hello->supports_firmware_update = true;
     hello->supports_firmware_stream = true;
+    hello->supports_sparse_heartbeat = true;
     hello->supports_device_config = true;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -450,7 +514,7 @@ static bool send_hello(edge_ws_session *session) {
     return sent;
 }
 
-static bool send_capability_report(edge_ws_session *session) {
+static bool send_capability_report(edge_ws_session *session, bool force) {
     iot_edge_v1_Envelope *envelope = &session->app->envelope;
     if (!init_envelope(session, envelope))
         return false;
@@ -458,6 +522,8 @@ static bool send_capability_report(edge_ws_session *session) {
     iot_edge_v1_CapabilityReport *report = &envelope->payload.capability_report;
     safe_copy(report->network_stack, sizeof(report->network_stack), "netifd");
     report->ttyd_available = edge_capability_has_terminal();
+    report->supports_dtu = true;
+    report->supports_derived_points = true;
     report->supports_serial_debug = session->app->config->serial_port[0] != '\0';
     report->supported_protocols_count = 6;
     report->supported_protocols[0] = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
@@ -477,7 +543,7 @@ static bool send_capability_report(edge_ws_session *session) {
         serial->available = access(session->app->config->serial_port, R_OK | W_OK) == 0;
         serial->rs485 = session->app->config->serial_rs485;
     }
-    return send_envelope(session, envelope);
+    return send_report(session, envelope, &session->capability_snapshot, force);
 }
 
 static void handle_log_request(edge_ws_session *session,
@@ -525,7 +591,7 @@ static void handle_log_level_request(edge_ws_session *session,
         edge_log_write("warn", "ws", "log level result send failed", "");
 }
 
-static bool send_device_status(edge_ws_session *session) {
+static bool send_device_status(edge_ws_session *session, bool force) {
     if (session == NULL || !session->websocket_open || !session->enrolled ||
         session->runtime_config.endpoint_count == 0U)
         return true;
@@ -538,7 +604,7 @@ static bool send_device_status(edge_ws_session *session) {
                                          &output->payload.device_status_report);
     if (output->payload.device_status_report.devices_count == 0U)
         return true;
-    return send_envelope(session, output);
+    return send_report(session, output, &session->device_snapshot, force);
 }
 
 static void arm_reconnect_timer(edge_ws_session *session) {
@@ -552,10 +618,13 @@ static void arm_reconnect_timer(edge_ws_session *session) {
 }
 
 static void schedule_reconnect(edge_ws_session *session) {
+    clear_report_snapshots(session);
     close_serial_debug(session, "platform connection closed");
     edge_spool_outbox_reset(&session->spool);
     session->websocket_open = false;
     session->enrolled = false;
+    session->session_epoch = 0U;
+    session->last_heartbeat_ms = 0U;
     session->client_active = false;
     session->network_probe_nonce = 0U;
     ev_timer_stop(session->app->loop, &session->liveness_timer);
@@ -715,6 +784,15 @@ static size_t build_acquisition_sources(
 }
 
 static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
+    const edge_config_replay replay = edge_protocol_config_replay(envelope,
+        session->spool.active_config.revision, session->spool.active_config.digest);
+    if (replay == EDGE_CONFIG_REPLAY_IGNORE) return;
+    if (replay == EDGE_CONFIG_REPLAY_ACK || replay == EDGE_CONFIG_REPLAY_CONFLICT) {
+        send_config_result(session, session->spool.active_config.revision,
+            session->spool.active_config.digest, replay == EDGE_CONFIG_REPLAY_ACK,
+            "config_replay_conflict", "same revision has a different digest");
+        return;
+    }
     if (envelope->which_payload == iot_edge_v1_Envelope_config_begin_tag) {
         iot_edge_v1_ConfigBegin *begin = &envelope->payload.config_begin;
         if (begin->sha256.size != 32U || begin->revision <= session->active_revision ||
@@ -726,7 +804,7 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     }
     if (envelope->which_payload == iot_edge_v1_Envelope_config_item_tag) {
         iot_edge_v1_ConfigItem *item = &envelope->payload.config_item;
-        uint8_t encoded[iot_edge_v1_ConfigItem_size];
+        uint8_t encoded[EDGENODE_MAX_WS_MESSAGE];
         size_t encoded_size = 0U;
         if (!verify_config_item(item, encoded, sizeof(encoded), &encoded_size) ||
             !edge_spool_config_put(&session->spool, item->revision, item->index,
@@ -754,6 +832,7 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                                                      acquisition_command_result,
                                                      session->app);
     edge_acquisition_set_debug_callback(candidate_acquisition, acquisition_debug);
+    edge_acquisition_set_dtu_callback(candidate_acquisition, acquisition_dtu);
     edge_acquisition_enable_serial_debug(candidate_acquisition, session->app->config->serial_port,
         session->app->config->serial_rs485, acquisition_serial);
     if (candidate_acquisition == NULL ||
@@ -804,16 +883,19 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     edge_runtime_config_free(&session->runtime_config);
     session->app->acquisition = candidate_acquisition;
     session->runtime_config = candidate;
+    session->dtu_status_count = 0;
+    for (size_t i = 0; i < 8; ++i) edge_report_free(&session->dtu_snapshots[i]);
     session->active_revision = commit->revision;
     sync_acquisition_io(session->app);
     send_config_result(session, commit->revision, commit->sha256.bytes, true, NULL, NULL);
-    /* A freshly approved node reports once on hello_ack. Repeat the capability
-     * report after the initial config sync as a compatibility retry for older
-     * gateways or a first report lost while the session was being promoted. */
-    if (!send_capability_report(session))
+    /* Keep one initial-config retry for older gateways/session promotion.
+     * Later configuration changes only send changed capabilities. */
+    if (send_capability_report(session, !session->capability_config_retry_done))
+        session->capability_config_retry_done = true;
+    else
         edge_log_write("warn", "ws", "capability report after config sync failed", "");
     for (size_t index = 0U; index < session->app->config->platform_count; ++index)
-        send_device_status(&session->app->sessions[index]);
+        send_device_status(&session->app->sessions[index], false);
 }
 
 static void handle_device_command(edge_ws_session *session,
@@ -974,7 +1056,7 @@ static void broadcast_network_state(edge_ws_app *app) {
     for (size_t index = 0U; index < app->config->platform_count; ++index) {
         edge_ws_session *session = &app->sessions[index];
         if (session->websocket_open && session->enrolled)
-            send_capability_report(session);
+            send_capability_report(session, false);
     }
 }
 
@@ -1133,8 +1215,8 @@ static void handle_firmware_chunk(edge_ws_session *session,
     char message[257] = {0};
     const edge_firmware_chunk_result result = edge_firmware_receive_chunk(
         session->config->id, chunk, message, sizeof(message));
-    if (result == EDGE_FIRMWARE_CHUNK_NEXT)
-        (void)send_firmware_chunk_request(session, true);
+    if (result == EDGE_FIRMWARE_CHUNK_NEXT || result == EDGE_FIRMWARE_CHUNK_WAIT)
+        (void)send_firmware_chunk_request(session, result == EDGE_FIRMWARE_CHUNK_NEXT);
 }
 
 static void handle_modem_control(edge_ws_session *session,
@@ -1368,10 +1450,13 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         ev_timer_stop(session->app->loop, &session->heartbeat_timer);
         ev_timer_set(&session->heartbeat_timer, (ev_tstamp)heartbeat, (ev_tstamp)heartbeat);
         ev_timer_start(session->app->loop, &session->heartbeat_timer);
-        send_capability_report(session);
-        send_device_status(session);
+        clear_report_snapshots(session);
+        send_capability_report(session, true);
+        send_device_status(session, true);
         confirm_network_for_session(session);
         report_network_rollback(session->app);
+        for (size_t i = 0; i < session->dtu_status_count; ++i) session->dtu_status_dirty[i] = true;
+        send_dtu_status(session);
         send_outbox_window(session);
         send_pending_modem_result(session);
         break;
@@ -1382,9 +1467,9 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         const bool request_device_status =
             envelope->payload.heartbeat_ack.request_device_status;
         if (session->enrolled && request_capability)
-            send_capability_report(session);
+            send_capability_report(session, true);
         if (session->enrolled && request_device_status)
-            send_device_status(session);
+            send_device_status(session, true);
         break;
     }
     case iot_edge_v1_Envelope_config_begin_tag:
@@ -1557,6 +1642,13 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         break;
     case iot_edge_v1_Envelope_enrollment_pending_tag:
         syslog(LOG_INFO, "platform %s enrollment pending", session->config->name);
+        // 待审批是有效应用响应，不应每 30 秒重连。仅发送心跳等待原连接获批。
+        session->heartbeat_interval_sec = 300U;
+        edge_retry_application_ready(&session->retry, monotonic_ms(),
+                                     application_timeout_ms(session));
+        ev_timer_stop(session->app->loop, &session->heartbeat_timer);
+        ev_timer_set(&session->heartbeat_timer, 300.0, 300.0);
+        ev_timer_start(session->app->loop, &session->heartbeat_timer);
         break;
     case iot_edge_v1_Envelope_enrollment_rejected_tag:
         syslog(LOG_WARNING, "platform %s enrollment rejected", session->config->name);
@@ -1871,6 +1963,10 @@ static void acquisition_timer(struct ev_loop *loop, struct ev_timer *timer, int 
     (void)events;
     edge_ws_app *app = app_from_acquisition(timer);
     edge_acquisition_tick(app->acquisition, monotonic_ms());
+    for (size_t i = 0; i < app->config->platform_count; ++i) {
+        send_dtu_status(&app->sessions[i]);
+        send_outbox_window(&app->sessions[i]);
+    }
     sync_acquisition_io(app);
 }
 
@@ -1879,6 +1975,7 @@ static void acquisition_io(struct ev_loop *loop, struct ev_io *watcher, int even
     (void)events;
     edge_ws_app *app = app_from_acquisition_io(watcher);
     edge_acquisition_tick(app->acquisition, monotonic_ms());
+    for (size_t i = 0; i < app->config->platform_count; ++i) send_dtu_status(&app->sessions[i]);
     sync_acquisition_io(app);
 }
 
@@ -1894,8 +1991,10 @@ static void start_connection(edge_ws_session *session) {
     }
     syslog(LOG_INFO, "platform %s WebSocket connecting to %s", session->config->name,
            session->transport_url);
+    /* libuwsc 3.3.5: zero disables periodic WS Ping, not handshake timeout.
+     * Application Heartbeat/ACK and the local watchdog already provide liveness. */
     if (uwsc_init(&session->client, session->app->loop, session->transport_url,
-                  session->app->config->heartbeat_interval_sec, NULL) != 0) {
+                  0, NULL) != 0) {
         syslog(LOG_WARNING, "platform %s WebSocket connect initialization failed",
                session->config->name);
         schedule_reconnect(session);
@@ -1940,12 +2039,23 @@ static void liveness_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     const uint64_t current_ms = monotonic_ms();
     const bool application_stalled =
         edge_retry_application_timed_out(&session->retry, current_ms);
-    const bool acknowledgement_stalled =
+    bool acknowledgement_stalled =
         edge_spool_outbox_timed_out(&session->spool, current_ms,
                                     EDGE_OUTBOX_ACK_TIMEOUT_MS);
+    if (!application_stalled && acknowledgement_stalled) {
+        const size_t retried = edge_memory_outbox_retry_expired(
+            &session->spool.outbox, current_ms, EDGE_OUTBOX_ACK_TIMEOUT_MS, 2U);
+        if (retried != SIZE_MAX) {
+            acknowledgement_stalled = false;
+            send_outbox_window(session);
+        }
+    }
     if (!application_stalled && !acknowledgement_stalled) {
-        if (session->enrolled && edge_retry_probe_due(
-                current_ms, session->last_inbound_ms, session->last_liveness_probe_ms,
+        // 应用心跳已提供探活，不在同一周期额外发送 Ping。
+        const uint64_t last_probe = session->last_heartbeat_ms > session->last_liveness_probe_ms
+                                        ? session->last_heartbeat_ms : session->last_liveness_probe_ms;
+        if (session->enrolled && !ev_is_active(&session->heartbeat_timer) && edge_retry_probe_due(
+                current_ms, session->last_inbound_ms, last_probe,
                 application_timeout_ms(session))) {
             iot_edge_v1_Envelope *probe = &session->app->envelope;
             if (init_envelope(session, probe)) {
@@ -2036,6 +2146,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
     app->acquisition = edge_acquisition_create(
         acquisition_telemetry, acquisition_command_result, app);
     edge_acquisition_set_debug_callback(app->acquisition, acquisition_debug);
+    edge_acquisition_set_dtu_callback(app->acquisition, acquisition_dtu);
     edge_acquisition_enable_serial_debug(app->acquisition, config->serial_port,
         config->serial_rs485, acquisition_serial);
     char acquisition_error[256] = {0};
@@ -2087,6 +2198,7 @@ void edge_ws_app_stop(edge_ws_app *app) {
     app->acquisition = NULL;
     for (size_t index = 0; index < app->config->platform_count; ++index) {
         edge_ws_session *session = &app->sessions[index];
+        clear_report_snapshots(session);
         ev_timer_stop(app->loop, &session->reconnect_timer);
         ev_timer_stop(app->loop, &session->liveness_timer);
         ev_timer_stop(app->loop, &session->heartbeat_timer);

@@ -482,7 +482,7 @@ static bool configure_network(const char *private_key, const char *edge_address,
                   set_uci_option(context, package, peer, "public_key", hub_public_key) &&
                   set_uci_option(context, package, peer, "endpoint_host", endpoint_host) &&
                   set_uci_option(context, package, peer, "endpoint_port", endpoint_port) &&
-                  set_uci_option(context, package, peer, "persistent_keepalive", "25") &&
+                  set_uci_option(context, package, peer, "persistent_keepalive", "120") &&
                   set_uci_option(context, package, peer, "route_allowed_ips", "1") &&
                   add_uci_list(context, package, peer, "allowed_ips",
                                EDGE_VPN_OVERLAY_CIDR) &&

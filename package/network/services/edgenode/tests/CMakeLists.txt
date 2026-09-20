@@ -47,10 +47,16 @@ target_include_directories(edge_protocol_test PRIVATE "${EDGENODE_ROOT}/src")
 target_link_libraries(edge_protocol_test PRIVATE edgenode_nanopb)
 add_test(NAME edge_protocol COMMAND edge_protocol_test)
 
+add_executable(edge_report_test edge_report_test.c "${EDGENODE_ROOT}/src/edge_report.c")
+target_include_directories(edge_report_test PRIVATE "${EDGENODE_ROOT}/src")
+target_link_libraries(edge_report_test PRIVATE edgenode_nanopb)
+add_test(NAME edge_report COMMAND edge_report_test)
+
 add_executable(edge_config_test
     edge_config_test.c
     "${EDGENODE_ROOT}/src/edge_industrial.c"
-    "${EDGENODE_ROOT}/src/edge_runtime_config.c")
+    "${EDGENODE_ROOT}/src/edge_runtime_config.c"
+    "${EDGENODE_ROOT}/src/edge_derived.c")
 target_include_directories(edge_config_test PRIVATE "${EDGENODE_ROOT}/src")
 target_link_libraries(edge_config_test PRIVATE edgenode_nanopb)
 add_test(NAME edge_config COMMAND edge_config_test)
@@ -119,6 +125,7 @@ add_executable(edgenode_stability_x64
     "${EDGENODE_ROOT}/src/edge_protocol.c"
     "${EDGENODE_ROOT}/src/edge_industrial.c"
     "${EDGENODE_ROOT}/src/edge_runtime_config.c"
+    "${EDGENODE_ROOT}/src/edge_derived.c"
     "${EDGENODE_ROOT}/src/edge_device_runtime.c"
     "${EDGENODE_ROOT}/src/edge_modbus.c"
     "${EDGENODE_ROOT}/src/edge_s7.c"
@@ -134,8 +141,27 @@ set_target_properties(edgenode_stability_x64 PROPERTIES
 add_test(NAME edgenode_stability COMMAND edgenode_stability_x64 --iterations 20000)
 
 if(UNIX)
+    find_path(MBEDTLS_INCLUDE_DIR mbedtls/sha256.h PATH_SUFFIXES mbedtls3)
+    find_library(MBEDCRYPTO_LIBRARY mbedcrypto PATH_SUFFIXES mbedtls3)
+    if(MBEDTLS_INCLUDE_DIR AND MBEDCRYPTO_LIBRARY)
+        add_executable(edge_dtu_checkpoint_fixture edge_dtu_checkpoint_fixture.c
+            "${EDGENODE_ROOT}/src/edge_spool.c" "${EDGENODE_ROOT}/src/edge_memory.c"
+            "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c")
+        target_include_directories(edge_dtu_checkpoint_fixture PRIVATE "${EDGENODE_ROOT}/src" "${MBEDTLS_INCLUDE_DIR}")
+        target_link_libraries(edge_dtu_checkpoint_fixture PRIVATE edgenode_nanopb "${MBEDCRYPTO_LIBRARY}")
+        target_compile_definitions(edge_dtu_checkpoint_fixture PRIVATE EDGE_SPOOL_ROOT="spool" EDGE_DTU_CONFIG_ROOT="checkpoints")
+    endif()
+    add_executable(edge_dtu_fixture edge_dtu_fixture.c "${EDGENODE_ROOT}/src/edge_dtu.c")
+    target_include_directories(edge_dtu_fixture PRIVATE "${EDGENODE_ROOT}/src")
+    target_link_libraries(edge_dtu_fixture PRIVATE edgenode_nanopb)
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        if(TARGET edge_dtu_checkpoint_fixture)
+            add_test(NAME edge_dtu_checkpoint COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/edge_dtu_checkpoint_test.py" "$<TARGET_FILE:edge_dtu_checkpoint_fixture>")
+        endif()
+        add_test(NAME edge_dtu COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/edge_dtu_test.py" "$<TARGET_FILE:edge_dtu_fixture>")
         add_test(NAME network_watchdog COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_LIST_DIR}/network_watchdog_test.py")
     endif()
@@ -161,7 +187,9 @@ if(UNIX)
         edge_log_test.c
         "${EDGENODE_ROOT}/src/log.c"
         "${EDGENODE_ROOT}/src/edge_protocol.c")
-    target_compile_definitions(edge_log_test PRIVATE EDGENODE_LOG_TEST=1)
+    target_compile_definitions(edge_log_test PRIVATE EDGENODE_LOG_TEST=1
+        clock_gettime=edge_log_test_clock_gettime)
+    target_compile_options(edge_log_test PRIVATE -UNDEBUG)
     target_include_directories(edge_log_test PRIVATE "${EDGENODE_ROOT}/src")
     target_link_libraries(edge_log_test PRIVATE edgenode_nanopb)
     add_test(NAME edge_log COMMAND edge_log_test)
@@ -170,8 +198,10 @@ if(UNIX)
         "${EDGENODE_ROOT}/src/edge_sl651.c"
         edge_acquisition_test.c
         "${EDGENODE_ROOT}/src/edge_acquisition.c"
+        "${EDGENODE_ROOT}/src/edge_dtu.c"
         "${EDGENODE_ROOT}/src/edge_industrial.c"
     "${EDGENODE_ROOT}/src/edge_runtime_config.c"
+    "${EDGENODE_ROOT}/src/edge_derived.c"
         "${EDGENODE_ROOT}/src/edge_device_runtime.c"
         "${EDGENODE_ROOT}/src/edge_modbus.c"
         "${EDGENODE_ROOT}/src/edge_s7.c"
@@ -194,3 +224,16 @@ add_executable(edge_industrial_test edge_industrial_test.c "${EDGENODE_ROOT}/src
 target_include_directories(edge_industrial_test PRIVATE "${EDGENODE_ROOT}/src")
 target_link_libraries(edge_industrial_test PRIVATE edgenode_nanopb)
 add_test(NAME edge_industrial COMMAND edge_industrial_test)
+
+if(NOT MSVC)
+    target_link_libraries(edge_config_test PRIVATE m)
+    target_link_libraries(edgenode_stability_x64 PRIVATE m)
+endif()
+
+add_executable(edge_derived_test edge_derived_test.c "${EDGENODE_ROOT}/src/edge_derived.c")
+target_include_directories(edge_derived_test PRIVATE "${EDGENODE_ROOT}/src")
+target_link_libraries(edge_derived_test PRIVATE edgenode_nanopb)
+if(NOT MSVC)
+    target_link_libraries(edge_derived_test PRIVATE m)
+endif()
+add_test(NAME edge_derived COMMAND edge_derived_test)

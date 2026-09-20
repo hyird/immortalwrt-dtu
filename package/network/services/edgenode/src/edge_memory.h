@@ -26,6 +26,7 @@ typedef struct edge_memory_message {
     uint8_t message_id[16];
     size_t payload_size;
     uint64_t sent_at_ms;
+    uint8_t timeout_retries;
     bool priority;
     bool in_flight;
     uint8_t payload[];
@@ -65,6 +66,9 @@ const edge_memory_message *edge_memory_outbox_next(edge_memory_outbox *outbox,
                                                    uint64_t now_ms);
 bool edge_memory_outbox_timed_out(const edge_memory_outbox *outbox,
                                   uint64_t now_ms, uint32_t timeout_ms);
+/* Returns the number requeued, or SIZE_MAX when a bounded retry is exhausted. */
+size_t edge_memory_outbox_retry_expired(edge_memory_outbox *outbox,
+    uint64_t now_ms, uint32_t timeout_ms, uint8_t retry_limit);
 bool edge_memory_outbox_retry(edge_memory_outbox *outbox,
                               const uint8_t message_id[16]);
 void edge_memory_outbox_reset(edge_memory_outbox *outbox);

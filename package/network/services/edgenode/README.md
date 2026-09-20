@@ -4,6 +4,39 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
+## 临时日志级别
+
+- 节点启动、进程重启默认 `silent`；不产生新的 EdgeNode 应用日志，既有日志仍可按需查询。
+- 设置 `debug`、`info`、`warn`、`error` 后，使用单调时钟授权 300 秒；重复设置相同级别也重新计时。
+- 到期后的每次写入检查均拒绝新日志，级别查询返回 `silent`，不依赖平台、网络、心跳或浏览器存活。
+- 设置按节点生效，多个平台最后一次成功设置为准。主进程原子发布 `/tmp/edgenode/log-level`，采集子进程通过本地 tmpfs 获取同一期限；级别变更传播最多约 1 秒，读取设置不会延长截止时间。
+- 级别通过已有 Hello/Heartbeat 上报，平台不会在浏览器中猜测已恢复；界面可能要等下一次心跳才显示 `silent`。不为日志到期另建网络轮询。
+- 仅升级后的固件支持自动静默；旧固件的四种日志级别、请求及响应继续保留，设置其不支持的 `silent` 会返回失败，不伪装成功。
+- 静默不删除遥测、原始采集报文、命令结果、终端及串口调试数据，也不修改系统其他进程的日志策略。
+
+## 平台连接节流
+
+- 关闭节点 libuwsc 周期 WS Ping，应用心跳遵守平台协商值，本平台协商为 300 秒。
+  固定版 libuwsc `3.3.5` 的 `uwsc_init(..., 0, ...)` 仅关闭周期 Ping，保留握手超时及对端 Ping 的 Pong。
+  应用看门狗上限为 900 秒，正常心跳计时器运行时不另发应用 Ping。平台仍保留空闲时才触发的 WS 探活。
+- Hello 的可选 `supports_sparse_heartbeat` 声明新时序；服务端对未声明能力的旧固件
+  保留原看门狗兼容时序。协议版本及既有字段编号不变，不能仅升级服务端便停掉旧节点保活。
+- 连续失败指数退避至 300 秒（若配置初始间隔更长则保留），稳定通信 300 秒后复位。
+  待审批响应结束初始握手等待，后续按五分钟心跳等待原连接获批。
+- WG `persistent_keepalive` 为 120 秒，重新应用 VPN 配置后生效；移动 NAT 的空闲入站
+  可达性需要现场验证。采样、原始报文、单记录 ACK 和必要失败重传保持不变。
+
+## 全链路冗余抑制
+
+- `edge_report.c` 只缓存能力、设备状态及不含 trace 的 DTU 状态，比较实际 Protobuf 内容，不因 Envelope 的 UUID、时间、序号变化重复发送；不使用结构体 `memcmp` 或有碰撞风险的摘要替代内容比较。
+- 缓存按平台会话隔离，传输接受后才更新；重连、明确补报强制发送。保留每会话首次配置后的能力兼容补报，后续配置及网络确认仅补发改变的能力。
+- 设备活动时间、DTU 字节计数变化仍立即发送；含 trace 的状态、原始报文、遥测、心跳、ACK、命令及升级结果不参与快照去重。遥测可能更新设备状态，所以发送遥测后清除独立设备状态缓存，避免状态回退被错误抑制。
+- 单条 outbox ACK 超时先只补发该记录，原记录 ID 和载荷不变；最多在原连接重试两次，每次仍等待 60 秒。耗尽后恢复连接，不删除未确认记录，也不重发未超时的其他记录。
+- WS 写缓冲达到 64 KiB 时暂停继续填充 outbox；已有本地采集计时器在缓冲疏通后继续排空，没有待发记录时不产生网络包。
+- 相同活动配置版本与摘要的重放不重新应用、不重启采集、不重复关闭调试；收到 commit 补回 `ConfigApplied`。同版本不同摘要拒绝，新版本仍完整校验、落盘并应用。
+- 升级重复分块或跳号不再强制立即重复拉块，按既有重试期限恢复；收到真正推进 offset 的块才立即请求下一块。分块大小、校验、回滚、旧固件下载路径不变。
+- 日志按需查询，串口与终端保留活动会话、续租、顺序和背压。采集报文调试仍由显式 `debug_enabled` 控制，不把配置开启的持续抓取误删为重复数据；第三方 DTU/S7/Modbus 等协议的注册、心跳及重传保持原契约。
+
 Implemented foundations:
 
 工业协议（0.3.46）：新增 MC/SLMP 二进制 3E/4E、FINS/TCP 和 DL/T645 1997/2007。
@@ -59,11 +92,10 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
   `/tmp/edgenode/<platform_id>/`; process restarts recover them, device reboots do not;
 - before every tmpfs write, the daemon preserves 15% free space by rolling the oldest
   outbox message across all platforms; active and staging config are never rolled;
-- one supervised application-level acquisition worker reads every second, processes
-  queued writes in that same cadence, and reports each platform independently at its
-  configured interval; the first successful read after a configuration becomes active
-  is reported immediately before that interval begins. IPC is consumed by `ev_io`
-  readiness events so device I/O never blocks the WebSocket event loop;
+- 采集 Worker 每秒检查调度，但实际读取遵守设备配置间隔。`io_interval_ms=0`
+  时使用 `report_interval_sec`，非零时接受 1000–3600000 ms；控制命令无需等待
+  下一次周期读取。各平台独立上报，配置生效后的首次成功读取立即上报，随后按配置周期
+  执行。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
 - platforms may share a physical serial channel and use different baud/parity settings;
   the worker drains the prior request, applies the next task's serial settings, clears
   stale input, observes the RTU quiet interval, and then performs that task. TCP Server

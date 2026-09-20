@@ -1,5 +1,7 @@
 #include "edge_runtime_config.h"
 #include "edge_industrial.h"
+#include "edge_dtu.h"
+#include "edge_derived.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +27,7 @@ static const uint8_t *id_bytes(const void *field) {
 void edge_runtime_config_free(edge_runtime_config *config) {
     if (config == NULL)
         return;
+    for (uint32_t i = 0; i < config->item_count; ++i) pb_release(iot_edge_v1_ConfigItem_fields, &config->items[i]);
     free(config->items);
     memset(config, 0, sizeof(*config));
 }
@@ -71,6 +74,28 @@ static bool valid_endpoint(const iot_edge_v1_EndpointConfig *value) {
     return false;
 }
 
+static bool valid_dtu(const iot_edge_v1_DtuConfig *value) {
+    if (value->channel_id.size != 16U || !value->name[0] || !value->north_host[0] ||
+        !value->north_port || value->north_port > 65535U ||
+        value->max_clients < 1U || value->max_clients > EDGE_DTU_MAX_CLIENTS ||
+        value->queue_bytes < 4096U || value->queue_bytes > 65536U ||
+        value->serial_frame_ms > 1000U || value->heartbeat_interval_sec > 86400U ||
+        (value->heartbeat_interval_sec && !value->heartbeat.size)) return false;
+    if (value->south_mode == iot_edge_v1_LinkMode_LINK_MODE_SERIAL) {
+        const iot_edge_v1_SerialSettings *s = &value->serial;
+        static const uint32_t rates[] = {300,600,1200,2400,4800,9600,19200,38400,57600,115200,230400};
+        bool baud = false;
+        for (size_t i = 0; i < sizeof(rates)/sizeof(rates[0]); ++i) baud |= s->baud_rate == rates[i];
+        return value->has_serial && !strncmp(s->channel, "/dev/", 5) && baud &&
+            s->data_bits >= 5U && s->data_bits <= 8U && s->stop_bits >= 1U && s->stop_bits <= 2U &&
+            (!strcmp(s->parity, "none") || !strcmp(s->parity, "even") || !strcmp(s->parity, "odd")) &&
+            s->rs485_rts_delay_before_us <= 1000000U && s->rs485_rts_delay_after_us <= 1000000U;
+    }
+    return (value->south_mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_CLIENT ||
+            value->south_mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER) &&
+        value->south_host[0] && value->south_port && value->south_port <= 65535U;
+}
+
 static bool valid_device(const edge_runtime_config *config,
                          const iot_edge_v1_DeviceConfig *value) {
     if (value->device_id.size != 16U || value->endpoint_id.size != 16U ||
@@ -79,7 +104,8 @@ static bool valid_device(const edge_runtime_config *config,
         value->command_fast_read_interval_sec > 3600U ||
         (value->command_fast_read_duration_sec != 0U &&
          value->command_fast_read_interval_sec == 0U) ||
-        (value->io_interval_ms != 0U && value->io_interval_ms != 1000U) ||
+        (value->io_interval_ms != 0U &&
+         (value->io_interval_ms < 1000U || value->io_interval_ms > 3600000U)) ||
         (value->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
          value->protocol != iot_edge_v1_Protocol_PROTOCOL_S7 &&
          value->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651 && !edge_industrial_protocol(value->protocol)) || value->sl651_response_mode > 4)
@@ -235,6 +261,10 @@ bool edge_runtime_config_load(edge_runtime_config *output,
             valid = valid_endpoint(&item->item.endpoint);
         else if (item->which_item == iot_edge_v1_ConfigItem_device_tag)
             valid = valid_device(&candidate, &item->item.device);
+        else if (item->which_item == iot_edge_v1_ConfigItem_derived_point_tag)
+            valid = item->kind == iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT && edge_derived_validate(&item->item.derived_point) && edge_runtime_config_device(&candidate, item->item.derived_point.device_id.bytes);
+        else if (item->which_item == iot_edge_v1_ConfigItem_dtu_tag)
+            valid = item->kind == iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DTU && valid_dtu(&item->item.dtu);
         else
             valid = valid_point(&candidate, item);
         if (!valid) {
@@ -242,6 +272,11 @@ bool edge_runtime_config_load(edge_runtime_config *output,
             set_error(error, error_size, "configuration reference or value is invalid");
             return false;
         }
+    }
+    if (!edge_derived_validate_config(&candidate)) {
+        edge_runtime_config_free(&candidate);
+        set_error(error, error_size, "derived point dependency is invalid or unordered");
+        return false;
     }
     edge_runtime_config_free(output);
     *output = candidate;

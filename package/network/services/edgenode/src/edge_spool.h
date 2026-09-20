@@ -6,7 +6,9 @@
 
 #include "edge_memory.h"
 
+#ifndef EDGE_SPOOL_ROOT
 #define EDGE_SPOOL_ROOT "/tmp/edgenode"
+#endif
 
 typedef struct {
     char directory[160];

@@ -52,7 +52,7 @@ bool edge_device_runtime_init(edge_device_runtime *runtime,
         driver->connect == NULL || driver->read == NULL || driver->report == NULL ||
         driver->command_complete == NULL || report_interval_sec == 0U ||
         (protocol < EDGE_DEVICE_MODBUS || protocol > EDGE_DEVICE_DLT645) ||
-        (io_interval_ms != 0U && io_interval_ms != EDGE_DTU_IO_PERIOD_MS) ||
+        (io_interval_ms != 0U && (io_interval_ms < 1000U || io_interval_ms > 3600000U)) ||
         ((protocol == EDGE_DEVICE_S7 || protocol == EDGE_DEVICE_FINS) && driver->handshake == NULL))
         return false;
 
@@ -61,6 +61,7 @@ bool edge_device_runtime_init(edge_device_runtime *runtime,
     memcpy(runtime->platform_id, platform_id, 16U);
     memcpy(runtime->device_id, device_id, 16U);
     runtime->report_interval_sec = report_interval_sec;
+    runtime->io_interval_ms = io_interval_ms != 0U ? io_interval_ms : (uint64_t)report_interval_sec * 1000U;
     runtime->next_io_at_ms = now_ms;
     runtime->next_report_at_ms = now_ms + (uint64_t)report_interval_sec * 1000U;
     runtime->initial_report_pending = true;
@@ -138,9 +139,9 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
     bool reported_after_write = false;
     edge_device_sample write_actual = {0};
 
-    if (schedule_ms >= runtime->next_io_at_ms) {
+    if (schedule_ms >= runtime->next_io_at_ms || runtime->write_count != 0U) {
         runtime->next_io_at_ms = advance_deadline(runtime->next_io_at_ms,
-                                                  EDGE_DTU_IO_PERIOD_MS, schedule_ms);
+                                                  runtime->io_interval_ms, schedule_ms);
         edge_io_result result = ensure_ready(runtime);
         if (result == EDGE_IO_OK && runtime->write_count != 0U) {
             edge_device_sample actual = {0};

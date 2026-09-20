@@ -450,7 +450,41 @@ static void test_complete_telemetry(void) {
     edge_protocol_release(&envelope);
 }
 
+static void test_config_replay(void) {
+    iot_edge_v1_Envelope replay = iot_edge_v1_Envelope_init_zero;
+    uint8_t digest[32] = {1};
+    replay.which_payload = iot_edge_v1_Envelope_config_begin_tag;
+    replay.payload.config_begin.revision = 7;
+    replay.payload.config_begin.sha256.size = 32;
+    memcpy(replay.payload.config_begin.sha256.bytes, digest, 32);
+    require(edge_protocol_config_replay(&replay, 7, digest) == EDGE_CONFIG_REPLAY_IGNORE,
+            "matching active begin must not restart acquisition");
+    require(edge_protocol_config_replay(&replay, 6, digest) == EDGE_CONFIG_NOT_REPLAY,
+            "new revisions still require validation and commit");
+    require(edge_protocol_config_replay(&replay, 0, digest) == EDGE_CONFIG_NOT_REPLAY,
+            "first configuration must never be skipped");
+    replay.payload.config_begin.sha256.bytes[0] = 2;
+    require(edge_protocol_config_replay(&replay, 7, digest) == EDGE_CONFIG_REPLAY_CONFLICT,
+            "same revision with altered digest must fail");
+    memset(&replay.payload, 0, sizeof(replay.payload));
+    replay.which_payload = iot_edge_v1_Envelope_config_item_tag;
+    replay.payload.config_item.revision = 7;
+    require(edge_protocol_config_replay(&replay, 7, digest) == EDGE_CONFIG_REPLAY_IGNORE,
+            "active config items must not modify staging state");
+    memset(&replay.payload, 0, sizeof(replay.payload));
+    replay.which_payload = iot_edge_v1_Envelope_config_commit_tag;
+    replay.payload.config_commit.revision = 7;
+    replay.payload.config_commit.sha256.size = 32;
+    memcpy(replay.payload.config_commit.sha256.bytes, digest, 32);
+    require(edge_protocol_config_replay(&replay, 7, digest) == EDGE_CONFIG_REPLAY_ACK,
+            "lost ConfigApplied must be reacknowledged without reapplying");
+    replay.payload.config_commit.sha256.size = 0;
+    require(edge_protocol_config_replay(&replay, 7, digest) == EDGE_CONFIG_REPLAY_CONFLICT,
+            "empty commit digest must not acknowledge active configuration");
+}
+
 int main(void) {
+    test_config_replay();
     test_complete_telemetry();
     test_imei();
     test_hello_round_trip();

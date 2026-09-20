@@ -23,8 +23,28 @@
 #define EDGE_LOG_SYSTEM_SOURCE "system"
 #define EDGE_LOGREAD_COMMAND "/sbin/logread -l 48 2>/dev/null"
 
-static int log_threshold = 1;
-static char log_level_name[9] = "info";
+#define EDGE_LOG_LEVEL_PATH EDGE_LOG_ROOT "/log-level"
+#define EDGE_LOG_LEVEL_TEMP EDGE_LOG_ROOT "/log-level.tmp"
+#define EDGE_LOG_LEASE_MS 300000LL
+
+static int log_threshold = 4;
+static char log_level_name[9] = "silent";
+static int64_t log_deadline_ms;
+static int64_t log_refresh_ms;
+static bool log_settings_ready;
+
+static int64_t monotonic_ms(void) {
+  struct timespec value;
+  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
+    return -1;
+  return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
+}
+
+static void silence_logs(void) {
+  log_threshold = 4;
+  memcpy(log_level_name, "silent", sizeof("silent"));
+  log_deadline_ms = 0;
+}
 
 static int64_t now_ms(void) {
   struct timespec value;
@@ -46,13 +66,16 @@ static int level_rank(const char *level) {
     return 2;
   if (level != NULL && strcmp(level, "error") == 0)
     return 3;
+  if (level != NULL && strcmp(level, "silent") == 0)
+    return 4;
   return 1;
 }
 
 static bool valid_level(const char *level) {
   return level != NULL &&
          (strcmp(level, "debug") == 0 || strcmp(level, "info") == 0 ||
-          strcmp(level, "warn") == 0 || strcmp(level, "error") == 0);
+          strcmp(level, "warn") == 0 || strcmp(level, "error") == 0 ||
+          strcmp(level, "silent") == 0);
 }
 
 static bool ensure_directory(const char *path) {
@@ -421,6 +444,11 @@ static void read_reverse_file(const char *path,
 }
 
 void edge_log_init(void) {
+  silence_logs();
+  log_refresh_ms = 0;
+  /* A process restart must not restore an earlier diagnostic lease. */
+  log_settings_ready = unlink(EDGE_LOG_LEVEL_PATH) == 0 || errno == ENOENT;
+  (void)unlink(EDGE_LOG_LEVEL_TEMP);
   if (ensure_log_dir())
     enforce_space_reserve();
 }
@@ -428,15 +456,67 @@ void edge_log_init(void) {
 bool edge_log_set_level(const char *level) {
   if (!valid_level(level))
     return false;
+  const int64_t now = monotonic_ms();
+  if (now < 0 || !ensure_log_dir())
+    return false;
+  const int64_t deadline = strcmp(level, "silent") == 0 ? 0 : now + EDGE_LOG_LEASE_MS;
+  /* The main process writes; forked acquisition workers read the same lease.
+   * Rename prevents readers from observing a partially written setting. */
+  FILE *output = fopen(EDGE_LOG_LEVEL_TEMP, "w");
+  if (output == NULL)
+    return false;
+  bool saved = fprintf(output, "%s %" PRId64 "\n", level, deadline) > 0;
+  if (fclose(output) != 0)
+    saved = false;
+  if (!saved || rename(EDGE_LOG_LEVEL_TEMP, EDGE_LOG_LEVEL_PATH) != 0) {
+    (void)unlink(EDGE_LOG_LEVEL_TEMP);
+    return false;
+  }
   copy_text(log_level_name, sizeof(log_level_name), level);
   log_threshold = level_rank(level);
+  log_deadline_ms = deadline;
+  log_refresh_ms = now + 1000;
+  log_settings_ready = true;
   return true;
 }
 
-const char *edge_log_level(void) { return log_level_name; }
+static void refresh_log_level(void) {
+  const int64_t now = monotonic_ms();
+  if (now < 0 || !log_settings_ready) {
+    silence_logs();
+    return;
+  }
+  /* Local tmpfs only, at most once per second per process; no network traffic. */
+  if (now >= log_refresh_ms) {
+    char level[9];
+    int64_t deadline = 0;
+    FILE *input = fopen(EDGE_LOG_LEVEL_PATH, "r");
+    const bool valid = input != NULL &&
+        fscanf(input, "%8s %" SCNd64, level, &deadline) == 2 && valid_level(level);
+    if (input != NULL)
+      fclose(input);
+    silence_logs();
+    if (valid && deadline > now && deadline - now <= EDGE_LOG_LEASE_MS) {
+      copy_text(log_level_name, sizeof(log_level_name), level);
+      log_threshold = level_rank(level);
+      log_deadline_ms = deadline;
+    }
+    log_refresh_ms = now + 1000;
+  }
+  /* Check on every access, including before each write, even while offline. */
+  if (log_deadline_ms <= now)
+    silence_logs();
+}
+
+const char *edge_log_level(void) {
+  refresh_log_level();
+  return log_level_name;
+}
 
 bool edge_log_enabled(const char *level) {
-  return level_rank(level) >= log_threshold;
+  refresh_log_level();
+  const int rank = level_rank(level);
+  return log_threshold < 4 && rank < 4 && rank >= log_threshold;
 }
 
 void edge_log_write(const char *level, const char *source, const char *message,

@@ -13,7 +13,7 @@ bool edge_retry_probe_due(uint64_t now_ms, uint64_t last_inbound_ms,
                           uint64_t last_probe_ms, uint32_t timeout_ms) {
     uint32_t interval = timeout_ms / 3U;
     if (interval == 0U) interval = 1U;
-    if (interval > 30000U) interval = 30000U;
+    if (interval > 300000U) interval = 300000U;
     const uint64_t last = last_inbound_ms > last_probe_ms ? last_inbound_ms : last_probe_ms;
     return now_ms >= last && now_ms - last >= interval;
 }
@@ -26,6 +26,7 @@ bool edge_retry_init(edge_retry *retry, uint32_t retry_delay_ms,
         .phase = EDGE_RETRY_READY,
         .retry_delay_ms = retry_delay_ms,
         .connect_timeout_ms = connect_timeout_ms,
+        .next_retry_delay_ms = retry_delay_ms,
     };
     return true;
 }
@@ -56,6 +57,9 @@ void edge_retry_application_alive(edge_retry *retry, uint64_t now_ms,
     if (retry == NULL || application_timeout_ms == 0U ||
         retry->phase != EDGE_RETRY_CONNECTED)
         return;
+    // Reset only after stable application traffic, not a brief successful handshake.
+    if (now_ms >= retry->connected_at_ms && now_ms - retry->connected_at_ms >= 300000U)
+        retry->next_retry_delay_ms = retry->retry_delay_ms;
     retry->deadline_ms = add_delay(now_ms, application_timeout_ms);
 }
 
@@ -64,14 +68,19 @@ void edge_retry_application_ready(edge_retry *retry, uint64_t now_ms,
     if (retry == NULL || application_timeout_ms == 0U)
         return;
     retry->phase = EDGE_RETRY_CONNECTED;
+    retry->connected_at_ms = now_ms;
     retry->deadline_ms = add_delay(now_ms, application_timeout_ms);
 }
 
 void edge_retry_failed(edge_retry *retry, uint64_t now_ms) {
-    if (retry == NULL)
+    if (retry == NULL || retry->phase == EDGE_RETRY_WAITING)
         return;
+    const uint32_t maximum = retry->retry_delay_ms > 300000U
+                                 ? retry->retry_delay_ms : 300000U;
+    const uint32_t delay = retry->next_retry_delay_ms;
     retry->phase = EDGE_RETRY_WAITING;
-    retry->deadline_ms = add_delay(now_ms, retry->retry_delay_ms);
+    retry->deadline_ms = add_delay(now_ms, delay);
+    retry->next_retry_delay_ms = delay >= maximum / 2U ? maximum : delay * 2U;
 }
 
 bool edge_retry_attempt_timed_out(const edge_retry *retry, uint64_t now_ms) {

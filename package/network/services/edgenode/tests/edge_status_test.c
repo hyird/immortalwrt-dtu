@@ -139,6 +139,8 @@ int main(void) {
             "active revision is missing");
     require(strstr(json, "\"reportIntervalSec\":30") != NULL,
             "device report interval is missing");
+    require(strstr(json, "\"ioIntervalMs\":30000") != NULL,
+            "status must show the configured acquisition interval instead of one second");
     require(strstr(json, "\"elementId\":\"opening\"") != NULL,
             "point details are missing");
     require(strstr(json, "production \\\"one\\\"") != NULL,

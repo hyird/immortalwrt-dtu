@@ -54,6 +54,15 @@ PB_BIND(iot_edge_v1_ConfigBegin, iot_edge_v1_ConfigBegin, AUTO)
 PB_BIND(iot_edge_v1_SerialSettings, iot_edge_v1_SerialSettings, AUTO)
 
 
+PB_BIND(iot_edge_v1_DtuConfig, iot_edge_v1_DtuConfig, 2)
+
+
+PB_BIND(iot_edge_v1_DtuTrace, iot_edge_v1_DtuTrace, 2)
+
+
+PB_BIND(iot_edge_v1_DtuStatus, iot_edge_v1_DtuStatus, 2)
+
+
 PB_BIND(iot_edge_v1_EndpointConfig, iot_edge_v1_EndpointConfig, 2)
 
 
@@ -79,6 +88,15 @@ PB_BIND(iot_edge_v1_Sl651ElementConfig, iot_edge_v1_Sl651ElementConfig, 2)
 
 
 PB_BIND(iot_edge_v1_Sl651DictionaryConfig, iot_edge_v1_Sl651DictionaryConfig, 2)
+
+
+PB_BIND(iot_edge_v1_DerivedPointInput, iot_edge_v1_DerivedPointInput, AUTO)
+
+
+PB_BIND(iot_edge_v1_DerivedUnitRule, iot_edge_v1_DerivedUnitRule, 2)
+
+
+PB_BIND(iot_edge_v1_DerivedPointConfig, iot_edge_v1_DerivedPointConfig, 2)
 
 
 PB_BIND(iot_edge_v1_ConfigItem, iot_edge_v1_ConfigItem, 2)
@@ -123,7 +141,7 @@ PB_BIND(iot_edge_v1_CommandRequest, iot_edge_v1_CommandRequest, 2)
 PB_BIND(iot_edge_v1_CommandProgress, iot_edge_v1_CommandProgress, AUTO)
 
 
-PB_BIND(iot_edge_v1_CommandResult, iot_edge_v1_CommandResult, 2)
+PB_BIND(iot_edge_v1_CommandResult, iot_edge_v1_CommandResult, 4)
 
 
 PB_BIND(iot_edge_v1_CommandResultAck, iot_edge_v1_CommandResultAck, AUTO)

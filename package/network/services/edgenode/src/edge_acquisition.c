@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 
 #include "edge_acquisition.h"
+#include "edge_derived.h"
+#include "edge_dtu.h"
 
 #include <dirent.h>
 #include <arpa/inet.h>
@@ -92,6 +94,9 @@ struct edge_acquisition_device {
     uint8_t platform_id[16];
     const iot_edge_v1_EndpointConfig *endpoint;
     const iot_edge_v1_DeviceConfig *config;
+    edge_derived *derived;
+    int64_t derived_deadline;
+    iot_edge_v1_TelemetryRecord *derived_pending;
     edge_acquisition_point *points;
     size_t point_count;
     edge_modbus_read_point *modbus_points;
@@ -138,7 +143,17 @@ typedef struct {
     uint64_t pending_request, pending_deadline;
 } edge_serial_session;
 
+typedef struct {
+    iot_edge_v1_DtuConfig config;
+    uint8_t platform_id[16];
+    pid_t pid;
+    uint64_t retry_at;
+} edge_dtu_channel;
+
 struct edge_acquisition {
+    edge_acquisition_dtu_callback dtu_callback;
+    edge_dtu_channel dtu[EDGE_DTU_MAX_CHANNELS];
+    size_t dtu_count;
     edge_acquisition_serial_callback serial_callback;
     char serial_path[97];
     bool serial_rs485;
@@ -163,6 +178,7 @@ struct edge_acquisition {
 };
 
 typedef enum {
+    EDGE_ACQUISITION_EVENT_DTU = 12,
     EDGE_ACQUISITION_CONTROL_SERIAL = 10,
     EDGE_ACQUISITION_EVENT_SERIAL = 11,
     EDGE_ACQUISITION_EVENT_DEBUG = 9,
@@ -191,6 +207,7 @@ typedef struct {
         iot_edge_v1_CommandRequest command_request;
         iot_edge_v1_SerialDebugRequest serial_request;
         iot_edge_v1_SerialDebugEvent serial_event;
+        iot_edge_v1_DtuStatus dtu_status;
     } payload;
 } edge_acquisition_message;
 
@@ -1953,6 +1970,18 @@ static edge_io_result write_acquisition(void *context,
     return result;
 }
 
+static void update_derived_samples(edge_acquisition_device *device) {
+    if (!device->derived) return;
+    iot_edge_v1_TelemetryValue *values = calloc(device->point_count ? device->point_count : 1, sizeof(*values));
+    if (!values) { syslog(LOG_ERR, "cannot allocate derived input snapshot"); return; }
+    size_t count = 0;
+    for (size_t i = 0; i < device->point_count; ++i) if (device->points[i].valid) values[count++] = device->points[i].value;
+    const int64_t now = current_ms();
+    (void)edge_derived_update(device->derived, values, count, now);
+    device->derived_deadline = edge_derived_deadline(device->derived, now);
+    free(values);
+}
+
 static edge_io_result device_read(void *context, edge_device_sample *sample) {
     edge_acquisition_device *device = context;
     record_id((uint64_t)current_ms(), device->acquisition_id);
@@ -1960,6 +1989,7 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
     debug_acquisition_state(device, "running");
     for (size_t index = 0; index < device->point_count; ++index) device->points[index].valid = false;
     const edge_io_result result = read_acquisition(context, sample);
+    update_derived_samples(device);
     finish_debug_acquisition(device, result);
     device->acquisition_active = false;
     return result;
@@ -1973,6 +2003,7 @@ static edge_io_result device_write_readback(void *context, const edge_write_comm
     debug_acquisition_state(device, "running");
     for (size_t index = 0; index < device->point_count; ++index) device->points[index].valid = false;
     const edge_io_result result = write_acquisition(context, command, actual);
+    update_derived_samples(device);
     finish_debug_acquisition(device, result);
     device->acquisition_active = false;
     return result;
@@ -2112,7 +2143,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             guide_start = element->byte_offset + element->length;
     }
     iot_edge_v1_TelemetryValue *values =
-        calloc(device->point_count ? device->point_count : 1, sizeof(*values));
+        calloc((device->point_count ? device->point_count : 1) + edge_derived_count(device->derived), sizeof(*values));
     if (!values)
         return false;
     size_t count = 0, binary_size = 0;
@@ -2162,6 +2193,12 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     const uint8_t *parsed_packet = raw_count ? edge_sl651_report_packet_id(device->sl651, raw_count - 1) : frame->packet_id;
     if (parsed_packet) for (size_t index = 0; index < count; ++index)
         publish_debug_value(device, parsed_packet, &values[index]);
+    for (size_t index = 0; index < count; ++index) values[index].sample_time_ms = sl651_observed(device, frame->body);
+    const int64_t derived_at = current_ms();
+    (void)edge_derived_update(device->derived, values, count, derived_at);
+    device->derived_deadline = edge_derived_deadline(device->derived, derived_at);
+    edge_derived_values(device->derived, values + count);
+    count += edge_derived_count(device->derived);
     size_t starts[129] = {0}, parts = 0;
     for (size_t index = 0; index < count;) {
         if (parts == 128) {
@@ -2400,6 +2437,36 @@ static bool publish_acquisition_cycle(edge_acquisition_device *device,
     return true;
 }
 
+static bool publish_derived_expiry(edge_acquisition_device *device) {
+    const int64_t now = current_ms();
+    if (!device->derived) return true;
+    if (!device->derived_pending && now >= device->derived_deadline) {
+        iot_edge_v1_TelemetryRecord *record = calloc(1, sizeof(*record));
+        if (!record) return false;
+        record->values_count = (pb_size_t)edge_derived_count(device->derived);
+        record->values = calloc(record->values_count, sizeof(*record->values));
+        if (!record->values) { free(record); return false; }
+        const bool changed = edge_derived_update(device->derived, NULL, 0, now);
+        device->derived_deadline = edge_derived_deadline(device->derived, now);
+        if (!changed) { free(record->values); free(record); return true; }
+        edge_derived_values(device->derived, record->values);
+        record->record_id.size = record->device_id.size = record->endpoint_id.size = 16;
+        record_id((uint64_t)now, record->record_id.bytes);
+        memcpy(record->device_id.bytes, device->config->device_id.bytes, 16);
+        memcpy(record->endpoint_id.bytes, device->config->endpoint_id.bytes, 16);
+        record->protocol = device->config->protocol; record->observed_at_ms = now; record->derived_update = true;
+        copy_text(record->direction, sizeof(record->direction), "UP");
+        copy_text(record->function_code, sizeof(record->function_code), "DERIVED");
+        device->derived_pending = record;
+    }
+    if (!device->derived_pending) return true;
+    if (!publish_acquisition_cycle(device, device->platform_id, device->derived_pending)) return false;
+    free(device->derived_pending->values);
+    free(device->derived_pending);
+    device->derived_pending = NULL;
+    return true;
+}
+
 static void device_report(void *context, const uint8_t platform_id[16],
                           const uint8_t device_id[16], const edge_device_sample *sample) {
     edge_acquisition_device *device = context;
@@ -2412,7 +2479,7 @@ static void device_report(void *context, const uint8_t platform_id[16],
             for (const edge_acquisition_response *part = device->points[index].response; part; part = part->previous)
                 ++raw_capacity;
     if (raw_capacity > 512) { syslog(LOG_ERR, "acquisition cycle exceeds raw packet limit"); return; }
-    record.values = calloc(capacity, sizeof(*record.values));
+    record.values = calloc(capacity + edge_derived_count(device->derived), sizeof(*record.values));
     record.raw_payloads = calloc(raw_capacity, sizeof(*record.raw_payloads));
     record.raw_packet_ids = calloc(raw_capacity, sizeof(*record.raw_packet_ids));
     const edge_acquisition_response **responses = calloc(raw_capacity, sizeof(*responses));
@@ -2465,6 +2532,8 @@ static void device_report(void *context, const uint8_t platform_id[16],
         if (memcmp(status.devices[i].device_id.bytes, device_id, 16) == 0) {
             record.has_device_status = true; record.device_status = status.devices[i]; break;
         }
+    edge_derived_values(device->derived, record.values + record.values_count);
+    record.values_count += (pb_size_t)edge_derived_count(device->derived);
     if (!publish_acquisition_cycle(device, platform_id, &record))
         syslog(LOG_ERR, "cannot queue complete acquisition cycle");
 cleanup:
@@ -2546,6 +2615,8 @@ static void free_devices(edge_acquisition_device *devices, size_t count) {
             release_response(devices[index].points[point].response);
         release_response(devices[index].read_response);
         free(devices[index].debug_request);
+        if (devices[index].derived_pending) { free(devices[index].derived_pending->values); free(devices[index].derived_pending); }
+        edge_derived_free(devices[index].derived);
         free(devices[index].points);
         free(devices[index].modbus_points);
         free(devices[index].modbus_groups);
@@ -2565,6 +2636,10 @@ static void free_links(edge_acquisition_link *links, size_t count) {
 
 void edge_acquisition_set_debug_callback(edge_acquisition *acquisition, edge_acquisition_debug_callback callback) {
     if (acquisition) acquisition->debug = callback;
+}
+
+void edge_acquisition_set_dtu_callback(edge_acquisition *acquisition, edge_acquisition_dtu_callback callback) {
+    if (acquisition) acquisition->dtu_callback = callback;
 }
 
 void edge_acquisition_enable_serial_debug(edge_acquisition *acquisition, const char *path,
@@ -2689,6 +2764,50 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                 config->items[index].item.device.enabled)
                 ++enabled;
     }
+    edge_dtu_channel dtu[EDGE_DTU_MAX_CHANNELS] = {0};
+    size_t dtu_count = 0;
+    for (size_t s = 0; s < source_count; ++s) {
+        const edge_runtime_config *config = sources[s].config;
+        for (uint32_t i = 0; i < config->item_count; ++i) {
+            const iot_edge_v1_ConfigItem *item = &config->items[i];
+            if (item->which_item != iot_edge_v1_ConfigItem_dtu_tag || !item->item.dtu.enabled) continue;
+            const iot_edge_v1_DtuConfig *channel = &item->item.dtu;
+            if (dtu_count == EDGE_DTU_MAX_CHANNELS) {
+                set_error(error, error_size, "at most 8 enabled DTU channels are supported"); return false;
+            }
+            if (channel->south_mode == iot_edge_v1_LinkMode_LINK_MODE_SERIAL &&
+                strcmp(channel->serial.channel, acquisition->serial_path)) {
+                set_error(error, error_size, "DTU serial port is not advertised"); return false;
+            }
+            for (size_t p = 0; p < source_count; ++p) {
+                const edge_runtime_config *other = sources[p].config;
+                for (uint32_t j = 0; j < other->item_count; ++j) {
+                    const iot_edge_v1_ConfigItem *entry = &other->items[j];
+                    if (entry->which_item != iot_edge_v1_ConfigItem_device_tag || !entry->item.device.enabled) continue;
+                    const iot_edge_v1_EndpointConfig *endpoint = edge_runtime_config_endpoint(other, entry->item.device.endpoint_id.bytes);
+                    if (!endpoint || !endpoint->enabled) continue;
+                    if ((channel->south_mode == iot_edge_v1_LinkMode_LINK_MODE_SERIAL &&
+                         endpoint->mode == channel->south_mode && !strcmp(endpoint->serial.channel, channel->serial.channel)) ||
+                        (channel->south_mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER &&
+                         endpoint->mode == channel->south_mode && endpoint->port == channel->south_port)) {
+                        set_error(error, error_size, "DTU south resource is already used by acquisition"); return false;
+                    }
+                }
+            }
+            for (size_t j = 0; j < dtu_count; ++j) {
+                const iot_edge_v1_DtuConfig *other = &dtu[j].config;
+                if ((!memcmp(dtu[j].platform_id, sources[s].platform_id, 16) &&
+                     !memcmp(other->channel_id.bytes, channel->channel_id.bytes, 16)) ||
+                    (other->south_mode == channel->south_mode &&
+                     ((channel->south_mode == iot_edge_v1_LinkMode_LINK_MODE_SERIAL && !strcmp(other->serial.channel, channel->serial.channel)) ||
+                      (channel->south_mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER && other->south_port == channel->south_port)))) {
+                    set_error(error, error_size, "duplicate DTU channel or exclusive south resource"); return false;
+                }
+            }
+            dtu[dtu_count].config = *channel;
+            memcpy(dtu[dtu_count++].platform_id, sources[s].platform_id, 16);
+        }
+    }
     edge_acquisition_device *devices = enabled != 0U ? calloc(enabled, sizeof(*devices)) : NULL;
     edge_acquisition_link *links = enabled != 0U ? calloc(enabled, sizeof(*links)) : NULL;
     if (enabled != 0U && (devices == NULL || links == NULL)) {
@@ -2743,6 +2862,15 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
             runtime->owner = acquisition;
             runtime->endpoint = endpoint;
             runtime->config = device;
+            runtime->derived = edge_derived_create(config, device->device_id.bytes);
+            runtime->derived_deadline = INT64_MAX;
+            for (uint32_t i = 0; i < config->item_count; ++i) {
+                const iot_edge_v1_ConfigItem *item = &config->items[i];
+                if (item->which_item == iot_edge_v1_ConfigItem_derived_point_tag && !memcmp(item->item.derived_point.device_id.bytes, device->device_id.bytes, 16) && !runtime->derived) {
+                    free_devices(devices, output + 1U); free_links(links, link_count);
+                    set_error(error, error_size, "cannot allocate derived point state"); return false;
+                }
+            }
             runtime->industrial = device->industrial;
             memcpy(runtime->platform_id, source->platform_id, 16U);
             runtime->link = assign_link(links, &link_count, endpoint, source);
@@ -2888,6 +3016,8 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
     }
     free_devices(acquisition->devices, acquisition->device_count);
     free_links(acquisition->links, acquisition->link_count);
+    memcpy(acquisition->dtu, dtu, sizeof(dtu));
+    acquisition->dtu_count = dtu_count;
     acquisition->devices = devices;
     acquisition->device_count = output;
     acquisition->links = links;
@@ -2898,7 +3028,7 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
         acquisition->cached_status[index] =
             (iot_edge_v1_DeviceStatusReport)iot_edge_v1_DeviceStatusReport_init_zero;
     }
-    acquisition->worker_required = output != 0U || acquisition->serial_path[0] != '\0';
+    acquisition->worker_required = dtu_count != 0U || output != 0U || acquisition->serial_path[0] != '\0';
     char detail[96];
     snprintf(detail, sizeof(detail), "platforms=%zu devices=%zu resources=%zu",
              source_count, output, link_count);
@@ -3432,6 +3562,12 @@ static void serial_control(edge_acquisition *acquisition, const uint8_t platform
             serial_release(acquisition, session, request->request_sequence, "serial port is not advertised");
             return;
         }
+        for (size_t i = 0; i < acquisition->dtu_count; ++i)
+            if (acquisition->dtu[i].config.south_mode == iot_edge_v1_LinkMode_LINK_MODE_SERIAL &&
+                !strcmp(acquisition->dtu[i].config.serial.channel, request->settings.channel)) {
+                serial_release(acquisition, session, request->request_sequence, "serial port is owned by DTU passthrough");
+                return;
+            }
         session->active = true;
         session->settings.baud_rate = 9600;
         session->settings.data_bits = 8;
@@ -3651,6 +3787,43 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
     return true;
 }
 
+typedef struct { edge_acquisition *acquisition; const uint8_t *platform_id; } dtu_report_context;
+static bool worker_dtu_status(void *context, const iot_edge_v1_DtuStatus *status) {
+    const dtu_report_context *report = context;
+    edge_acquisition_message message = {.magic = EDGE_ACQUISITION_MAGIC,
+        .type = EDGE_ACQUISITION_EVENT_DTU, .payload_size = sizeof(*status)};
+    memcpy(message.platform_id, report->platform_id, 16);
+    message.payload.dtu_status = *status;
+    const size_t size = acquisition_message_size(sizeof(*status));
+    return send(report->acquisition->worker_fd, &message, size,
+                MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)size;
+}
+
+static void dtu_supervise(edge_acquisition *acquisition, uint64_t now) {
+    for (size_t i = 0; i < acquisition->dtu_count; ++i) {
+        edge_dtu_channel *channel = &acquisition->dtu[i];
+        if (channel->pid > 0) {
+            pid_t result = waitpid(channel->pid, NULL, WNOHANG);
+            if (result == channel->pid || (result < 0 && errno == ECHILD)) {
+                channel->pid = 0;
+                channel->retry_at = now + 1000;
+            }
+        }
+        if (channel->pid || now < channel->retry_at) continue;
+        pid_t parent = getpid();
+        channel->pid = fork();
+        if (channel->pid == 0) {
+            (void)prctl(PR_SET_PDEATHSIG, SIGKILL);
+            if (getppid() != parent) _exit(1);
+            edge_process_close_inherited_fds(acquisition->worker_fd);
+            dtu_report_context report = {acquisition, channel->platform_id};
+            edge_dtu_run(&channel->config, worker_dtu_status, &report);
+            _exit(1);
+        }
+        if (channel->pid < 0) { channel->pid = 0; channel->retry_at = now + 1000; }
+    }
+}
+
 static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
     (void)prctl(PR_SET_PDEATHSIG, SIGTERM);
     if (getppid() == 1)
@@ -3701,10 +3874,12 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
         if (stop)
             break;
         const uint64_t schedule_ms = monotonic_milliseconds();
+        dtu_supervise(acquisition, schedule_ms);
         serial_tick(acquisition, schedule_ms);
         if (schedule_ms < next_tick)
             continue;
         for (size_t index = 0U; index < acquisition->device_count && !stop; ++index) {
+            if (!publish_derived_expiry(&acquisition->devices[index])) continue;
             if (serial_paused(&acquisition->devices[index])) {
                 /* Manual control owns the port; leave other physical links running. */
             } else if (acquisition->devices[index].sl651)
@@ -3729,9 +3904,14 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
                              sizeof(status)))
                 goto done;
         }
-        next_tick = monotonic_milliseconds() + EDGE_DTU_IO_PERIOD_MS;
+        next_tick = monotonic_milliseconds() + EDGE_ACQUISITION_TICK_MS;
     }
 done:
+    for (size_t i = 0; i < acquisition->dtu_count; ++i)
+        if (acquisition->dtu[i].pid > 0) {
+            kill(acquisition->dtu[i].pid, SIGKILL);
+            while (waitpid(acquisition->dtu[i].pid, NULL, 0) < 0 && errno == EINTR) {}
+        }
     close_fd(&link_fd);
     close(worker_fd);
     _exit(0);
@@ -3836,7 +4016,11 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_SERIAL &&
+        if (message.type == EDGE_ACQUISITION_EVENT_DTU &&
+            message.payload_size == sizeof(message.payload.dtu_status)) {
+            if (acquisition->dtu_callback)
+                acquisition->dtu_callback(acquisition->callback_context, message.platform_id, &message.payload.dtu_status);
+        } else if (message.type == EDGE_ACQUISITION_EVENT_SERIAL &&
             message.payload_size == sizeof(message.payload.serial_event)) {
             if (acquisition->serial_callback)
                 acquisition->serial_callback(acquisition->callback_context, message.platform_id,

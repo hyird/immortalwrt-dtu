@@ -14,6 +14,7 @@ typedef enum {
     EDGE_FIRMWARE_CHUNK_FAILED = 0,
     EDGE_FIRMWARE_CHUNK_NEXT = 1,
     EDGE_FIRMWARE_CHUNK_COMPLETE = 2,
+    EDGE_FIRMWARE_CHUNK_WAIT = 3,
 } edge_firmware_chunk_result;
 
 edge_firmware_chunk_result edge_firmware_receive_chunk(

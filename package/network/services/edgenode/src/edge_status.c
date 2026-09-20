@@ -195,7 +195,7 @@ static bool write_device(FILE *output,
         !write_string_field(output, "protocol", protocol_name(device->protocol), true) ||
         !write_bool_field(output, "enabled", device->enabled, true) ||
         !write_uint_field(output, "ioIntervalMs",
-                          device->io_interval_ms == 0U ? 1000U : device->io_interval_ms,
+                          device->io_interval_ms == 0U ? (uint64_t)device->report_interval_sec * 1000U : device->io_interval_ms,
                           true) ||
         !write_uint_field(output, "reportIntervalSec", device->report_interval_sec, true) ||
         !write_uint_field(output, "onlineTimeoutSec", device->online_timeout_sec, true) ||

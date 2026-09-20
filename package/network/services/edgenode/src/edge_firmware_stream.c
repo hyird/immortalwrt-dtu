@@ -1,5 +1,11 @@
 #include "edge_firmware_stream.h"
 
+bool edge_firmware_stream_request_due(uint64_t now_ms, uint64_t last_request_ms,
+    uint32_t retry_interval_ms, bool advanced) {
+    return advanced || last_request_ms == 0U ||
+        (now_ms >= last_request_ms && now_ms - last_request_ms >= retry_interval_ms);
+}
+
 edge_firmware_stream_decision edge_firmware_stream_evaluate(
     uint64_t expected_offset, uint64_t total_size, uint64_t chunk_offset,
     size_t chunk_size, size_t maximum_chunk_size, bool eof) {

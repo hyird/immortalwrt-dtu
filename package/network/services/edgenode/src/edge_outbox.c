@@ -50,6 +50,7 @@ bool edge_memory_outbox_put_priority(edge_memory_outbox *outbox,
     memcpy(item->message_id, message_id, 16U);
     item->payload_size = payload_size;
     item->sent_at_ms = 0U;
+    item->timeout_retries = 0U;
     item->priority = priority;
     item->in_flight = false;
     memcpy(item->payload, payload, payload_size);
@@ -122,6 +123,27 @@ bool edge_memory_outbox_timed_out(const edge_memory_outbox *outbox,
     return false;
 }
 
+size_t edge_memory_outbox_retry_expired(edge_memory_outbox *outbox,
+    uint64_t now_ms, uint32_t timeout_ms, uint8_t retry_limit) {
+    if (outbox == NULL || timeout_ms == 0U) return 0U;
+    for (edge_memory_message *item = outbox->head; item != NULL; item = item->next) {
+        if (item->in_flight && now_ms >= item->sent_at_ms &&
+            now_ms - item->sent_at_ms >= timeout_ms && item->timeout_retries >= retry_limit)
+            return SIZE_MAX;
+    }
+    size_t retried = 0U;
+    for (edge_memory_message *item = outbox->head; item != NULL; item = item->next) {
+        if (!item->in_flight || now_ms < item->sent_at_ms ||
+            now_ms - item->sent_at_ms < timeout_ms) continue;
+        item->in_flight = false;
+        item->sent_at_ms = 0U;
+        ++item->timeout_retries;
+        --outbox->in_flight;
+        ++retried;
+    }
+    return retried;
+}
+
 bool edge_memory_outbox_retry(edge_memory_outbox *outbox,
                               const uint8_t message_id[16]) {
     if (outbox == NULL || message_id == NULL)
@@ -145,6 +167,7 @@ void edge_memory_outbox_reset(edge_memory_outbox *outbox) {
     for (edge_memory_message *item = outbox->head; item != NULL; item = item->next) {
         item->in_flight = false;
         item->sent_at_ms = 0U;
+        item->timeout_retries = 0U;
     }
     outbox->in_flight = 0U;
 }

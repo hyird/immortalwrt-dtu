@@ -235,7 +235,7 @@ static bool verify_item_blob(const uint8_t *payload, size_t payload_size,
     uint8_t expected[32];
     memcpy(expected, item->sha256.bytes, 32U);
     item->sha256.size = 0U;
-    uint8_t canonical[iot_edge_v1_ConfigItem_size];
+    uint8_t canonical[EDGENODE_MAX_WS_MESSAGE];
     size_t canonical_size = 0U;
     if (!encode_message(iot_edge_v1_ConfigItem_fields, item, canonical,
                         sizeof(canonical), &canonical_size))
@@ -271,15 +271,17 @@ static bool load_active(edge_spool *spool) {
         snprintf(name, sizeof(name), "%08lu.pb", (unsigned long)index);
         if (!path_join(path, sizeof(path), directory, name))
             return false;
-        data = read_file(path, iot_edge_v1_ConfigItem_size, &size);
-        iot_edge_v1_ConfigItem item;
+        data = read_file(path, EDGENODE_MAX_WS_MESSAGE, &size);
+        iot_edge_v1_ConfigItem item = iot_edge_v1_ConfigItem_init_zero;
         if (data == NULL || !verify_item_blob(data, size, &item) ||
             item.revision != begin.revision || item.index != index ||
             !edge_memory_config_put(&spool->staging_config, item.revision, item.index,
                                     item.sha256.bytes, data, size)) {
+            pb_release(iot_edge_v1_ConfigItem_fields, &item);
             free(data);
             return false;
         }
+        pb_release(iot_edge_v1_ConfigItem_fields, &item);
         free(data);
     }
     if (!path_join(path, sizeof(path), directory, "commit.pb"))
@@ -354,6 +356,103 @@ static bool load_outbox(edge_spool *spool) {
     return true;
 }
 
+#ifndef EDGE_DTU_CONFIG_ROOT
+#define EDGE_DTU_CONFIG_ROOT "/etc/edgenode-dtu"
+#endif
+#define EDGE_DTU_CHECKPOINT_MAX (1024U * 1024U)
+
+static void checkpoint_length(uint8_t *bytes, uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i) bytes[i] = (uint8_t)(value >> (i * 8U));
+}
+
+static bool checkpoint_part(const uint8_t *bytes, size_t total, size_t *offset,
+                            const uint8_t **part, size_t *size) {
+    if (*offset > total || total - *offset < 4U) return false;
+    uint32_t length = 0;
+    for (unsigned i = 0; i < 4; ++i) length |= (uint32_t)bytes[*offset + i] << (i * 8U);
+    *offset += 4U;
+    if (length > total - *offset) return false;
+    *part = bytes + *offset;
+    *size = length;
+    *offset += length;
+    return true;
+}
+
+static bool checkpoint_config(edge_spool *spool) {
+    const edge_memory_config_set *config = &spool->staging_config;
+    char name[37], path[192];
+    edge_config_format_uuid(spool->platform_id, name);
+    if (!path_join(path, sizeof(path), EDGE_DTU_CONFIG_ROOT, name)) return false;
+    bool required = access(path, F_OK) == 0;
+    size_t capacity = 12U + iot_edge_v1_ConfigBegin_size;
+    for (uint32_t i = 0; i < config->item_count; ++i) {
+        iot_edge_v1_ConfigItem item = iot_edge_v1_ConfigItem_init_zero;
+        pb_istream_t input = pb_istream_from_buffer(config->items[i].payload, config->items[i].payload_size);
+        if (!pb_decode(&input, iot_edge_v1_ConfigItem_fields, &item)) return false;
+        required |= item.which_item == iot_edge_v1_ConfigItem_dtu_tag;
+        if (capacity > EDGE_DTU_CHECKPOINT_MAX - 4U || config->items[i].payload_size > EDGE_DTU_CHECKPOINT_MAX - capacity - 4U) return false;
+        capacity += config->items[i].payload_size + 4U;
+    }
+    if (!required) return true;
+    if (!make_directory(EDGE_DTU_CONFIG_ROOT)) return false;
+    uint8_t *bytes = malloc(capacity);
+    if (!bytes) return false;
+    memcpy(bytes, "EDTU0001", 8);
+    iot_edge_v1_ConfigBegin begin = iot_edge_v1_ConfigBegin_init_zero;
+    begin.revision = config->revision;
+    begin.item_count = config->item_count;
+    begin.sha256.size = 32;
+    memcpy(begin.sha256.bytes, config->digest, 32);
+    size_t size = 0;
+    bool ok = encode_message(iot_edge_v1_ConfigBegin_fields, &begin, bytes + 12,
+                              capacity - 12, &size);
+    checkpoint_length(bytes + 8, (uint32_t)size);
+    size_t offset = 12 + size;
+    for (uint32_t i = 0; ok && i < config->item_count; ++i) {
+        checkpoint_length(bytes + offset, (uint32_t)config->items[i].payload_size);
+        offset += 4;
+        memcpy(bytes + offset, config->items[i].payload, config->items[i].payload_size);
+        offset += config->items[i].payload_size;
+    }
+    ok = ok && write_atomic(EDGE_DTU_CONFIG_ROOT, name, bytes, offset);
+    free(bytes);
+    return ok;
+}
+
+static void restore_checkpoint(edge_spool *spool) {
+    char name[37], path[192];
+    edge_config_format_uuid(spool->platform_id, name);
+    if (!path_join(path, sizeof(path), EDGE_DTU_CONFIG_ROOT, name) || access(path, F_OK)) return;
+    size_t total = 0;
+    uint8_t *bytes = read_file(path, EDGE_DTU_CHECKPOINT_MAX, &total);
+    if (!bytes) { syslog(LOG_ERR, "cannot read DTU checkpoint for %s", name); return; }
+    size_t offset = 8, size = 0;
+    const uint8_t *part = NULL;
+    iot_edge_v1_ConfigBegin begin = iot_edge_v1_ConfigBegin_init_zero;
+    edge_memory_config_set candidate = {0}, restored = {0};
+    bool ok = total >= 12 && !memcmp(bytes, "EDTU0001", 8) &&
+        checkpoint_part(bytes, total, &offset, &part, &size) &&
+        decode_message(iot_edge_v1_ConfigBegin_fields, part, size, &begin) && begin.sha256.size == 32 &&
+        edge_memory_config_begin(&candidate, begin.revision, begin.item_count, begin.sha256.bytes);
+    for (uint32_t i = 0; ok && i < begin.item_count; ++i) {
+        iot_edge_v1_ConfigItem item = iot_edge_v1_ConfigItem_init_zero;
+        ok = checkpoint_part(bytes, total, &offset, &part, &size) &&
+            verify_item_blob(part, size, &item) && item.index == i && item.revision == begin.revision &&
+            edge_memory_config_put(&candidate, item.revision, i, item.sha256.bytes, part, size);
+        pb_release(iot_edge_v1_ConfigItem_fields, &item);
+    }
+    ok = ok && offset == total && edge_memory_config_commit(&restored, &candidate, begin.revision, begin.sha256.bytes);
+    if (ok) {
+        edge_memory_config_free(&spool->active_config);
+        spool->active_config = restored;
+    } else {
+        edge_memory_config_free(&restored);
+        syslog(LOG_ERR, "invalid DTU checkpoint rejected for %s", name);
+    }
+    edge_memory_config_free(&candidate);
+    free(bytes);
+}
+
 bool edge_spool_init(edge_spool *spool, const uint8_t platform_id[16],
                      size_t outbox_maximum_bytes) {
     if (spool == NULL || platform_id == NULL || outbox_maximum_bytes == 0U)
@@ -387,6 +486,7 @@ bool edge_spool_init(edge_spool *spool, const uint8_t platform_id[16],
         edge_memory_config_free(&spool->active_config);
         remove_tree(active);
     }
+    restore_checkpoint(spool);
     return load_outbox(spool);
 }
 
@@ -494,6 +594,12 @@ bool edge_spool_config_commit(edge_spool *spool, uint64_t revision,
     if (rename(staging, active) != 0) {
         if (had_active)
             rename(previous, active);
+        return false;
+    }
+    if (!checkpoint_config(spool)) {
+        remove_tree(active);
+        if (had_active) rename(previous, active);
+        sync_directory(spool->directory);
         return false;
     }
     sync_directory(spool->directory);
