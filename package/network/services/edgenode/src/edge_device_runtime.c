@@ -115,8 +115,8 @@ static bool same_value(const edge_write_command *command, const edge_device_samp
 static void handle_no_response(edge_device_runtime *runtime) {
     /*
      * S7 must not reuse a timed-out COTP/S7 session; reset both TCP and
-     * handshake state so the next tick reconnects and negotiates from the
-     * beginning. Modbus connections are deliberately kept open across a
+     * handshake state before reconnecting and negotiating from the beginning.
+     * Modbus connections are deliberately kept open across a
      * timeout: some gateways send a banner or delayed response on the same
      * TCP stream and must not be forced through a reconnect loop.
      */
@@ -176,6 +176,18 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         if (result == EDGE_IO_OK) {
             edge_device_sample sample = {0};
             result = runtime->driver.read(runtime->driver_context, &sample);
+            if (result == EDGE_IO_NO_RESPONSE && runtime->protocol == EDGE_DEVICE_S7) {
+                /* Retry reads once immediately on a fresh session. Never replay
+                 * a write, and bound recovery so other devices can still run. */
+                close_connection(runtime);
+                result = ensure_ready(runtime);
+                if (result == EDGE_IO_OK) {
+                    memset(&sample, 0, sizeof(sample));
+                    result = runtime->driver.read(runtime->driver_context, &sample);
+                } else {
+                    close_connection(runtime);
+                }
+            }
             if (result == EDGE_IO_OK && sample.size <= EDGE_DEVICE_VALUE_MAX) {
                 sample.sampled_at_ms = observed_at_ms;
                 runtime->latest = sample;

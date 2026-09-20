@@ -73,8 +73,9 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
   write readback is reported immediately; a verified command then reports at the configured
   fast-read interval for the configured window before returning to the regular interval.
   A successful command requires readback equality;
-- an unresponsive S7 PLC closes the TCP socket and repeats TCP, COTP, and S7 Setup
-  Communication on the next one-second cycle.
+- S7 读取超时后立即关闭 TCP，重新连接并完成 COTP、S7 Setup Communication，
+  在同一采集周期重读一次；重连或握手失败、重读再次超时或断线时清理连接状态，等待下一配置采集周期。
+  每周期最多立即重读一次，不改变原采集周期，不自动重发写入命令；其他协议行为不变。
 - network and serial capabilities are reported automatically; the built-in PTY bridge
   exposes an authenticated remote terminal without a separate terminal daemon;
 - commands from any enrolled platform can create, update, or delete UCI logical interfaces

@@ -194,22 +194,35 @@ typedef struct {
     unsigned completions;
     edge_command_result last_command_result;
     edge_io_result next_read_result;
+    unsigned read_timeouts;
+    edge_io_result next_connect_result;
+    edge_io_result next_handshake_result;
     uint8_t last_platform[16];
 } fake_device;
 
 static edge_io_result fake_connect(void *context) {
-    ++((fake_device *)context)->connects;
-    return EDGE_IO_OK;
+    fake_device *fake = context;
+    ++fake->connects;
+    const edge_io_result result = fake->next_connect_result;
+    fake->next_connect_result = EDGE_IO_OK;
+    return result;
 }
 
 static edge_io_result fake_handshake(void *context) {
-    ++((fake_device *)context)->handshakes;
-    return EDGE_IO_OK;
+    fake_device *fake = context;
+    ++fake->handshakes;
+    const edge_io_result result = fake->next_handshake_result;
+    fake->next_handshake_result = EDGE_IO_OK;
+    return result;
 }
 
 static edge_io_result fake_read(void *context, edge_device_sample *sample) {
     fake_device *fake = context;
     ++fake->reads;
+    if (fake->read_timeouts != 0U) {
+        --fake->read_timeouts;
+        return EDGE_IO_NO_RESPONSE;
+    }
     const edge_io_result result = fake->next_read_result;
     fake->next_read_result = EDGE_IO_OK;
     if (result != EDGE_IO_OK)
@@ -296,10 +309,13 @@ static void test_fixed_io_and_reporting(void) {
 
     fake.next_read_result = EDGE_IO_NO_RESPONSE;
     edge_device_runtime_tick(&runtime, 4000U, 1004000);
-    require_true(fake.disconnects == 1U, "silent S7 device did not close TCP state");
+    require_true(fake.disconnects == 1U && fake.connects == 2U &&
+                     fake.handshakes == 2U && fake.reads == 6U &&
+                     runtime.latest.bytes[0] == 6U,
+                 "S7 did not immediately reconnect, handshake and reread after timeout");
     edge_device_runtime_tick(&runtime, 5000U, 1005000);
-    require_true(fake.connects == 2U && fake.handshakes == 2U,
-                 "S7 did not reconnect and repeat both handshakes on the next cycle");
+    require_true(fake.connects == 2U && fake.handshakes == 2U && fake.reads == 7U,
+                 "S7 did not reuse the recovered connection on the next cycle");
     edge_device_runtime_close(&runtime);
 
     fake_device modbus = {0};
@@ -411,7 +427,46 @@ static void test_fast_reporting_after_write(void) {
     edge_device_runtime_close(&runtime);
 }
 
+static void test_s7_immediate_retry_is_bounded(void) {
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {
+        .connect = fake_connect, .handshake = fake_handshake,
+        .read = fake_read, .write_readback = fake_write,
+        .disconnect = fake_disconnect, .report = fake_report,
+        .command_complete = fake_complete};
+    for (unsigned scenario = 0U; scenario < 3U; ++scenario) {
+        fake_device fake = {0};
+        edge_device_runtime runtime;
+        require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+            platform_id, device_id, 1000U, 30U, 0U, &driver, &fake), "S7 init failed");
+        edge_device_runtime_tick(&runtime, 0U, 0);
+        fake.read_timeouts = scenario == 0U ? 2U : 1U;
+        if (scenario == 1U) fake.next_connect_result = EDGE_IO_OFFLINE;
+        if (scenario == 2U) fake.next_handshake_result = EDGE_IO_NO_RESPONSE;
+        edge_write_command command = {.value = {0x55U}, .value_size = 1U};
+        require_true(edge_device_runtime_enqueue_write(&runtime, &command), "enqueue failed");
+        edge_device_runtime_tick(&runtime, 1000U, 1000);
+        require_true(fake.connects == 2U &&
+            fake.handshakes == (scenario == 1U ? 1U : 2U) &&
+            fake.reads == (scenario == 0U ? 3U : 2U),
+            "S7 retry exceeded its bound or read before recovery succeeded");
+        require_true(!runtime.connected && !runtime.handshaken &&
+            fake.disconnects == (scenario == 1U ? 1U : 2U),
+            "failed S7 recovery retained stale connection state");
+        require_true(fake.writes == 1U && fake.completions == 1U &&
+            runtime.next_io_at_ms == 2000U,
+            "S7 read recovery replayed a write or changed the acquisition schedule");
+        edge_device_runtime_tick(&runtime, 1500U, 1500);
+        require_true(fake.connects == 2U, "failed recovery caused an unbounded retry loop");
+        edge_device_runtime_tick(&runtime, 2000U, 2000);
+        require_true(fake.connects == 3U && runtime.connected && runtime.handshaken,
+            "S7 failed to resume on the next acquisition deadline");
+        edge_device_runtime_close(&runtime);
+    }
+}
+
 int main(void) {
+    test_s7_immediate_retry_is_bounded();
     test_modbus();
     test_s7();
     test_fixed_io_and_reporting();
