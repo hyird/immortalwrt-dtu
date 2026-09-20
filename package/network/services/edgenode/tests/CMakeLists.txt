@@ -40,6 +40,14 @@ endif()
 
 enable_testing()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(edge_traffic_test edge_traffic_test.c "${EDGENODE_ROOT}/src/edge_traffic.c")
+    target_include_directories(edge_traffic_test PRIVATE "${EDGENODE_ROOT}/src")
+    target_link_libraries(edge_traffic_test PRIVATE edgenode_nanopb)
+    target_compile_options(edge_traffic_test PRIVATE -UNDEBUG)
+    add_test(NAME edge_traffic COMMAND edge_traffic_test)
+endif()
+
 add_executable(edge_protocol_test
     edge_protocol_test.c
     "${EDGENODE_ROOT}/src/edge_protocol.c")

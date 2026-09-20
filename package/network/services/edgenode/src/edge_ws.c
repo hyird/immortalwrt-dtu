@@ -60,6 +60,13 @@ static edge_ws_session *session_from_client(struct uwsc_client *client) {
     return (edge_ws_session *)((uint8_t *)client - offsetof(edge_ws_session, client));
 }
 
+static void traffic_ready(struct ev_loop *loop, struct ev_io *watcher, int events) {
+    (void)loop;
+    (void)events;
+    edge_ws_app *app = (edge_ws_app *)((uint8_t *)watcher - offsetof(edge_ws_app, traffic_io));
+    edge_traffic_drain(&app->traffic);
+}
+
 static edge_ws_session *session_from_reconnect(struct ev_timer *timer) {
     return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, reconnect_timer));
 }
@@ -1462,6 +1469,9 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         break;
     }
     case iot_edge_v1_Envelope_heartbeat_ack_tag: {
+        edge_traffic_ack(&session->app->traffic,
+            (size_t)(session - session->app->sessions),
+            envelope->payload.heartbeat_ack.traffic_sample_id);
         const bool request_capability =
             envelope->payload.heartbeat_ack.request_capability_report;
         const bool request_device_status =
@@ -1669,6 +1679,9 @@ static void heartbeat_timer(struct ev_loop *loop, struct ev_timer *timer, int ev
         return;
     envelope->which_payload = iot_edge_v1_Envelope_heartbeat_tag;
     iot_edge_v1_Heartbeat *heartbeat = &envelope->payload.heartbeat;
+    heartbeat->has_tcp_traffic = true;
+    edge_traffic_sample(&session->app->traffic,
+        (size_t)(session - session->app->sessions), monotonic_ms(), &heartbeat->tcp_traffic);
     heartbeat->signal_csq = 99U;
     heartbeat->signal_rssi_dbm = -1;
     heartbeat->mobile_registration_status = -1;
@@ -2000,6 +2013,8 @@ static void start_connection(edge_ws_session *session) {
         schedule_reconnect(session);
         return;
     }
+    edge_traffic_register(&session->app->traffic,
+        (size_t)(session - session->app->sessions), session->client.sock);
     /* The packaged libuwsc requires the CA bundle and verifies the peer hostname. */
     session->client.onopen = websocket_open;
     session->client.onmessage = websocket_message;
@@ -2090,6 +2105,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
     edge_log_init();
     app->loop = loop;
     app->config = config;
+    app->traffic.event_fd = app->traffic.query_fd = -1;
     for (size_t index = 0; index < config->platform_count; ++index) {
         edge_ws_session *session = &app->sessions[index];
         session->app = app;
@@ -2171,6 +2187,13 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
 void edge_ws_app_start(edge_ws_app *app) {
     if (app == NULL)
         return;
+    _Static_assert(EDGE_MAX_PLATFORMS <= EDGE_TRAFFIC_MAX_PLATFORMS, "traffic platform capacity");
+    if (edge_traffic_open(&app->traffic, app->config->platform_count, monotonic_ms())) {
+        ev_io_init(&app->traffic_io, traffic_ready, app->traffic.event_fd, EV_READ);
+        ev_io_start(app->loop, &app->traffic_io);
+    } else {
+        syslog(LOG_WARNING, "TCP traffic accounting unavailable; heartbeat samples marked incomplete");
+    }
     ev_timer_set(&app->acquisition_timer, 0.0, 1.0);
     ev_timer_start(app->loop, &app->acquisition_timer);
     ev_timer_set(&app->status_timer, 0.1, 2.0);
@@ -2190,6 +2213,8 @@ void edge_ws_app_start(edge_ws_app *app) {
 void edge_ws_app_stop(edge_ws_app *app) {
     if (app == NULL)
         return;
+    if (app->traffic.event_fd >= 0) ev_io_stop(app->loop, &app->traffic_io);
+    edge_traffic_close(&app->traffic);
     ev_timer_stop(app->loop, &app->acquisition_timer);
     ev_timer_stop(app->loop, &app->status_timer);
     edge_status_remove();

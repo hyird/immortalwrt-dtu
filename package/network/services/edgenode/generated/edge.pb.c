@@ -33,6 +33,9 @@ PB_BIND(iot_edge_v1_VpnCapabilities, iot_edge_v1_VpnCapabilities, AUTO)
 PB_BIND(iot_edge_v1_CapabilityReport, iot_edge_v1_CapabilityReport, 4)
 
 
+PB_BIND(iot_edge_v1_TcpTraffic, iot_edge_v1_TcpTraffic, AUTO)
+
+
 PB_BIND(iot_edge_v1_Heartbeat, iot_edge_v1_Heartbeat, 2)
 
 

@@ -11,6 +11,7 @@
 #include "edge_protocol.h"
 #include "edge_retry.h"
 #include "edge_report.h"
+#include "edge_traffic.h"
 #include "edge_runtime_config.h"
 #include "edge_spool.h"
 
@@ -87,6 +88,8 @@ struct edge_ws_app {
     struct ev_timer acquisition_timer;
     struct ev_timer status_timer;
     struct ev_io acquisition_io;
+    struct ev_io traffic_io;
+    edge_traffic traffic;
     edge_acquisition *acquisition;
     edge_ws_session sessions[EDGE_MAX_PLATFORMS];
     iot_edge_v1_Envelope envelope;
