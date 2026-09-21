@@ -91,23 +91,6 @@ uptime_seconds() {
 	printf '%s\n' "${uptime}"
 }
 
-MODEM_STATUS="/tmp/4ginfo/modem.status"
-
-modem_sim_missing() {
-	local state name
-
-	[ -r "$MODEM_STATUS" ] || return 1
-	state="$(awk -F= '$1=="sim_state" { v=$2 } END { print v }' "$MODEM_STATUS")"
-	name="$(awk -F= '$1=="sim_state_name" { v=$2 } END { print v }' "$MODEM_STATUS")"
-	case "$state" in
-		3) return 0 ;;
-	esac
-	case "$name" in
-		"NOT INSERTED"|"NOT READY") return 0 ;;
-	esac
-	return 1
-}
-
 until last_online="$(uptime_seconds)"; do
 	sleep "${CHECK_INTERVAL}"
 done
@@ -134,10 +117,7 @@ while :; do
 		sleep "${CHECK_INTERVAL}"
 		continue
 	fi
-	if modem_sim_missing; then
-		# Rebooting cannot find a missing SIM; keep the box up for hot-plug.
-		last_online="${now}"
-	elif [ "${primary_online}" -eq 1 ] || [ "${secondary_online}" -eq 1 ]; then
+	if [ "${primary_online}" -eq 1 ] || [ "${secondary_online}" -eq 1 ]; then
 		last_online="${now}"
 	elif [ $((now - last_online)) -ge "${OFFLINE_TIMEOUT}" ]; then
 		logger -t network-watchdog \

@@ -16,7 +16,6 @@ with tempfile.TemporaryDirectory(prefix='edge-watchdog-test-') as name:
     (root / 'service').chmod(0o700)
     functions = functions.replace('/proc/', str(root / 'proc') + '/')
     functions = functions.replace('/tmp/edgenode/', str(root / 'health') + '/')
-    functions = functions.replace('/tmp/4ginfo/modem.status', str(root / 'modem.status'))
     functions = functions.replace('/etc/init.d/edgenode', str(root / 'service'))
     scenario = r'''
 pidof() { echo '202 101'; }
@@ -28,15 +27,6 @@ check_count() {
     [ ! -f ROOT/calls ] || count=$(wc -l < ROOT/calls)
     [ "$count" -eq "$1" ] || { echo "unexpected recovery count: $count expected $1"; exit 1; }
 }
-modem_sim_missing && exit 1
-printf '%s\n' 'sim_state=1' 'sim_state=2' > ROOT/modem.status
-modem_sim_missing && exit 1
-printf '%s\n' 'sim_state=2' 'sim_state=3' > ROOT/modem.status
-modem_sim_missing || exit 1
-printf '%s\n' 'sim_state=1' 'sim_state_name=NOT INSERTED' > ROOT/modem.status
-modem_sim_missing || exit 1
-printf '%s\n' 'sim_state=2' 'sim_state_name=READY' > ROOT/modem.status
-modem_sim_missing && exit 1
 echo 101 > ROOT/health/loop.watchdog
 tick 0; health 0; ensure_edgenode_running
 [ "$edgenode_pid" = 101 ] || exit 1
