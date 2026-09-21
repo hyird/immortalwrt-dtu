@@ -262,7 +262,6 @@ typedef struct _iot_edge_v1_TcpTraffic {
     uint64_t download_bytes;
     uint64_t interval_ms;
     uint64_t sample_id;
-    bool complete;
 } iot_edge_v1_TcpTraffic;
 
 typedef struct _iot_edge_v1_Heartbeat {
@@ -1304,7 +1303,7 @@ extern "C" {
 #define iot_edge_v1_SerialCapability_init_default {"", "", 0, 0}
 #define iot_edge_v1_VpnCapabilities_init_default {0, "", "", ""}
 #define iot_edge_v1_CapabilityReport_init_default {0, {iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default, iot_edge_v1_InterfaceCapability_init_default}, 0, {iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default, iot_edge_v1_SerialCapability_init_default}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default, iot_edge_v1_NetworkCapability_init_default}, false, iot_edge_v1_VpnCapabilities_init_default, 0, {_iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN}, 0, 0, 0}
-#define iot_edge_v1_TcpTraffic_init_default      {0, 0, 0, 0, 0}
+#define iot_edge_v1_TcpTraffic_init_default      {0, 0, 0, 0}
 #define iot_edge_v1_Heartbeat_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, "", false, iot_edge_v1_TcpTraffic_init_default}
 #define iot_edge_v1_HeartbeatAck_init_default    {0, 0, 0, 0}
 #define iot_edge_v1_DeviceStatus_init_default    {{0, {0}}, "", "", 0, 0, {"", "", "", "", "", "", "", ""}, 0}
@@ -1383,7 +1382,7 @@ extern "C" {
 #define iot_edge_v1_SerialCapability_init_zero   {"", "", 0, 0}
 #define iot_edge_v1_VpnCapabilities_init_zero    {0, "", "", ""}
 #define iot_edge_v1_CapabilityReport_init_zero   {0, {iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero, iot_edge_v1_InterfaceCapability_init_zero}, 0, {iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero, iot_edge_v1_SerialCapability_init_zero}, "", 0, 0, {iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero, iot_edge_v1_NetworkCapability_init_zero}, false, iot_edge_v1_VpnCapabilities_init_zero, 0, {_iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN, _iot_edge_v1_Protocol_MIN}, 0, 0, 0}
-#define iot_edge_v1_TcpTraffic_init_zero         {0, 0, 0, 0, 0}
+#define iot_edge_v1_TcpTraffic_init_zero         {0, 0, 0, 0}
 #define iot_edge_v1_Heartbeat_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, "", false, iot_edge_v1_TcpTraffic_init_zero}
 #define iot_edge_v1_HeartbeatAck_init_zero       {0, 0, 0, 0}
 #define iot_edge_v1_DeviceStatus_init_zero       {{0, {0}}, "", "", 0, 0, {"", "", "", "", "", "", "", ""}, 0}
@@ -1537,7 +1536,6 @@ extern "C" {
 #define iot_edge_v1_TcpTraffic_download_bytes_tag 2
 #define iot_edge_v1_TcpTraffic_interval_ms_tag   3
 #define iot_edge_v1_TcpTraffic_sample_id_tag     4
-#define iot_edge_v1_TcpTraffic_complete_tag      5
 #define iot_edge_v1_Heartbeat_uptime_sec_tag     1
 #define iot_edge_v1_Heartbeat_active_config_version_tag 2
 #define iot_edge_v1_Heartbeat_managed_endpoint_count_tag 3
@@ -2179,8 +2177,7 @@ X(a, STATIC,   SINGULAR, BOOL,     supports_derived_points,  10)
 X(a, STATIC,   SINGULAR, UINT64,   upload_bytes,      1) \
 X(a, STATIC,   SINGULAR, UINT64,   download_bytes,    2) \
 X(a, STATIC,   SINGULAR, UINT64,   interval_ms,       3) \
-X(a, STATIC,   SINGULAR, UINT64,   sample_id,         4) \
-X(a, STATIC,   SINGULAR, BOOL,     complete,          5)
+X(a, STATIC,   SINGULAR, UINT64,   sample_id,         4)
 #define iot_edge_v1_TcpTraffic_CALLBACK NULL
 #define iot_edge_v1_TcpTraffic_DEFAULT NULL
 
@@ -3255,7 +3252,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_FirmwareUpdateRequest_size   646
 #define iot_edge_v1_FirmwareUpdateResult_size    307
 #define iot_edge_v1_HeartbeatAck_size            26
-#define iot_edge_v1_Heartbeat_size               404
+#define iot_edge_v1_Heartbeat_size               402
 #define iot_edge_v1_HelloAck_size                58
 #define iot_edge_v1_Hello_size                   718
 #define iot_edge_v1_IndustrialConnectionConfig_size 93
@@ -3287,7 +3284,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_Sl651DictionaryConfig_size   441
 #define iot_edge_v1_Sl651ElementConfig_size      346
 #define iot_edge_v1_Sl651FunctionConfig_size     148
-#define iot_edge_v1_TcpTraffic_size              46
+#define iot_edge_v1_TcpTraffic_size              44
 #define iot_edge_v1_TelemetryAck_size            19
 #define iot_edge_v1_TerminalClose_size           160
 #define iot_edge_v1_TerminalDataAck_size         29

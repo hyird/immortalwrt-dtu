@@ -2192,7 +2192,7 @@ void edge_ws_app_start(edge_ws_app *app) {
         ev_io_init(&app->traffic_io, traffic_ready, app->traffic.event_fd, EV_READ);
         ev_io_start(app->loop, &app->traffic_io);
     } else {
-        syslog(LOG_WARNING, "TCP traffic accounting unavailable; heartbeat samples marked incomplete");
+        syslog(LOG_WARNING, "TCP traffic accounting unavailable");
     }
     ev_timer_set(&app->acquisition_timer, 0.0, 1.0);
     ev_timer_start(app->loop, &app->acquisition_timer);

@@ -94,7 +94,6 @@ int main(void) {
     edge_traffic_sample(&traffic, 0, 300000, &report);
     assert(report.upload_bytes == 160 && report.download_bytes == 100);
     assert(report.interval_ms == 300000 && report.sample_id == 1);
-    assert(!report.complete); /* No actual netlink source in this fixture. */
     ingest(&traffic, &first, 200, 140, false);
     edge_traffic_ack(&traffic, 1, 1); /* Other platform cannot clear this window. */
     edge_traffic_ack(&traffic, 0, 2); /* Mismatched/delayed acknowledgment. */

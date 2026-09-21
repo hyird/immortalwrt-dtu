@@ -119,12 +119,11 @@ static void test_heartbeat_mobile_state_round_trip(void) {
     heartbeat->tcp_traffic.download_bytes = UINT64_C(9007199254741001);
     heartbeat->tcp_traffic.interval_ms = 300000;
     heartbeat->tcp_traffic.sample_id = 2;
-    heartbeat->tcp_traffic.complete = true;
     require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error),
             "TCP traffic encode failed");
     require(edge_protocol_decode(encoded, encoded_size, &decoded, &error),
             "TCP traffic decode failed");
-    require(round_trip->has_tcp_traffic && round_trip->tcp_traffic.complete &&
+    require(round_trip->has_tcp_traffic &&
             round_trip->tcp_traffic.upload_bytes == UINT64_C(9007199254740993) &&
             round_trip->tcp_traffic.download_bytes == UINT64_C(9007199254741001) &&
             round_trip->tcp_traffic.interval_ms == 300000 && round_trip->tcp_traffic.sample_id == 2,

@@ -377,7 +377,6 @@ void edge_traffic_sample(edge_traffic *traffic, size_t platform, uint64_t now_ms
         window->report.interval_ms = now_ms >= window->acknowledged_at_ms
             ? now_ms - window->acknowledged_at_ms : 0;
         window->report.sample_id = ++window->sequence;
-        window->report.complete = window->complete;
         window->pending = true;
     }
     *report = window->report;
