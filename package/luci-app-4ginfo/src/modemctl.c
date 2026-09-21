@@ -812,6 +812,44 @@ static bool first_digits_value(const char *response, size_t minimum, size_t maxi
 	return false;
 }
 
+static void write_value(FILE *status, const char *key, const char *value);
+
+static const char *operator_from_plmn(const char *plmn)
+{
+	if (plmn == NULL)
+		return NULL;
+	if (strcmp(plmn, "46000") == 0 || strcmp(plmn, "46002") == 0 ||
+	    strcmp(plmn, "46004") == 0 || strcmp(plmn, "46007") == 0 ||
+	    strcmp(plmn, "46008") == 0 || strcmp(plmn, "46013") == 0)
+		return "中国移动";
+	if (strcmp(plmn, "46001") == 0 || strcmp(plmn, "46006") == 0 ||
+	    strcmp(plmn, "46009") == 0 || strcmp(plmn, "46010") == 0)
+		return "中国联通";
+	if (strcmp(plmn, "46003") == 0 || strcmp(plmn, "46005") == 0 ||
+	    strcmp(plmn, "46011") == 0 || strcmp(plmn, "46012") == 0)
+		return "中国电信";
+	if (strcmp(plmn, "46015") == 0)
+		return "中国广电";
+	return NULL;
+}
+
+static void write_mobile_operator(FILE *status, const char *name, int format)
+{
+	const char *mapped;
+
+	if (name == NULL || name[0] == '\0')
+		return;
+	if (format == 2 || valid_digits(name, 5U, 6U)) {
+		write_value(status, "operator_mccmnc", name);
+		mapped = operator_from_plmn(name);
+		write_value(status, "operator_name", mapped != NULL ? mapped : name);
+		write_value(status, "mobile_operator", mapped != NULL ? mapped : name);
+		return;
+	}
+	write_value(status, "operator_name", name);
+	write_value(status, "mobile_operator", name);
+}
+
 static void write_value(FILE *status, const char *key, const char *value)
 {
 	const char *cursor = value != NULL ? value : "";
@@ -919,8 +957,16 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 		else
 			write_response_value(status, "firmware", result);
 	} else if (strcmp(label, "imei") == 0 || strcmp(label, "imsi") == 0) {
-		if (first_numeric_value(result->response, text, sizeof(text)))
+		if (first_numeric_value(result->response, text, sizeof(text))) {
 			write_value(status, label, text);
+			if (strcmp(label, "imsi") == 0 && strlen(text) >= 5U) {
+				char plmn[6];
+
+				memcpy(plmn, text, 5U);
+				plmn[5] = '\0';
+				write_mobile_operator(status, plmn, 2);
+			}
+		}
 	} else if (strcmp(label, "iccid") == 0) {
 		if (first_digits_value(result->response, 18U, 22U, text, sizeof(text)))
 			write_value(status, "iccid", text);
@@ -1069,21 +1115,25 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 			}
 		}
 		write_response_value(status, "network_info_raw", result);
-	} else if (strcmp(label, "cops") == 0) {
+	} else if (strcmp(label, "cops") == 0 || strcmp(label, "operator") == 0) {
 		value = strstr(result->response, "+COPS:");
 		if (value != NULL) {
 			int mode = -1;
 			int format = -1;
 			char name[96] = "";
+			char name_field[96] = "";
 			int act = -1;
+			int parsed;
 
-			if (sscanf(value, "+COPS: %d,%d,\"%95[^\"]\",%d", &mode, &format, name, &act) >= 2) {
+			parsed = sscanf(value, "+COPS: %d,%d,\"%95[^\"]\",%d", &mode, &format, name, &act);
+			if (parsed < 3) {
+				parsed = sscanf(value, "+COPS: %d,%d,%95[^,],%d", &mode, &format, name_field, &act);
+				trim_copy(name, sizeof(name), name_field, strlen(name_field));
+			}
+			if (parsed >= 2) {
 				snprintf(number, sizeof(number), "%d", mode);
 				write_value(status, "operator_selection_mode", number);
-				if (name[0] != '\0')
-					write_value(status, "operator_name", name);
-				if (name[0] != '\0')
-					write_value(status, "mobile_operator", name);
+				write_mobile_operator(status, name, format);
 				if (act >= 0) {
 					snprintf(number, sizeof(number), "%d", act);
 					write_value(status, "access_technology", number);
