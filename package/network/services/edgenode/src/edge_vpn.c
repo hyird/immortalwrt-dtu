@@ -850,7 +850,65 @@ bool edge_vpn_apply(const iot_edge_v1_VpnConfigRequest *request,
 #endif
 }
 
+typedef struct {
+    bool primed, pending;
+    uint64_t rx, tx, ack_rx, ack_tx, ack_ms, sequence;
+    iot_edge_v1_TcpTraffic report;
+} edge_vpn_traffic_state;
+
+static edge_vpn_traffic_state vpn_traffic;
+
+static bool read_sysfs_u64(const char *path, uint64_t *value) {
+    FILE *file = fopen(path, "r");
+    if (!file) return false;
+    unsigned long long parsed = 0;
+    int matched = fscanf(file, "%llu", &parsed);
+    fclose(file);
+    if (matched != 1) return false;
+    *value = (uint64_t)parsed;
+    return true;
+}
+
+bool edge_vpn_sample(uint64_t now_ms, iot_edge_v1_TcpTraffic *report) {
+    uint64_t rx = 0, tx = 0;
+    if (!report ||
+        !read_sysfs_u64("/sys/class/net/" EDGE_VPN_INTERFACE "/statistics/rx_bytes", &rx) ||
+        !read_sysfs_u64("/sys/class/net/" EDGE_VPN_INTERFACE "/statistics/tx_bytes", &tx)) {
+        if (report) memset(report, 0, sizeof(*report));
+        return false;
+    }
+    if (!vpn_traffic.primed) {
+        vpn_traffic.ack_rx = rx;
+        vpn_traffic.ack_tx = tx;
+        vpn_traffic.ack_ms = now_ms;
+        vpn_traffic.primed = true;
+        memset(report, 0, sizeof(*report));
+        return false;
+    }
+    if (!vpn_traffic.pending) {
+        vpn_traffic.report.upload_bytes = tx >= vpn_traffic.ack_tx ? tx - vpn_traffic.ack_tx : 0;
+        vpn_traffic.report.download_bytes = rx >= vpn_traffic.ack_rx ? rx - vpn_traffic.ack_rx : 0;
+        vpn_traffic.report.interval_ms =
+            now_ms >= vpn_traffic.ack_ms ? now_ms - vpn_traffic.ack_ms : 0;
+        vpn_traffic.report.sample_id = ++vpn_traffic.sequence;
+        vpn_traffic.rx = rx;
+        vpn_traffic.tx = tx;
+        vpn_traffic.pending = true;
+    }
+    *report = vpn_traffic.report;
+    return true;
+}
+
+void edge_vpn_ack(uint64_t sample_id) {
+    if (!vpn_traffic.pending || sample_id == 0 || sample_id != vpn_traffic.report.sample_id) return;
+    vpn_traffic.ack_rx = vpn_traffic.rx;
+    vpn_traffic.ack_tx = vpn_traffic.tx;
+    vpn_traffic.ack_ms += vpn_traffic.report.interval_ms;
+    vpn_traffic.pending = false;
+}
+
 void edge_vpn_shutdown(void) {
+    memset(&vpn_traffic, 0, sizeof(vpn_traffic));
 #if defined(__linux__)
     unlink(EDGE_VPN_DSTNAT_INCLUDE);
     unlink(EDGE_VPN_FORWARD_INCLUDE);

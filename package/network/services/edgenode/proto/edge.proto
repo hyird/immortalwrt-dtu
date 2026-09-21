@@ -273,6 +273,7 @@ message Heartbeat {
   bool supports_modem_control = 22;
   string log_level = 23 [(nanopb).max_length = 8];
   TcpTraffic tcp_traffic = 24;
+  TcpTraffic vpn_traffic = 25;
 }
 
 message HeartbeatAck {
@@ -280,6 +281,7 @@ message HeartbeatAck {
   bool request_capability_report = 2;
   bool request_device_status = 3;
   uint64 traffic_sample_id = 4;
+  uint64 vpn_traffic_sample_id = 5;
 }
 
 message DeviceStatus {

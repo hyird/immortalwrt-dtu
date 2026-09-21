@@ -128,6 +128,19 @@ static void test_heartbeat_mobile_state_round_trip(void) {
             round_trip->tcp_traffic.download_bytes == UINT64_C(9007199254741001) &&
             round_trip->tcp_traffic.interval_ms == 300000 && round_trip->tcp_traffic.sample_id == 2,
             "TCP traffic presence, interval or uint64 precision lost");
+    heartbeat->has_vpn_traffic = true;
+    heartbeat->vpn_traffic.upload_bytes = 11;
+    heartbeat->vpn_traffic.download_bytes = 22;
+    heartbeat->vpn_traffic.interval_ms = 300000;
+    heartbeat->vpn_traffic.sample_id = 3;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error),
+            "VPN traffic encode failed");
+    require(edge_protocol_decode(encoded, encoded_size, &decoded, &error),
+            "VPN traffic decode failed");
+    require(round_trip->has_vpn_traffic && round_trip->vpn_traffic.upload_bytes == 11 &&
+            round_trip->vpn_traffic.download_bytes == 22 &&
+            round_trip->vpn_traffic.sample_id == 3,
+            "VPN traffic presence or interval lost");
 }
 
 static void test_terminal_opened_round_trip(void) {

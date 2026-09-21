@@ -1472,6 +1472,7 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         edge_traffic_ack(&session->app->traffic,
             (size_t)(session - session->app->sessions),
             envelope->payload.heartbeat_ack.traffic_sample_id);
+        edge_vpn_ack(envelope->payload.heartbeat_ack.vpn_traffic_sample_id);
         const bool request_capability =
             envelope->payload.heartbeat_ack.request_capability_report;
         const bool request_device_status =
@@ -1682,6 +1683,8 @@ static void heartbeat_timer(struct ev_loop *loop, struct ev_timer *timer, int ev
     heartbeat->has_tcp_traffic = true;
     edge_traffic_sample(&session->app->traffic,
         (size_t)(session - session->app->sessions), monotonic_ms(), &heartbeat->tcp_traffic);
+    heartbeat->has_vpn_traffic =
+        edge_vpn_sample(monotonic_ms(), &heartbeat->vpn_traffic);
     heartbeat->signal_csq = 99U;
     heartbeat->signal_rssi_dbm = -1;
     heartbeat->mobile_registration_status = -1;
