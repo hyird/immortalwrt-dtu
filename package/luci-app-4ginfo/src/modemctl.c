@@ -49,6 +49,8 @@ struct modem_profile {
 	char operator_mode[16];
 	char operator_mccmnc[8];
 	char network_interface[33];
+	char power_control[16];
+	char power_path[128];
 	bool automatic_apn;
 	bool redial_after_apply;
 };
@@ -392,7 +394,9 @@ static bool load_profile(struct modem_profile *profile)
 		!copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4") ||
 		!copy_option(profile->auth_type, sizeof(profile->auth_type), "none") ||
 		!copy_option(profile->radio_function, sizeof(profile->radio_function), "full") ||
-		!copy_option(profile->operator_mode, sizeof(profile->operator_mode), "auto"))
+		!copy_option(profile->operator_mode, sizeof(profile->operator_mode), "auto") ||
+		!copy_option(profile->power_control, sizeof(profile->power_control), "none") ||
+		!copy_option(profile->power_path, sizeof(profile->power_path), "/sys/class/gpio/modem_power/value"))
 		return false;
 	profile->automatic_apn = true;
 	context = uci_alloc_context();
@@ -420,7 +424,9 @@ static bool load_profile(struct modem_profile *profile)
 		!copy_option(profile->pin_code, sizeof(profile->pin_code), option(context, four_g_modem, "pin_code", "")) ||
 		!copy_option(profile->radio_function, sizeof(profile->radio_function), option(context, four_g_modem, "radio_function", "full")) ||
 		!copy_option(profile->operator_mode, sizeof(profile->operator_mode), option(context, four_g_modem, "operator_mode", "auto")) ||
-		!copy_option(profile->operator_mccmnc, sizeof(profile->operator_mccmnc), option(context, four_g_modem, "operator_mccmnc", "")))
+		!copy_option(profile->operator_mccmnc, sizeof(profile->operator_mccmnc), option(context, four_g_modem, "operator_mccmnc", "")) ||
+		!copy_option(profile->power_control, sizeof(profile->power_control), option(context, four_g_modem, "power_control", "none")) ||
+		!copy_option(profile->power_path, sizeof(profile->power_path), option(context, four_g_modem, "power_path", "/sys/class/gpio/modem_power/value")))
 		goto out;
 	profile->redial_after_apply = strcmp(option(context, four_g_modem, "redial_after_apply", "0"), "0") != 0;
 	success = true;
@@ -1592,7 +1598,13 @@ static bool should_rescan_sim(void)
 	return read_status_last("csq", csq, sizeof(csq)) && strcmp(csq, "99") == 0;
 }
 
-static bool rescan_sim(int fd)
+static void renew_mobile_lease(void)
+{
+	/* IT-694 assigns the PDP address to usb0; CFUN changes that address. */
+	(void)system("/sbin/ifup wwan_4g >/dev/null 2>&1");
+}
+
+static bool rescan_sim_cfun(int fd)
 {
 	struct at_result result;
 
@@ -1603,6 +1615,7 @@ static bool rescan_sim(int fd)
 	if (!run_at_command(fd, "AT+CFUN=1\r", AT_TIMEOUT_MS, &result))
 		return false;
 	(void)interruptible_sleep_ms(SIM_RESCAN_CFUN_ON_MS);
+	renew_mobile_lease();
 	return true;
 }
 
@@ -1644,7 +1657,7 @@ static bool execute_command(const struct modem_profile *profile, const char *act
 		if (success)
 			printf("modem reconnecting\n");
 	} else if (strcmp(action, "rescan-sim") == 0) {
-		success = rescan_sim(fd);
+		success = rescan_sim_cfun(fd);
 		if (success)
 			printf("SIM rescan radio cycle completed on %s\n", profile->port);
 	} else if (strcmp(action, "at") == 0) {
