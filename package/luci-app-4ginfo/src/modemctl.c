@@ -31,6 +31,10 @@
 #define AT_COMMAND_MAX 256U
 #define AT_TIMEOUT_MS 2500
 #define AT_OPTIONAL_TIMEOUT_MS 900
+#define SIM_RESCAN_GRACE_MS 15000
+#define SIM_RESCAN_COOLDOWN_MS 45000
+#define SIM_RESCAN_CFUN_OFF_MS 3000
+#define SIM_RESCAN_CFUN_ON_MS 5000
 
 struct modem_profile {
 	char port[128];
@@ -878,6 +882,13 @@ static void parse_registration(FILE *status, const char *prefix, const char *res
 	}
 }
 
+static bool sim_absent_response(const char *response)
+{
+	return response != NULL &&
+		(strstr(response, "+CME ERROR: 10") != NULL ||
+		strstr(response, "+CME ERROR: 13") != NULL);
+}
+
 static void parse_probe_result(FILE *status, const char *label, const struct at_result *result)
 {
 	const char *value;
@@ -910,7 +921,10 @@ static void parse_probe_result(FILE *status, const char *label, const struct at_
 		else
 			write_response_value(status, "iccid", result);
 	} else if (strcmp(label, "sim") == 0) {
-		if (value_after_prefix(result->response, "+CPIN:", text, sizeof(text))) {
+		if (sim_absent_response(result->response)) {
+			write_value(status, "sim_state_name", "NOT INSERTED");
+			write_value(status, "sim_state", "3");
+		} else if (value_after_prefix(result->response, "+CPIN:", text, sizeof(text))) {
 			const char *state = "1";
 
 			write_value(status, "sim_state_name", text);
@@ -1365,10 +1379,18 @@ static bool probe_modem(const struct modem_profile *profile, int fd)
 				command_ok = true;
 				break;
 			}
+			if (strcmp(commands[index].label, "sim") == 0 && sim_absent_response(result.response))
+				break;
 		}
 		if (!command_ok) {
-			fprintf(raw, "[%s] %s\n<unsupported or timeout>\n\n", commands[index].label, used_command);
-			write_value(status, commands[index].label, "unsupported");
+			if (result.response[0] != '\0')
+				fprintf(raw, "[%s] %s\n%s\n", commands[index].label, used_command, result.response);
+			else
+				fprintf(raw, "[%s] %s\n<unsupported or timeout>\n\n", commands[index].label, used_command);
+			if (strcmp(commands[index].label, "sim") == 0 && result.response[0] != '\0')
+				parse_probe_result(status, commands[index].label, &result);
+			else
+				write_value(status, commands[index].label, "unsupported");
 			if (commands[index].required)
 				base_ok = false;
 			continue;
@@ -1498,6 +1520,92 @@ static bool valid_custom_command(const char *command)
 	return true;
 }
 
+static bool interruptible_sleep_ms(int timeout_ms)
+{
+	int64_t deadline = monotonic_milliseconds() + timeout_ms;
+
+	while (!monitor_stop) {
+		struct timespec wait;
+		int64_t remaining = deadline - monotonic_milliseconds();
+
+		if (remaining <= 0)
+			return true;
+		if (remaining > 1000)
+			remaining = 1000;
+		wait.tv_sec = remaining / 1000;
+		wait.tv_nsec = (remaining % 1000) * 1000000L;
+		(void)nanosleep(&wait, NULL);
+	}
+	return false;
+}
+
+static bool read_status_last(const char *key, char *destination, size_t capacity)
+{
+	FILE *status = fopen(DETAIL_STATUS, "r");
+	char line[1024];
+	bool found = false;
+
+	if (destination == NULL || capacity == 0U)
+		return false;
+	destination[0] = '\0';
+	if (status == NULL)
+		return false;
+	while (fgets(line, sizeof(line), status) != NULL) {
+		char *separator = strchr(line, '=');
+		size_t key_length;
+
+		if (separator == NULL)
+			continue;
+		key_length = (size_t)(separator - line);
+		if (key_length != strlen(key) || memcmp(line, key, key_length) != 0)
+			continue;
+		trim_copy(destination, capacity, separator + 1, strlen(separator + 1));
+		found = true;
+	}
+	(void)fclose(status);
+	return found && destination[0] != '\0';
+}
+
+static bool sim_ready_status(void)
+{
+	char name[64];
+	char state[16];
+
+	if (read_status_last("sim_state_name", name, sizeof(name)) && strstr(name, "READY") != NULL)
+		return true;
+	return read_status_last("sim_state", state, sizeof(state)) && strcmp(state, "2") == 0;
+}
+
+static bool should_rescan_sim(void)
+{
+	char state[16];
+	char name[64];
+	char csq[16];
+
+	if (sim_ready_status())
+		return false;
+	if (read_status_last("sim_state", state, sizeof(state)) && strcmp(state, "3") == 0)
+		return true;
+	if (read_status_last("sim_state_name", name, sizeof(name)) &&
+		(strstr(name, "NOT INSERTED") != NULL || strstr(name, "NOT READY") != NULL))
+		return true;
+	return read_status_last("csq", csq, sizeof(csq)) && strcmp(csq, "99") == 0;
+}
+
+static bool rescan_sim(int fd)
+{
+	struct at_result result;
+
+	if (!run_at_command(fd, "AT+CFUN=0\r", AT_TIMEOUT_MS, &result))
+		return false;
+	if (!interruptible_sleep_ms(SIM_RESCAN_CFUN_OFF_MS))
+		return false;
+	if (!run_at_command(fd, "AT+CFUN=1\r", AT_TIMEOUT_MS, &result))
+		return false;
+	(void)interruptible_sleep_ms(SIM_RESCAN_CFUN_ON_MS);
+	return true;
+}
+
 static bool execute_command(const struct modem_profile *profile, const char *action,
 	const char *custom_command)
 {
@@ -1535,6 +1643,10 @@ static bool execute_command(const struct modem_profile *profile, const char *act
 		success = run_at_command(fd, "AT+CFUN=1,1\r", AT_TIMEOUT_MS, &result);
 		if (success)
 			printf("modem reconnecting\n");
+	} else if (strcmp(action, "rescan-sim") == 0) {
+		success = rescan_sim(fd);
+		if (success)
+			printf("SIM rescan radio cycle completed on %s\n", profile->port);
 	} else if (strcmp(action, "at") == 0) {
 		snprintf(command, sizeof(command), "%s\r", custom_command);
 		success = run_at_command(fd, command, AT_TIMEOUT_MS, &result);
@@ -1545,7 +1657,7 @@ static bool execute_command(const struct modem_profile *profile, const char *act
 		if (success)
 			printf(profile->redial_after_apply ? "mobile profile applied; modem reconnecting\n" : "mobile profile applied\n");
 	}
-	if (!success && strcmp(action, "probe") != 0)
+	if (!success && strcmp(action, "probe") != 0 && strcmp(action, "rescan-sim") != 0)
 		fprintf(stderr, "modem rejected the requested command\n");
 out:
 	if (fd >= 0) {
@@ -1565,6 +1677,9 @@ static void stop_monitor(int signal_number)
 
 static int monitor_modem(const struct modem_profile *profile, unsigned interval)
 {
+	int64_t last_rescan_ms = 0;
+	int64_t sim_missing_since_ms = 0;
+
 	monitor_stop = 0;
 	signal(SIGTERM, stop_monitor);
 	signal(SIGINT, stop_monitor);
@@ -1572,7 +1687,30 @@ static int monitor_modem(const struct modem_profile *profile, unsigned interval)
 	if (interval == 0U || interval > 3600U)
 		interval = 30U;
 	while (!monitor_stop) {
+		int64_t now_ms;
+
 		(void)execute_command(profile, "probe", NULL);
+		now_ms = monotonic_milliseconds();
+		if (sim_ready_status()) {
+			sim_missing_since_ms = 0;
+		} else if (should_rescan_sim()) {
+			if (sim_missing_since_ms == 0)
+				sim_missing_since_ms = now_ms;
+			if (now_ms - sim_missing_since_ms >= SIM_RESCAN_GRACE_MS &&
+				now_ms - last_rescan_ms >= SIM_RESCAN_COOLDOWN_MS) {
+				printf("SIM not ready on %s; cycling radio to rescan the card\n",
+					profile->port);
+				fflush(stdout);
+				last_rescan_ms = now_ms;
+				(void)execute_command(profile, "rescan-sim", NULL);
+				if (!monitor_stop)
+					(void)execute_command(profile, "probe", NULL);
+				if (sim_ready_status())
+					sim_missing_since_ms = 0;
+			}
+		} else {
+			sim_missing_since_ms = 0;
+		}
 		for (unsigned elapsed = 0U; elapsed < interval && !monitor_stop; ++elapsed)
 			sleep(1U);
 	}
