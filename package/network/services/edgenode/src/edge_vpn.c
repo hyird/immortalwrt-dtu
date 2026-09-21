@@ -472,6 +472,7 @@ static bool configure_network(const char *private_key, const char *edge_address,
     if (success)
         success = set_uci_option(context, package, interface, "proto", "wireguard") &&
                   set_uci_option(context, package, interface, "private_key", private_key) &&
+                  set_uci_option(context, package, interface, "mtu", "1280") &&
                   add_uci_list(context, package, interface, "addresses", edge_address);
     if (success)
         success = add_named_section(context, package, "wireguard_" EDGE_VPN_INTERFACE,
@@ -886,8 +887,14 @@ bool edge_vpn_sample(uint64_t now_ms, iot_edge_v1_TcpTraffic *report) {
         return false;
     }
     if (!vpn_traffic.pending) {
-        vpn_traffic.report.upload_bytes = tx >= vpn_traffic.ack_tx ? tx - vpn_traffic.ack_tx : 0;
-        vpn_traffic.report.download_bytes = rx >= vpn_traffic.ack_rx ? rx - vpn_traffic.ack_rx : 0;
+        const uint64_t upload = tx >= vpn_traffic.ack_tx ? tx - vpn_traffic.ack_tx : 0;
+        const uint64_t download = rx >= vpn_traffic.ack_rx ? rx - vpn_traffic.ack_rx : 0;
+        if (upload == 0 && download == 0) {
+            memset(report, 0, sizeof(*report));
+            return false;
+        }
+        vpn_traffic.report.upload_bytes = upload;
+        vpn_traffic.report.download_bytes = download;
         vpn_traffic.report.interval_ms =
             now_ms >= vpn_traffic.ack_ms ? now_ms - vpn_traffic.ack_ms : 0;
         vpn_traffic.report.sample_id = ++vpn_traffic.sequence;

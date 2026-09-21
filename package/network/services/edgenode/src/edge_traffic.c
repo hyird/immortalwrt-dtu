@@ -369,11 +369,17 @@ void edge_traffic_sample(edge_traffic *traffic, size_t platform, uint64_t now_ms
     }
     edge_traffic_window *window = &traffic->windows[platform];
     if (!window->pending) {
+        const uint64_t upload = window->upload - window->acknowledged_upload;
+        const uint64_t download = window->download - window->acknowledged_download;
+        if (upload == 0 && download == 0) {
+            memset(report, 0, sizeof(*report));
+            return;
+        }
         window->sampled_upload = window->upload;
         window->sampled_download = window->download;
         window->sampled_at_ms = now_ms;
-        window->report.upload_bytes = window->upload - window->acknowledged_upload;
-        window->report.download_bytes = window->download - window->acknowledged_download;
+        window->report.upload_bytes = upload;
+        window->report.download_bytes = download;
         window->report.interval_ms = now_ms >= window->acknowledged_at_ms
             ? now_ms - window->acknowledged_at_ms : 0;
         window->report.sample_id = ++window->sequence;

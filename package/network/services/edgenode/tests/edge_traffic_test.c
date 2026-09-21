@@ -106,6 +106,9 @@ int main(void) {
     edge_traffic_ack(&traffic, 0, 1);
     assert(traffic.windows[0].pending); /* Duplicate old ACK cannot clear new sample. */
     edge_traffic_ack(&traffic, 0, 2);
+    edge_traffic_sample(&traffic, 0, 900000, &report);
+    assert(report.sample_id == 0 && report.upload_bytes == 0 && report.download_bytes == 0);
+    assert(!traffic.windows[0].pending);
 
     /* Reconnect keeps the old flow until its final destroy event, including FIN/ACK. */
     edge_traffic_flow reconnect = first;

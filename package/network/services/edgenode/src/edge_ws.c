@@ -1680,9 +1680,9 @@ static void heartbeat_timer(struct ev_loop *loop, struct ev_timer *timer, int ev
         return;
     envelope->which_payload = iot_edge_v1_Envelope_heartbeat_tag;
     iot_edge_v1_Heartbeat *heartbeat = &envelope->payload.heartbeat;
-    heartbeat->has_tcp_traffic = true;
     edge_traffic_sample(&session->app->traffic,
         (size_t)(session - session->app->sessions), monotonic_ms(), &heartbeat->tcp_traffic);
+    heartbeat->has_tcp_traffic = heartbeat->tcp_traffic.sample_id != 0U;
     heartbeat->has_vpn_traffic =
         edge_vpn_sample(monotonic_ms(), &heartbeat->vpn_traffic);
     heartbeat->signal_csq = 99U;

@@ -29,6 +29,8 @@ int main(void) {
     char *source = read_source();
     require(strstr(source, "\"persistent_keepalive\", \"120\"") != NULL,
             "WireGuard keepalive is not 120 seconds");
+    require(strstr(source, "\"mtu\", \"1280\"") != NULL,
+            "WireGuard MTU is not 1280");
     require(strstr(source, "#define EDGE_VPN_INTERFACE \"wg\"") != NULL,
             "managed interface is not named wg");
     require(strstr(source,

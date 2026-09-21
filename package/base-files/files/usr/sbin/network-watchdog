@@ -91,6 +91,26 @@ uptime_seconds() {
 	printf '%s\n' "${uptime}"
 }
 
+# 管理通道已通时不再 ICMP 探测公网；半开连接用最近入站年龄判断。
+platform_path_alive() {
+	[ -r /tmp/edgenode/status.json ] || return 1
+	awk '
+		BEGIN { RS="{"; FS="," }
+		{
+			open=0; age=""
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /"websocketOpen":true/) open=1
+				if (match($i, /"lastInboundAgeSec":[0-9]+/)) {
+					split($i, a, ":")
+					age=a[2]
+				}
+			}
+			if (open && age != "" && age + 0 < 360) found=1
+		}
+		END { exit found ? 0 : 1 }
+	' /tmp/edgenode/status.json
+}
+
 until last_online="$(uptime_seconds)"; do
 	sleep "${CHECK_INTERVAL}"
 done
@@ -103,21 +123,14 @@ while :; do
 		continue
 	fi
 
-	ping -c 1 -W "${PING_TIMEOUT}" "${PRIMARY_TARGET}" >/dev/null 2>&1 &
-	primary_pid=$!
-	ping -c 1 -W "${PING_TIMEOUT}" "${SECONDARY_TARGET}" >/dev/null 2>&1 &
-	secondary_pid=$!
-
-	primary_online=0
-	secondary_online=0
-	wait "${primary_pid}" && primary_online=1
-	wait "${secondary_pid}" && secondary_online=1
-
 	if ! now="$(uptime_seconds)"; then
 		sleep "${CHECK_INTERVAL}"
 		continue
 	fi
-	if [ "${primary_online}" -eq 1 ] || [ "${secondary_online}" -eq 1 ]; then
+	if platform_path_alive; then
+		last_online="${now}"
+	elif ping -c 1 -W "${PING_TIMEOUT}" "${PRIMARY_TARGET}" >/dev/null 2>&1 ||
+	     ping -c 1 -W "${PING_TIMEOUT}" "${SECONDARY_TARGET}" >/dev/null 2>&1; then
 		last_online="${now}"
 	elif [ $((now - last_online)) -ge "${OFFLINE_TIMEOUT}" ]; then
 		logger -t network-watchdog \
