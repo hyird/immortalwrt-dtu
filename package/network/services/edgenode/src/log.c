@@ -20,9 +20,6 @@
 #define EDGE_LOG_MAX_FILE_BYTES (256U * 1024U)
 #define EDGE_LOG_MAX_FILES 16U
 #define EDGE_LOG_FREE_PERCENT 20U
-#define EDGE_LOG_SYSTEM_SOURCE "system"
-#define EDGE_LOGREAD_COMMAND "/sbin/logread -l 48 2>/dev/null"
-
 #define EDGE_LOG_LEVEL_PATH EDGE_LOG_ROOT "/log-level"
 #define EDGE_LOG_LEVEL_TEMP EDGE_LOG_ROOT "/log-level.tmp"
 #define EDGE_LOG_LEASE_MS 300000LL
@@ -240,145 +237,6 @@ static bool matches(const iot_edge_v1_LogRequest *request, const char *level,
   if (request->source[0] != '\0' && strcmp(source, request->source) != 0)
     return false;
   return true;
-}
-
-static int month_index(const char *month) {
-  static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-  for (int index = 0; index < 12; ++index)
-    if (strcmp(month, months[index]) == 0)
-      return index;
-  return -1;
-}
-
-static int64_t system_log_time(const char *line, size_t *message_offset) {
-  char weekday[4] = {0};
-  char month[4] = {0};
-  int day = 0;
-  int hour = 0;
-  int minute = 0;
-  int second = 0;
-  int year = 0;
-  int consumed = 0;
-  if (line == NULL ||
-      sscanf(line, "%3s %3s %d %d:%d:%d %d%n", weekday, month, &day, &hour,
-             &minute, &second, &year, &consumed) != 7)
-    return now_ms();
-  const int month_value = month_index(month);
-  if (month_value < 0 || year < 1970 || day < 1 || day > 31 || hour < 0 ||
-      hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
-    return now_ms();
-  struct tm value = {0};
-  value.tm_year = year - 1900;
-  value.tm_mon = month_value;
-  value.tm_mday = day;
-  value.tm_hour = hour;
-  value.tm_min = minute;
-  value.tm_sec = second;
-  value.tm_isdst = -1;
-  const time_t timestamp = mktime(&value);
-  if (timestamp == (time_t)-1)
-    return now_ms();
-  while (line[consumed] == ' ' || line[consumed] == '\t')
-    ++consumed;
-  if (message_offset != NULL)
-    *message_offset = (size_t)consumed;
-  return (int64_t)timestamp * 1000;
-}
-
-static const char *system_log_level(const char *message) {
-  if (message == NULL)
-    return "info";
-  const char *token_end = strchr(message, ' ');
-  const char *dot = strchr(message, '.');
-  if (dot == NULL || token_end == NULL || dot >= token_end)
-    return "info";
-  const size_t size = (size_t)(token_end - dot - 1);
-  const char *level = dot + 1;
-  if (size == 5U && strncmp(level, "debug", size) == 0)
-    return "debug";
-  if ((size == 4U && strncmp(level, "warn", size) == 0) ||
-      (size == 7U && strncmp(level, "warning", size) == 0))
-    return "warn";
-  if ((size == 3U && strncmp(level, "err", size) == 0) ||
-      (size == 4U && strncmp(level, "crit", size) == 0) ||
-      (size == 5U && strncmp(level, "alert", size) == 0) ||
-      (size == 5U && strncmp(level, "emerg", size) == 0))
-    return "error";
-  return "info";
-}
-
-static void append_system_line(char *line,
-                               const iot_edge_v1_LogRequest *request,
-                               iot_edge_v1_LogResult *result) {
-  if (line == NULL || result->lines_count >= EDGE_LOG_RESULT_LIMIT)
-    return;
-  const size_t length = strcspn(line, "\r\n");
-  line[length] = '\0';
-  size_t offset = 0U;
-  const int64_t timestamp = system_log_time(line, &offset);
-  const char *message = line + offset;
-  const char *level = system_log_level(message);
-  if (request->level[0] != '\0' && strcmp(request->level, level) != 0)
-    return;
-  iot_edge_v1_LogLine *output = &result->lines[result->lines_count++];
-  output->time_ms = timestamp;
-  copy_text(output->level, sizeof(output->level), level);
-  copy_text(output->source, sizeof(output->source), EDGE_LOG_SYSTEM_SOURCE);
-  const size_t message_length = strlen(message);
-  const size_t first = message_length < sizeof(output->message) - 1U
-                           ? message_length
-                           : sizeof(output->message) - 1U;
-  memcpy(output->message, message, first);
-  output->message[first] = '\0';
-  if (message_length > first)
-    copy_text(output->detail, sizeof(output->detail), message + first);
-}
-
-static void read_system_logs(const iot_edge_v1_LogRequest *request,
-                             iot_edge_v1_LogResult *result, uint32_t limit) {
-  const char *command = EDGE_LOGREAD_COMMAND;
-#ifdef EDGENODE_LOG_TEST
-  const char *test_command = getenv("EDGENODE_LOGREAD_COMMAND");
-  if (test_command != NULL && test_command[0] != '\0')
-    command = test_command;
-#endif
-  FILE *input = popen(command, "r");
-  if (input == NULL) {
-    result->success = false;
-    copy_text(result->message, sizeof(result->message), "logread unavailable");
-    return;
-  }
-  char line[512];
-  while (result->lines_count < EDGE_LOG_RESULT_LIMIT &&
-         fgets(line, sizeof(line), input) != NULL) {
-    const bool complete = strchr(line, '\n') != NULL;
-    append_system_line(line, request, result);
-    if (!complete) {
-      int value = 0;
-      while ((value = fgetc(input)) != '\n' && value != EOF) {
-      }
-    }
-  }
-  const int status = pclose(input);
-  if (status != 0 && result->lines_count == 0U) {
-    result->success = false;
-    copy_text(result->message, sizeof(result->message), "logread failed");
-    return;
-  }
-  const pb_size_t available = result->lines_count;
-  const pb_size_t keep = available < limit ? available : (pb_size_t)limit;
-  const pb_size_t start = available - keep;
-  if (start != 0U)
-    memmove(result->lines, result->lines + start,
-            (size_t)keep * sizeof(result->lines[0]));
-  result->lines_count = keep;
-  for (pb_size_t left = 0U, right = keep == 0U ? 0U : keep - 1U; left < right;
-       ++left, --right) {
-    iot_edge_v1_LogLine temporary = result->lines[left];
-    result->lines[left] = result->lines[right];
-    result->lines[right] = temporary;
-  }
 }
 
 static void append_line(char *line, const iot_edge_v1_LogRequest *request,
@@ -601,10 +459,6 @@ void edge_log_query(const iot_edge_v1_LogRequest *request,
       request->limit == 0U || request->limit > EDGE_LOG_RESULT_LIMIT
           ? EDGE_LOG_RESULT_LIMIT
           : request->limit;
-  if (strcmp(request->source, EDGE_LOG_SYSTEM_SOURCE) == 0) {
-    read_system_logs(request, result, limit);
-    return;
-  }
   for (unsigned index = 0U;
        index < EDGE_LOG_MAX_FILES && result->lines_count < limit; ++index) {
     char path[128];

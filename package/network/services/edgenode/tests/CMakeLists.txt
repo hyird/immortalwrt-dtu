@@ -195,7 +195,7 @@ if(UNIX)
         edge_log_test.c
         "${EDGENODE_ROOT}/src/log.c"
         "${EDGENODE_ROOT}/src/edge_protocol.c")
-    target_compile_definitions(edge_log_test PRIVATE EDGENODE_LOG_TEST=1
+    target_compile_definitions(edge_log_test PRIVATE
         clock_gettime=edge_log_test_clock_gettime)
     target_compile_options(edge_log_test PRIVATE -UNDEBUG)
     target_include_directories(edge_log_test PRIVATE "${EDGENODE_ROOT}/src")
