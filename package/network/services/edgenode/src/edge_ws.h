@@ -78,6 +78,8 @@ typedef struct {
     bool terminal_output_sent;
     bool terminal_input_ack_pending;
     bool firmware_operation_active;
+    bool firmware_traffic_flush_pending;
+    bool firmware_traffic_flush_followup;
     bool modem_result_pending;
     bool modem_result_received;
 } edge_ws_session;

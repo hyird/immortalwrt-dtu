@@ -24,6 +24,8 @@
 #define FIRMWARE_CHUNK_RETRY_MS 5000U
 #define FIRMWARE_TRANSFER_TIMEOUT_MS 1800000U
 #define FIRMWARE_MAX_SIZE (128U * 1024U * 1024U)
+#define FIRMWARE_TRAFFIC_FLUSHED "/tmp/edgenode/firmware-traffic-flushed"
+#define FIRMWARE_TRAFFIC_FLUSH_TIMEOUT_MS 10000U
 
 typedef struct {
     uint32_t magic;
@@ -249,6 +251,7 @@ static void firmware_child(const uint8_t platform_id[16],
         unlink(FIRMWARE_IMAGE);
         _exit(1);
     }
+    (void)edge_firmware_wait_traffic_flush(FIRMWARE_TRAFFIC_FLUSH_TIMEOUT_MS);
     (void)write_status(platform_id, request_id,
                        iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FLASHING,
                        "firmware verified; sysupgrade is starting", request->size_bytes,
@@ -304,6 +307,7 @@ bool edge_firmware_start(const uint8_t platform_id[16],
         set_error(error, error_size, "another firmware update is active");
         return false;
     }
+    edge_firmware_clear_traffic_flush();
     const int lock = open(FIRMWARE_LOCK, O_WRONLY | O_CREAT, 0600);
     if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0) {
         if (lock >= 0)
@@ -522,4 +526,29 @@ bool edge_firmware_has_status(const uint8_t platform_id[16]) {
     char path[96];
     status_path(platform_id, path);
     return access(path, F_OK) == 0;
+}
+
+void edge_firmware_clear_traffic_flush(void) {
+    unlink(FIRMWARE_TRAFFIC_FLUSHED);
+}
+
+void edge_firmware_mark_traffic_flushed(void) {
+    const int output = open(FIRMWARE_TRAFFIC_FLUSHED, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (output < 0)
+        return;
+    (void)fsync(output);
+    close(output);
+}
+
+bool edge_firmware_wait_traffic_flush(uint32_t timeout_ms) {
+    const uint64_t started = monotonic_milliseconds();
+    while (access(FIRMWARE_TRAFFIC_FLUSHED, F_OK) != 0) {
+        const uint64_t now = monotonic_milliseconds();
+        if (timeout_ms == 0U || now < started || now - started >= timeout_ms)
+            return false;
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = 100000000L};
+        while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {
+        }
+    }
+    return true;
 }

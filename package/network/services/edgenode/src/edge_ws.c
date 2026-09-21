@@ -1182,6 +1182,59 @@ static void handle_network_config(edge_ws_session *session,
     }
 }
 
+static bool send_heartbeat(edge_ws_session *session) {
+    iot_edge_v1_Envelope *envelope = &session->app->envelope;
+    if (!init_envelope(session, envelope))
+        return false;
+    envelope->which_payload = iot_edge_v1_Envelope_heartbeat_tag;
+    iot_edge_v1_Heartbeat *heartbeat = &envelope->payload.heartbeat;
+    edge_traffic_sample(&session->app->traffic,
+        (size_t)(session - session->app->sessions), monotonic_ms(), &heartbeat->tcp_traffic);
+    heartbeat->has_tcp_traffic = heartbeat->tcp_traffic.sample_id != 0U;
+    heartbeat->has_vpn_traffic =
+        edge_vpn_sample(monotonic_ms(), &heartbeat->vpn_traffic);
+    heartbeat->signal_csq = 99U;
+    heartbeat->signal_rssi_dbm = -1;
+    heartbeat->mobile_registration_status = -1;
+    heartbeat->supports_modem_control =
+        session->config->bootstrap && session->app->config->modem_at_port[0] != '\0';
+    safe_copy(heartbeat->log_level, sizeof(heartbeat->log_level), edge_log_level());
+    edge_modem_info modem;
+    bool modem_available = false;
+    if (edge_modem_read_status(session->app->config->modem_status_path,
+                               &modem, &modem_available)) {
+        heartbeat->modem_available = modem_available;
+        safe_copy(heartbeat->iccid, sizeof(heartbeat->iccid), modem.iccid);
+        heartbeat->signal_csq = (uint32_t)modem.csq;
+        heartbeat->signal_rssi_dbm = modem.rssi_dbm;
+        heartbeat->signal_percent = modem.signal_percent;
+        heartbeat->mobile_registered = modem.registered;
+        heartbeat->mobile_registration_status = modem.registration_status;
+        heartbeat->sim_state = modem.sim_state;
+        safe_copy(heartbeat->apn, sizeof(heartbeat->apn), modem.apn);
+        safe_copy(heartbeat->mobile_operator, sizeof(heartbeat->mobile_operator),
+                  modem.mobile_operator);
+        heartbeat->mobile_connected = modem.connected;
+        safe_copy(heartbeat->mobile_ipv4, sizeof(heartbeat->mobile_ipv4),
+                  modem.mobile_ipv4);
+    }
+    struct sysinfo info;
+    if (sysinfo(&info) == 0)
+        heartbeat->uptime_sec = (uint64_t)info.uptime;
+    heartbeat->active_config_version = session->active_revision;
+    heartbeat->managed_endpoint_count = session->runtime_config.endpoint_count;
+    heartbeat->managed_device_count = session->runtime_config.device_count;
+    edge_spool_maintain(&session->spool);
+    heartbeat->outbox_records = session->spool.outbox.count;
+    heartbeat->outbox_bytes = session->spool.outbox.bytes;
+    if (!send_envelope(session, envelope))
+        return false;
+    session->last_heartbeat_ms = monotonic_ms();
+    send_outbox_window(session);
+    report_network_rollback(session->app);
+    return true;
+}
+
 static void handle_firmware_update(edge_ws_session *session,
                                    const iot_edge_v1_FirmwareUpdateRequest *request) {
     uint8_t request_id[16] = {0};
@@ -1224,6 +1277,15 @@ static void handle_firmware_chunk(edge_ws_session *session,
         session->config->id, chunk, message, sizeof(message));
     if (result == EDGE_FIRMWARE_CHUNK_NEXT || result == EDGE_FIRMWARE_CHUNK_WAIT)
         (void)send_firmware_chunk_request(session, result == EDGE_FIRMWARE_CHUNK_NEXT);
+    if (result == EDGE_FIRMWARE_CHUNK_COMPLETE) {
+        session->firmware_traffic_flush_pending = true;
+        session->firmware_traffic_flush_followup = true;
+        if (!send_heartbeat(session)) {
+            edge_firmware_mark_traffic_flushed();
+            session->firmware_traffic_flush_pending = false;
+            session->firmware_traffic_flush_followup = false;
+        }
+    }
 }
 
 static void handle_modem_control(edge_ws_session *session,
@@ -1481,6 +1543,18 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
             send_capability_report(session, true);
         if (session->enrolled && request_device_status)
             send_device_status(session, true);
+        if (session->firmware_traffic_flush_pending) {
+            if (session->firmware_traffic_flush_followup) {
+                session->firmware_traffic_flush_followup = false;
+                if (!send_heartbeat(session)) {
+                    edge_firmware_mark_traffic_flushed();
+                    session->firmware_traffic_flush_pending = false;
+                }
+            } else {
+                edge_firmware_mark_traffic_flushed();
+                session->firmware_traffic_flush_pending = false;
+            }
+        }
         break;
     }
     case iot_edge_v1_Envelope_config_begin_tag:
@@ -1674,55 +1748,7 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
 static void heartbeat_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
     (void)loop;
     (void)events;
-    edge_ws_session *session = session_from_heartbeat(timer);
-    iot_edge_v1_Envelope *envelope = &session->app->envelope;
-    if (!init_envelope(session, envelope))
-        return;
-    envelope->which_payload = iot_edge_v1_Envelope_heartbeat_tag;
-    iot_edge_v1_Heartbeat *heartbeat = &envelope->payload.heartbeat;
-    edge_traffic_sample(&session->app->traffic,
-        (size_t)(session - session->app->sessions), monotonic_ms(), &heartbeat->tcp_traffic);
-    heartbeat->has_tcp_traffic = heartbeat->tcp_traffic.sample_id != 0U;
-    heartbeat->has_vpn_traffic =
-        edge_vpn_sample(monotonic_ms(), &heartbeat->vpn_traffic);
-    heartbeat->signal_csq = 99U;
-    heartbeat->signal_rssi_dbm = -1;
-    heartbeat->mobile_registration_status = -1;
-    heartbeat->supports_modem_control =
-        session->config->bootstrap && session->app->config->modem_at_port[0] != '\0';
-    safe_copy(heartbeat->log_level, sizeof(heartbeat->log_level), edge_log_level());
-    edge_modem_info modem;
-    bool modem_available = false;
-    if (edge_modem_read_status(session->app->config->modem_status_path,
-                               &modem, &modem_available)) {
-        heartbeat->modem_available = modem_available;
-        safe_copy(heartbeat->iccid, sizeof(heartbeat->iccid), modem.iccid);
-        heartbeat->signal_csq = (uint32_t)modem.csq;
-        heartbeat->signal_rssi_dbm = modem.rssi_dbm;
-        heartbeat->signal_percent = modem.signal_percent;
-        heartbeat->mobile_registered = modem.registered;
-        heartbeat->mobile_registration_status = modem.registration_status;
-        heartbeat->sim_state = modem.sim_state;
-        safe_copy(heartbeat->apn, sizeof(heartbeat->apn), modem.apn);
-        safe_copy(heartbeat->mobile_operator, sizeof(heartbeat->mobile_operator),
-                  modem.mobile_operator);
-        heartbeat->mobile_connected = modem.connected;
-        safe_copy(heartbeat->mobile_ipv4, sizeof(heartbeat->mobile_ipv4),
-                  modem.mobile_ipv4);
-    }
-    struct sysinfo info;
-    if (sysinfo(&info) == 0)
-        heartbeat->uptime_sec = (uint64_t)info.uptime;
-    heartbeat->active_config_version = session->active_revision;
-    heartbeat->managed_endpoint_count = session->runtime_config.endpoint_count;
-    heartbeat->managed_device_count = session->runtime_config.device_count;
-    edge_spool_maintain(&session->spool);
-    heartbeat->outbox_records = session->spool.outbox.count;
-    heartbeat->outbox_bytes = session->spool.outbox.bytes;
-    if (send_envelope(session, envelope))
-        session->last_heartbeat_ms = monotonic_ms();
-    send_outbox_window(session);
-    report_network_rollback(session->app);
+    (void)send_heartbeat(session_from_heartbeat(timer));
 }
 
 static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {

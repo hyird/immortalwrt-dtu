@@ -32,3 +32,6 @@ bool edge_firmware_read_status(const uint8_t platform_id[16],
                                iot_edge_v1_FirmwareUpdateResult *result);
 bool edge_firmware_active(void);
 bool edge_firmware_has_status(const uint8_t platform_id[16]);
+void edge_firmware_clear_traffic_flush(void);
+void edge_firmware_mark_traffic_flushed(void);
+bool edge_firmware_wait_traffic_flush(uint32_t timeout_ms);
