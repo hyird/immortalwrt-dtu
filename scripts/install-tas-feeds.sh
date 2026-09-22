@@ -4,7 +4,7 @@ set -eu
 
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-# 官方 feeds 默认关闭 WebSocket 扩展。只调整构建开关，不复制依赖包或修改库源码。
+# 官方 feeds 默认关闭 WebSocket 扩展。调整构建开关并回移有来源的上游修复，不复制依赖包。
 patch_file="$PWD/scripts/libwebsockets-edgenode.patch"
 if patch --dry-run --forward -p1 -d feeds/packages < "$patch_file" >/dev/null 2>&1; then
     patch --forward -p1 -d feeds/packages < "$patch_file"
@@ -12,6 +12,16 @@ elif ! patch --dry-run --reverse -p1 -d feeds/packages < "$patch_file" >/dev/nul
     echo "libwebsockets feed recipe changed; review EdgeNode compression build options" >&2
     exit 1
 fi
+
+# 由 OpenWrt 标准 Prepare 阶段应用上游修复；遇到同名异内容补丁时拒绝覆盖。
+backport_source="$PWD/scripts/libwebsockets-pmd-final.patch"
+backport_target="feeds/packages/libs/libwebsockets/patches/950-edgenode-pmd-final.patch"
+if [ -e "$backport_target" ] && ! cmp -s "$backport_source" "$backport_target"; then
+    echo "libwebsockets backport differs; review before replacing" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "$backport_target")"
+cp "$backport_source" "$backport_target"
 
 # The feeds helper scans the current package tree before installing a feed
 # source. Seed every in-tree/feed package referenced by a selected package,

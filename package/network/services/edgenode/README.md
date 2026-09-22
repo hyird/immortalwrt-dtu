@@ -29,7 +29,11 @@ sole source location for the OpenWrt node implementation and its node-side tests
 ## WebSocket 压缩
 
 - 使用官方 feeds 的 `libwebsockets-mbedtls`，通过 `scripts/libwebsockets-edgenode.patch`
-  开启 zlib、permessage-deflate 和内置 libev；不修改库源码，不继续扩展 libuwsc。
+  开启 zlib、permessage-deflate 和内置 libev；不继续扩展 libuwsc。
+- `scripts/libwebsockets-pmd-final.patch` 回移上游 `f41c8e66b0989c60c22af68d294cea9509b7f9fa`
+  的 11 行库修复，解决 [#3660](https://github.com/warmcat/libwebsockets/issues/3660)
+  中解压未完成却提前报告消息结束的问题；由 feeds 安装脚本接入标准 OpenWrt 补丁阶段。
+  libwebsockets 包版本为 `4.5.8-r2`。未经修复的 `0.3.57-r2` 固件不应升级使用。
 - 通过 `LWS_SERVER_OPTION_LIBEV` 与 `foreign_loops` 复用 EdgeNode 已有事件循环；
   不另建线程或事件循环，不维护 external poll 桥接，也不增加定时调用 `lws_service` 的驱动。
   库负责自身 socket、TLS、压缩及超时调度，应用保持采集、ACK、重连等原有职责。
@@ -41,6 +45,15 @@ sole source location for the OpenWrt node implementation and its node-side tests
 - 每个平台拥有独立 LWS context、256 KiB 有界待发队列及接收缓冲；网络写入仅发生在 writable
   回调内。outbox 仍以应用 ACK 确认，入队不代表服务端确认，断线按原规则重放。
 - 不改变采集间隔、原始数据、协议字段、升级流、平台配置及 WS/WSS 证书校验策略。
+
+### 传输回归测试
+
+主机测试开启 `EDGENODE_WS_TRANSPORT_TESTS=ON`，需要带压缩和原生 libev 的 libwebsockets、
+libev 开发文件及 Python 3；交叉编译固件不能替代运行该测试。
+`ctest --test-dir <主机测试构建目录> -R '^edge_ws_transport$' --output-on-failure`
+验证真实 TCP 线帧：未协商压缩、禁止字典复用、允许字典复用，逐字节对比 level 9 编码，
+压缩分片重组、穿插 Ping/Pong、Close 不压缩和外部事件循环销毁边界。
+测试不访问生产平台，不刷机；WS 线帧通过不代表 WSS、应用 ACK/outbox 或实机验收完成。
 
 ## 全链路冗余抑制
 

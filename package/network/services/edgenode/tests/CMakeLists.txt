@@ -40,6 +40,24 @@ endif()
 
 enable_testing()
 
+option(EDGENODE_WS_TRANSPORT_TESTS "验证 libwebsockets 原生传输及压缩线帧" OFF)
+if(EDGENODE_WS_TRANSPORT_TESTS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    find_path(LWS_INCLUDE_DIR libwebsockets.h REQUIRED)
+    find_path(LWS_CONFIG_INCLUDE_DIR lws_config.h REQUIRED)
+    find_path(LIBEV_INCLUDE_DIR ev.h REQUIRED)
+    find_library(LWS_LIBRARY websockets REQUIRED)
+    find_library(LIBEV_LIBRARY ev REQUIRED)
+    add_executable(edge_ws_transport_fixture edge_ws_transport_fixture.c
+        "${EDGENODE_ROOT}/src/edge_ws_transport.c")
+    target_include_directories(edge_ws_transport_fixture PRIVATE
+        "${EDGENODE_ROOT}/src" "${LWS_INCLUDE_DIR}" "${LWS_CONFIG_INCLUDE_DIR}" "${LIBEV_INCLUDE_DIR}")
+    target_link_libraries(edge_ws_transport_fixture PRIVATE "${LWS_LIBRARY}" "${LIBEV_LIBRARY}")
+    add_test(NAME edge_ws_transport COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_LIST_DIR}/edge_ws_transport_test.py" "$<TARGET_FILE:edge_ws_transport_fixture>")
+    set_tests_properties(edge_ws_transport PROPERTIES TIMEOUT 45)
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(edge_traffic_test edge_traffic_test.c "${EDGENODE_ROOT}/src/edge_traffic.c")
     target_include_directories(edge_traffic_test PRIVATE "${EDGENODE_ROOT}/src")

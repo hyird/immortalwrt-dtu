@@ -1,5 +1,14 @@
 --- a/libs/libwebsockets/Makefile
 +++ b/libs/libwebsockets/Makefile
+@@ -9,7 +9,7 @@
+ 
+ PKG_NAME:=libwebsockets
+ PKG_VERSION:=4.5.8
+-PKG_RELEASE:=1
++PKG_RELEASE:=2
+ 
+ PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
+ PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 @@ -37,6 +37,10 @@
  CMAKE_OPTIONS += -DCMAKE_BUILD_TYPE=Release
  CMAKE_OPTIONS += -DLWS_WITH_EXTERNAL_POLL=ON
