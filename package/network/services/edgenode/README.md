@@ -28,6 +28,10 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 ## WebSocket 压缩
 
+- `0.3.59` 的种子配置开启 `CONFIG_MBEDTLS_ECP_DP_SECP521R1_ENABLED`，用于解析系统
+  CA 包中的 P-521 根证书；不关闭证书或主机名校验。`0.3.58` 存在 CA 包加载失败问题，
+  不应继续用于升级。主机验证中，原配置解析 120 张、失败 1 张；开启后 121 张全部成功。
+
 - 使用官方 feeds 的 `libwebsockets-mbedtls`，通过 `scripts/libwebsockets-edgenode.patch`
   开启 zlib、permessage-deflate 和内置 libev；不继续扩展 libuwsc。
 - `scripts/libwebsockets-pmd-final.patch` 回移上游 `f41c8e66b0989c60c22af68d294cea9509b7f9fa`
