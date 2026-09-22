@@ -30,6 +30,9 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 - 使用官方 feeds 的 `libwebsockets-mbedtls`，通过 `scripts/libwebsockets-edgenode.patch`
   开启 zlib、permessage-deflate 和内置 libev；不修改库源码，不继续扩展 libuwsc。
+- 通过 `LWS_SERVER_OPTION_LIBEV` 与 `foreign_loops` 复用 EdgeNode 已有事件循环；
+  不另建线程或事件循环，不维护 external poll 桥接，也不增加定时调用 `lws_service` 的驱动。
+  库负责自身 socket、TLS、压缩及超时调度，应用保持采集、ACK、重连等原有职责。
 - 握手提供标准 `permessage-deflate`，不要求 `no_context_takeover`；发送压缩级别为 9。
   字典仅在各平台各连接内部复用，断线销毁，无固定字典、定期轮换或业务消息白名单。
 - 压缩遵守服务端协商结果：服务端禁用上下文复用时不能擅自复用；未协商扩展则使用原协议。

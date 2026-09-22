@@ -111,7 +111,7 @@ bool edge_ws_transport_connect(edge_ws_transport *transport, struct ev_loop *loo
                                void (*received)(void *, void *, size_t, bool),
                                void (*closed)(void *, int, const char *)) {
     edge_ws_transport_destroy(transport);
-    if (!url || strlen(url) >= sizeof(transport->url) || !message_limit ||
+    if (!loop || !url || strlen(url) >= sizeof(transport->url) || !message_limit ||
         message_limit > INT_MAX || !opened || !received || !closed) return false;
     transport->user = user;
     transport->opened = opened;
@@ -129,6 +129,8 @@ bool edge_ws_transport_connect(edge_ws_transport *transport, struct ev_loop *loo
     bool ipv6 = strchr(address, ':') != NULL;
     if (snprintf(transport->host, sizeof(transport->host), ipv6 ? "[%s]:%d" : "%s:%d",
                  address, port) >= (int)sizeof(transport->host)) return false;
+    /* 借用 EdgeNode 已有 libev loop，LWS 不创建或销毁应用事件循环。
+     * TLS、压缩残留、socket watcher 与传输定时器均由原生 libev 后端驱动。 */
     void *loops[] = { loop };
     struct lws_context_creation_info info = {
         .port = CONTEXT_PORT_NO_LISTEN,
