@@ -16,8 +16,8 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 ## 平台连接节流
 
-- 关闭节点 libuwsc 周期 WS Ping，应用心跳遵守平台协商值，本平台协商为 300 秒。
-  固定版 libuwsc `3.3.5` 的 `uwsc_init(..., 0, ...)` 仅关闭周期 Ping，保留握手超时及对端 Ping 的 Pong。
+- libwebsockets 使用显式零空闲策略关闭周期 WS Ping，应用心跳遵守平台协商值，本平台协商为 300 秒。
+  保留握手超时及对端 Ping 的 Pong，不使用库默认的 40 秒 Ping。
   应用看门狗上限为 900 秒，正常心跳计时器运行时不另发应用 Ping。平台仍保留空闲时才触发的 WS 探活。
 - Hello 的可选 `supports_sparse_heartbeat` 声明新时序；服务端对未声明能力的旧固件
   保留原看门狗兼容时序。协议版本及既有字段编号不变，不能仅升级服务端便停掉旧节点保活。
@@ -25,6 +25,19 @@ sole source location for the OpenWrt node implementation and its node-side tests
   待审批响应结束初始握手等待，后续按五分钟心跳等待原连接获批。
 - WG `persistent_keepalive` 为 120 秒，重新应用 VPN 配置后生效；移动 NAT 的空闲入站
   可达性需要现场验证。采样、原始报文、单记录 ACK 和必要失败重传保持不变。
+
+## WebSocket 压缩
+
+- 使用官方 feeds 的 `libwebsockets-mbedtls`，通过 `scripts/libwebsockets-edgenode.patch`
+  开启 zlib、permessage-deflate 和内置 libev；不修改库源码，不继续扩展 libuwsc。
+- 握手提供标准 `permessage-deflate`，不要求 `no_context_takeover`；发送压缩级别为 9。
+  字典仅在各平台各连接内部复用，断线销毁，无固定字典、定期轮换或业务消息白名单。
+- 压缩遵守服务端协商结果：服务端禁用上下文复用时不能擅自复用；未协商扩展则使用原协议。
+  要实现双向 level 9 和跨消息复用，平台也必须支持对应协商及编码策略。
+- 所有业务消息经同一压缩路径；Ping/Pong/Close 控制帧不压缩。接收分片先有界重组再解码。
+- 每个平台拥有独立 LWS context、256 KiB 有界待发队列及接收缓冲；网络写入仅发生在 writable
+  回调内。outbox 仍以应用 ACK 确认，入队不代表服务端确认，断线按原规则重放。
+- 不改变采集间隔、原始数据、协议字段、升级流、平台配置及 WS/WSS 证书校验策略。
 
 ## 全链路冗余抑制
 
@@ -235,7 +248,7 @@ to the platform copy in `iot-engine/service/features/edge/edge.proto`.
 The OpenWrt SDK uses the committed nanopb C sources when compiling.
 The recipe downloads nanopb `0.4.9.1`, compiles only its three C runtime files, enables
 `-Os`, LTO, function sections, and linker garbage collection, and dynamically uses
-OpenWrt's mbedTLS-backed libuwsc.
+OpenWrt's mbedTLS-backed libwebsockets.
 
 The package, daemon, init service, UCI configuration, and runtime paths are all named
 `edgenode`.

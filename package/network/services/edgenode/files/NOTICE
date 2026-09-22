@@ -1,8 +1,9 @@
 edgenode embeds nanopb 0.4.9.1 under the zlib license.
 https://github.com/nanopb/nanopb
 
-The OpenWrt libuwsc dependency is provided under the MIT license.
-https://github.com/zhaojh329/libuwsc
+OpenWrt 的 libwebsockets 依赖使用 MIT 许可证，压缩依赖 zlib。
+https://github.com/warmcat/libwebsockets
+https://zlib.net/
 
 WSS platform connections and HTTPS firmware downloads validate the server
 certificate and hostname against OpenWrt's ca-bundle trust store.

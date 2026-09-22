@@ -4,7 +4,7 @@
 #include <sys/types.h>
 
 #include <ev.h>
-#include <uwsc/uwsc.h>
+#include "edge_ws_transport.h"
 
 #include "edge_config.h"
 #include "edge_acquisition.h"
@@ -18,7 +18,7 @@
 typedef struct edge_ws_app edge_ws_app;
 
 typedef struct {
-    struct uwsc_client client;
+    edge_ws_transport transport;
     struct ev_timer reconnect_timer;
     struct ev_timer liveness_timer;
     struct ev_timer heartbeat_timer;

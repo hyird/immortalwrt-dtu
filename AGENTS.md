@@ -51,10 +51,11 @@
 - Run Git, feed, configuration, and build commands as the unprivileged
   `openwrtbuild` user.
 - Update the configured feeds, then run `scripts/install-tas-feeds.sh`. This
-  installs only `libev`, `libuwsc`, `openssh-sftp-server`, `luci-light`, and
-  `luci-proto-wireguard` with their dependencies;
-  the helper pre-seeds the three source packages needed to keep the feeds scan
-  warning-free. Do not use `feeds install -a`; this targeted device tree
+  installs only `libev`, `libwebsockets`, `openssh-sftp-server`, `luci-light`, and
+  `luci-proto-wireguard` with their dependencies.
+  `scripts/libwebsockets-edgenode.patch` enables permessage-deflate, zlib and
+  built-in libev in the official feed recipe without forking library sources;
+  the helper pre-seeds required source packages to keep the feeds scan warning-free. Do not use `feeds install -a`; this targeted device tree
   intentionally omits dependencies of unused feed packages.
 - Copy `configs/tastek-mt76x8.config` to `.config`, run `make defconfig`, and perform
   a full firmware image build; a package-only compile is not a release build.

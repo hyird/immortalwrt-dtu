@@ -56,10 +56,6 @@ static void reset_terminal_flow(edge_ws_session *session) {
     session->terminal_input_ack_pending = false;
 }
 
-static edge_ws_session *session_from_client(struct uwsc_client *client) {
-    return (edge_ws_session *)((uint8_t *)client - offsetof(edge_ws_session, client));
-}
-
 static void traffic_ready(struct ev_loop *loop, struct ev_io *watcher, int events) {
     (void)loop;
     (void)events;
@@ -275,8 +271,7 @@ static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
         syslog(LOG_ERR, "cannot encode edge envelope: %s", error != NULL ? error : "closed");
         return false;
     }
-    const bool sent = session->client.send(&session->client, session->app->wire, wire_size,
-                                           UWSC_OP_BINARY) == 0;
+    const bool sent = edge_ws_transport_send(&session->transport, session->app->wire, wire_size);
     /* Telemetry may update the same device state as a standalone snapshot. */
     if (sent && envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag)
         edge_report_free(&session->device_snapshot);
@@ -314,7 +309,7 @@ static void send_dtu_status(edge_ws_session *session) {
     if (!session->websocket_open || !session->enrolled) return;
     for (size_t i = 0; i < session->dtu_status_count; ++i) {
         if (!session->dtu_status_dirty[i]) continue;
-        if (buffer_length(&session->client.wb) >= 65536) break;
+        if (session->transport.queued_bytes >= 65536) break;
         iot_edge_v1_Envelope *envelope = &session->app->envelope;
         if (!init_envelope(session, envelope)) return;
         envelope->which_payload = iot_edge_v1_Envelope_dtu_status_tag;
@@ -349,7 +344,7 @@ static void acquisition_serial(void *context, const uint8_t platform_id[16],
     session->serial_debug_sequence = event->sequence;
     if (!strcmp(event->kind, "closed")) session->serial_debug_active = false;
     // Sequence gaps identify discarded monitoring samples without blocking acquisition.
-    if (buffer_length(&session->client.wb) >= 65536) return;
+    if (session->transport.queued_bytes >= 65536) return;
     iot_edge_v1_Envelope *envelope = &app->envelope;
     if (!init_envelope(session, envelope)) return;
     envelope->which_payload = iot_edge_v1_Envelope_serial_debug_event_tag;
@@ -436,7 +431,7 @@ static void send_outbox_window(edge_ws_session *session) {
         return;
     while (session->spool.outbox.in_flight < EDGE_OUTBOX_WINDOW) {
         /* Do not start ACK deadlines for an unbounded local socket backlog. */
-        if (buffer_length(&session->client.wb) >= 65536) return;
+        if (session->transport.queued_bytes >= 65536) return;
         const edge_memory_message *message =
             edge_spool_outbox_next(&session->spool, monotonic_ms());
         if (message == NULL)
@@ -647,8 +642,11 @@ static void schedule_reconnect(edge_ws_session *session) {
     arm_reconnect_timer(session);
 }
 
-static void websocket_open(struct uwsc_client *client) {
-    edge_ws_session *session = session_from_client(client);
+static void websocket_open(void *user) {
+    edge_ws_session *session = user;
+    edge_traffic_register(&session->app->traffic,
+        (size_t)(session - session->app->sessions),
+        lws_get_socket_fd(session->transport.socket));
     session->websocket_open = true;
     session->last_liveness_probe_ms = monotonic_ms();
     edge_retry_transport_connected(&session->retry, monotonic_ms(),
@@ -659,7 +657,7 @@ static void websocket_open(struct uwsc_client *client) {
                  EDGE_LIVENESS_CHECK_INTERVAL_SEC);
     ev_timer_start(session->app->loop, &session->liveness_timer);
     if (!send_hello(session)) {
-        client->send_close(client, UWSC_CLOSE_STATUS_UNEXPECTED_CONDITION, "hello failed");
+        edge_ws_transport_close(&session->transport, 1011, "hello failed");
         return;
     }
     session->heartbeat_interval_sec = session->app->config->heartbeat_interval_sec;
@@ -669,19 +667,8 @@ static void websocket_open(struct uwsc_client *client) {
     edge_log_write("info", "ws", "platform connected", detail);
 }
 
-static void websocket_error(struct uwsc_client *client, int error, const char *message) {
-    edge_ws_session *session = session_from_client(client);
-    syslog(LOG_WARNING, "platform %s WebSocket error %d: %s", session->config->name,
-           error, message != NULL ? message : "");
-    char detail[128];
-    snprintf(detail, sizeof(detail), "platform=%s code=%d message=%s",
-             session->config->name, error, message != NULL ? message : "");
-    edge_log_write("warn", "ws", "platform websocket error", detail);
-    schedule_reconnect(session);
-}
-
-static void websocket_close(struct uwsc_client *client, int code, const char *reason) {
-    edge_ws_session *session = session_from_client(client);
+static void websocket_close(void *user, int code, const char *reason) {
+    edge_ws_session *session = user;
     syslog(LOG_WARNING, "platform %s WebSocket closed %d: %s", session->config->name,
            code, reason != NULL ? reason : "");
     char detail[128];
@@ -1473,8 +1460,8 @@ static void handle_terminal_open(edge_ws_session *session,
     ev_timer_start(session->app->loop, &session->terminal_timer);
 }
 
-static void websocket_message(struct uwsc_client *client, void *data, size_t size, bool binary) {
-    edge_ws_session *session = session_from_client(client);
+static void websocket_message(void *user, void *data, size_t size, bool binary) {
+    edge_ws_session *session = user;
     iot_edge_v1_Envelope *envelope = &session->app->envelope;
     const char *error = NULL;
     if (!binary || !edge_protocol_decode(data, size, envelope, &error) ||
@@ -1482,14 +1469,14 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         syslog(LOG_WARNING, "platform %s sent invalid nanopb envelope: %s",
                session->config->name, error != NULL ? error : "wrong origin");
         edge_protocol_release(envelope);
-        client->send_close(client, UWSC_CLOSE_STATUS_PROTOCOL_ERR, "invalid envelope");
+        edge_ws_transport_close(&session->transport, 1002, "invalid envelope");
         return;
     }
     // Telemetry flows node -> platform only. Release unexpected dynamic payloads
     // before any handler can reuse the shared output envelope.
     if (envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag) {
         edge_protocol_release(envelope);
-        client->send_close(client, UWSC_CLOSE_STATUS_PROTOCOL_ERR, "unexpected telemetry");
+        edge_ws_transport_close(&session->transport, 1002, "unexpected telemetry");
         return;
     }
     session->last_inbound_ms = monotonic_ms();
@@ -1502,7 +1489,7 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         if (ack->assigned_node_id.size != 16U ||
             ack->negotiated_protocol_version != EDGENODE_PROTOCOL_VERSION ||
             ack->session_epoch == 0U) {
-            client->send_close(client, UWSC_CLOSE_STATUS_PROTOCOL_ERR, "invalid hello ack");
+            edge_ws_transport_close(&session->transport, 1002, "invalid hello ack");
             return;
         }
         memcpy(session->node_id, ack->assigned_node_id.bytes, 16U);
@@ -1737,7 +1724,7 @@ static void websocket_message(struct uwsc_client *client, void *data, size_t siz
         break;
     case iot_edge_v1_Envelope_enrollment_rejected_tag:
         syslog(LOG_WARNING, "platform %s enrollment rejected", session->config->name);
-        client->send_close(client, UWSC_CLOSE_STATUS_POLICY_VIOLATION,
+        edge_ws_transport_close(&session->transport, 1008,
                            "enrollment rejected");
         break;
     default:
@@ -2033,22 +2020,14 @@ static void start_connection(edge_ws_session *session) {
     }
     syslog(LOG_INFO, "platform %s WebSocket connecting to %s", session->config->name,
            session->transport_url);
-    /* libuwsc 3.3.5: zero disables periodic WS Ping, not handshake timeout.
-     * Application Heartbeat/ACK and the local watchdog already provide liveness. */
-    if (uwsc_init(&session->client, session->app->loop, session->transport_url,
-                  0, NULL) != 0) {
+    if (!edge_ws_transport_connect(&session->transport, session->app->loop,
+                                    session->transport_url, EDGENODE_MAX_WS_MESSAGE,
+                                    session, websocket_open, websocket_message, websocket_close)) {
         syslog(LOG_WARNING, "platform %s WebSocket connect initialization failed",
                session->config->name);
         schedule_reconnect(session);
         return;
     }
-    edge_traffic_register(&session->app->traffic,
-        (size_t)(session - session->app->sessions), session->client.sock);
-    /* The packaged libuwsc requires the CA bundle and verifies the peer hostname. */
-    session->client.onopen = websocket_open;
-    session->client.onmessage = websocket_message;
-    session->client.onerror = websocket_error;
-    session->client.onclose = websocket_close;
     session->client_active = true;
     arm_reconnect_timer(session);
 }
@@ -2061,8 +2040,7 @@ static void reconnect_timer(struct ev_loop *loop, struct ev_timer *timer, int ev
     if (edge_retry_attempt_timed_out(&session->retry, current_ms)) {
         syslog(LOG_WARNING, "platform %s WebSocket connection attempt timed out",
                session->config->name);
-        if (session->client_active && session->client.free != NULL)
-            session->client.free(&session->client);
+        edge_ws_transport_destroy(&session->transport);
         session->client_active = false;
         schedule_reconnect(session);
         return;
@@ -2120,8 +2098,7 @@ static void liveness_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     snprintf(detail, sizeof(detail), "platform=%s reason=%s",
              session->config->name, reason);
     edge_log_write("warn", "ws", "platform session stalled", detail);
-    if (session->client_active && session->client.free != NULL)
-        session->client.free(&session->client);
+    edge_ws_transport_destroy(&session->transport);
     session->client_active = false;
     schedule_reconnect(session);
 }
@@ -2295,8 +2272,7 @@ void edge_ws_app_stop(edge_ws_app *app) {
             close(session->modem_worker_fd);
             session->modem_worker_fd = -1;
         }
-        if (session->client_active)
-            session->client.free(&session->client);
+        edge_ws_transport_destroy(&session->transport);
         edge_spool_free(&session->spool);
         edge_runtime_config_free(&session->runtime_config);
         session->client_active = false;
