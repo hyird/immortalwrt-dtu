@@ -195,6 +195,8 @@ typedef struct {
     edge_command_result last_command_result;
     edge_io_result next_read_result;
     unsigned read_timeouts;
+    unsigned read_protocol_errors;
+    edge_io_result next_write_result;
     edge_io_result next_connect_result;
     edge_io_result next_handshake_result;
     uint8_t last_platform[16];
@@ -223,6 +225,10 @@ static edge_io_result fake_read(void *context, edge_device_sample *sample) {
         --fake->read_timeouts;
         return EDGE_IO_NO_RESPONSE;
     }
+    if (fake->read_protocol_errors != 0U) {
+        --fake->read_protocol_errors;
+        return EDGE_IO_PROTOCOL_ERROR;
+    }
     const edge_io_result result = fake->next_read_result;
     fake->next_read_result = EDGE_IO_OK;
     if (result != EDGE_IO_OK)
@@ -236,6 +242,9 @@ static edge_io_result fake_write(void *context, const edge_write_command *comman
                                  edge_device_sample *actual) {
     fake_device *fake = context;
     ++fake->writes;
+    const edge_io_result result = fake->next_write_result;
+    fake->next_write_result = EDGE_IO_OK;
+    if (result != EDGE_IO_OK) return result;
     memcpy(actual->bytes, command->value, command->value_size);
     actual->size = command->value_size;
     return EDGE_IO_OK;
@@ -261,7 +270,9 @@ static void fake_complete(void *context, const uint8_t platform_id[16],
     (void)platform_id;
     (void)device_id;
     (void)command_id;
-    require_true(actual != NULL, "successful command omitted readback");
+    require_true((result == EDGE_COMMAND_SUCCEEDED ||
+                  result == EDGE_COMMAND_READBACK_MISMATCH) == (actual != NULL),
+                 "command completion readback mismatch");
     ++fake->completions;
     fake->last_command_result = result;
 }
@@ -501,7 +512,109 @@ static void test_s7_immediate_retry_is_bounded(void) {
     }
 }
 
+static void test_s7_protocol_error_reconnects(void) {
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {
+        .connect = fake_connect, .handshake = fake_handshake,
+        .read = fake_read, .write_readback = fake_write,
+        .disconnect = fake_disconnect, .report = fake_report,
+        .command_complete = fake_complete};
+
+    fake_device fake = {0};
+    edge_device_runtime runtime;
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+        platform_id, device_id, 1000U, 30U, 0U, &driver, &fake), "S7 init failed");
+    fake.next_handshake_result = EDGE_IO_PROTOCOL_ERROR;
+    edge_device_runtime_tick(&runtime, 0U, 0);
+    require_true(fake.disconnects == 1U && !runtime.connected && !runtime.handshaken &&
+        fake.reads == 0U, "invalid S7 handshake kept the old TCP session");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.connects == 2U && fake.handshakes == 2U && fake.reads == 1U,
+        "invalid S7 handshake did not reconnect before reading");
+
+    fake.read_protocol_errors = 1U;
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(fake.disconnects == 2U && fake.connects == 3U &&
+        fake.handshakes == 3U && fake.reads == 3U && runtime.connected,
+        "invalid S7 response did not reconnect, renegotiate and retry once");
+
+    fake.read_protocol_errors = 2U;
+    edge_device_runtime_tick(&runtime, 3000U, 3000);
+    require_true(fake.disconnects == 4U && fake.connects == 4U &&
+        fake.handshakes == 4U && fake.reads == 5U && !runtime.connected,
+        "repeated invalid S7 responses kept a stale session or retried unboundedly");
+    edge_device_runtime_tick(&runtime, 4000U, 4000);
+    require_true(fake.connects == 5U && fake.handshakes == 5U && runtime.connected,
+        "S7 protocol error did not recover at the next scheduled acquisition");
+
+    fake.next_write_result = EDGE_IO_PROTOCOL_ERROR;
+    edge_write_command command = {.value = {0x55U}, .value_size = 1U};
+    require_true(edge_device_runtime_enqueue_write(&runtime, &command), "enqueue failed");
+    edge_device_runtime_tick(&runtime, 5000U, 5000);
+    require_true(fake.writes == 1U && fake.completions == 1U &&
+        fake.last_command_result == EDGE_COMMAND_FAILED && !runtime.connected,
+        "invalid S7 write response kept the TCP session or replayed the write");
+    edge_device_runtime_tick(&runtime, 6000U, 6000);
+    require_true(fake.connects == 6U && fake.handshakes == 6U &&
+        fake.writes == 1U && runtime.connected,
+        "S7 write failure did not re-handshake before the next read");
+    edge_device_runtime_close(&runtime);
+}
+
+static void test_s7_tcp_client_closes_after_each_cycle(void) {
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {
+        .connect = fake_connect, .handshake = fake_handshake,
+        .read = fake_read, .write_readback = fake_write,
+        .disconnect = fake_disconnect, .report = fake_report,
+        .command_complete = fake_complete};
+    fake_device fake = {0};
+    edge_device_runtime runtime;
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+        platform_id, device_id, 0U, 300U, 0U, &driver, &fake),
+        "S7 300-second runtime init failed");
+    runtime.close_after_read = true;
+
+    edge_device_runtime_tick(&runtime, 0U, 0);
+    require_true(fake.connects == 1U && fake.handshakes == 1U && fake.reads == 1U &&
+        fake.disconnects == 1U && fake.reports == 1U &&
+        !runtime.connected && !runtime.handshaken,
+        "first S7 scan did not report and close its TCP session");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.connects == 1U && fake.handshakes == 1U && fake.disconnects == 1U,
+        "idle tick reconnected S7 before the next read deadline");
+    edge_device_runtime_tick(&runtime, 300000U, 300000);
+    require_true(fake.connects == 2U && fake.handshakes == 2U && fake.reads == 2U &&
+        fake.disconnects == 2U && fake.reports == 2U &&
+        !runtime.connected && !runtime.handshaken,
+        "next S7 scan reused the old TCP session or failed to report");
+
+    edge_write_command command = {.value = {0x55U}, .value_size = 1U};
+    require_true(edge_device_runtime_enqueue_write(&runtime, &command), "enqueue failed");
+    edge_device_runtime_tick(&runtime, 301000U, 301000);
+    require_true(fake.connects == 3U && fake.handshakes == 3U && fake.writes == 1U &&
+        fake.reads == 3U && fake.completions == 1U &&
+        fake.last_command_result == EDGE_COMMAND_SUCCEEDED &&
+        fake.disconnects == 3U && runtime.next_io_at_ms == 600000U,
+        "write/readback was replayed or changed the scheduled S7 scan");
+
+    fake.read_timeouts = 2U;
+    edge_device_runtime_tick(&runtime, 600000U, 600000);
+    require_true(fake.connects == 5U && fake.handshakes == 5U && fake.reads == 5U &&
+        fake.disconnects == 5U && fake.writes == 1U &&
+        !runtime.connected && !runtime.handshaken,
+        "S7 timeout retried beyond one fresh session or retained a failed socket");
+    edge_device_runtime_tick(&runtime, 900000U, 900000);
+    require_true(fake.connects == 6U && fake.handshakes == 6U && fake.reads == 6U &&
+        fake.disconnects == 6U && !runtime.connected && !runtime.handshaken,
+        "S7 did not recover with a new session on the following scheduled scan");
+    edge_device_runtime_close(&runtime);
+    require_true(fake.disconnects == 6U, "S7 shutdown closed an already idle TCP session twice");
+}
+
 int main(void) {
+    test_s7_tcp_client_closes_after_each_cycle();
+    test_s7_protocol_error_reconnects();
     test_s7_immediate_retry_is_bounded();
     test_configured_read_interval();
     test_modbus();

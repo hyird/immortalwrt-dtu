@@ -490,6 +490,34 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     assert(response_records == 1);
     if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); assert(debug_values == (s7 ? 2U : 3U)); }
     else { assert(debug_rx == 0 && debug_tx == 0 && debug_values == 0); }
+    if (s7) {
+        /* Both ReadVar requests belong to one TCP session. The complete
+         * acquisition, not each point, must release that session. */
+        struct pollfd closed = {.fd = fd, .events = POLLIN | POLLHUP};
+        assert(poll(&closed, 1U, 3000) == 1);
+        uint8_t byte = 0U;
+        assert(recv(fd, &byte, 1U, MSG_PEEK) == 0);
+        bool idle_ready = false;
+        const uint64_t status_deadline = monotonic_ms() + 3000U;
+        while (monotonic_ms() < status_deadline) {
+            iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
+            edge_acquisition_status(acquisition, &status);
+            if (status.devices_count == 1U &&
+                strcmp(status.devices[0].state, "connected") == 0 &&
+                status.devices[0].client_count == 0U) {
+                idle_ready = true;
+                break;
+            }
+            struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+            (void)poll(&event, 1U, 100);
+            edge_acquisition_tick(acquisition, monotonic_ms());
+        }
+        assert(idle_ready);
+    } else {
+        uint8_t byte = 0U;
+        assert(recv(fd, &byte, 1U, MSG_PEEK | MSG_DONTWAIT) == -1 &&
+               (errno == EAGAIN || errno == EWOULDBLOCK));
+    }
     edge_acquisition_destroy(acquisition);
     close(fd);
     close(listener);

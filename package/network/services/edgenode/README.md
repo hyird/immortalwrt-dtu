@@ -4,6 +4,12 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
+## S7 TCP 采集（0.3.60）
+
+- 仅 S7 TCP Client 在一轮全部点位读取及必要的写后回读结束后关闭 TCP；下一轮采集或新的命令重新建立 TCP、COTP 和 S7 会话。串口、TCP Server 和其他协议不改连接生命周期。
+- 首次读取超时或响应无效时，关闭原连接并在同轮最多重新握手重读一次；写命令不自动重放。失败后保持原定采集间隔，不做周期探活或额外业务轮询。
+- 主动关闭后的空闲状态保留最近一次成功采集的逻辑连接状态，但客户端连接数为零；后续 I/O 失败仍报告重连状态和原因。
+
 ## 临时日志级别
 
 - 节点启动、进程重启默认 `silent`；不产生新的 EdgeNode 应用日志，既有日志仍可按需查询。

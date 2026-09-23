@@ -3011,6 +3011,12 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                           "device runtime initialization failed");
                 return false;
             }
+            /* TCP Client links are owned by this device (unlike serial and
+             * TCP Server links). Only S7 TCP Client uses per-cycle sessions. */
+            runtime->runtime.close_after_read =
+                protocol == EDGE_DEVICE_S7 &&
+                runtime->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&
+                runtime->endpoint->mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_CLIENT;
             ++output;
         }
     }
@@ -3066,10 +3072,15 @@ static void acquisition_status_local(edge_acquisition *acquisition,
         edge_protocol_set_bytes(&status->device_id, sizeof(status->device_id.bytes),
                                  device->config->device_id.bytes, 16U);
         const bool connected = device->link->fd >= 0;
-        if (connected) {
+        const bool ready_between_cycles =
+            device->runtime.close_after_read && device->runtime.has_sample &&
+            device->has_last_io_result && device->last_io_result == EDGE_IO_OK;
+        if (connected || ready_between_cycles) {
+            /* A successful S7 scan deliberately closes TCP. Report its logical
+             * readiness without claiming an active client connection. */
             copy_text(status->state, sizeof(status->state), "connected");
             status->client_count =
-                device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET ? 1U : 0U;
+                connected && device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET ? 1U : 0U;
         } else if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&
                    device->endpoint->mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_CLIENT) {
             copy_text(status->state, sizeof(status->state), "reconnecting");

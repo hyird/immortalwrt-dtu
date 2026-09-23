@@ -92,8 +92,11 @@ static edge_io_result ensure_ready(edge_device_runtime *runtime) {
     }
     if ((runtime->protocol == EDGE_DEVICE_S7 || runtime->protocol == EDGE_DEVICE_FINS) && !runtime->handshaken) {
         const edge_io_result handshaken = runtime->driver.handshake(runtime->driver_context);
-        if (handshaken != EDGE_IO_OK)
+        if (handshaken != EDGE_IO_OK) {
+            if (runtime->protocol == EDGE_DEVICE_S7)
+                close_connection(runtime);
             return handshaken;
+        }
         runtime->handshaken = true;
     }
     return EDGE_IO_OK;
@@ -170,6 +173,8 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
                     handle_offline(runtime);
                 } else {
                     complete_write(runtime, EDGE_COMMAND_FAILED, NULL);
+                    if (runtime->protocol == EDGE_DEVICE_S7)
+                        close_connection(runtime);
                 }
             }
         }
@@ -177,8 +182,10 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         if (result == EDGE_IO_OK) {
             edge_device_sample sample = {0};
             result = runtime->driver.read(runtime->driver_context, &sample);
-            if (result == EDGE_IO_NO_RESPONSE && runtime->protocol == EDGE_DEVICE_S7) {
-                /* Retry reads once immediately on a fresh session. Never replay
+            if ((result == EDGE_IO_NO_RESPONSE || result == EDGE_IO_PROTOCOL_ERROR) &&
+                runtime->protocol == EDGE_DEVICE_S7) {
+                /* A timed-out or invalid S7 response poisons the negotiated session.
+                 * Retry the read once on fresh TCP/COTP/S7 handshakes; never replay
                  * a write, and bound recovery so other devices can still run. */
                 close_connection(runtime);
                 result = ensure_ready(runtime);
@@ -197,11 +204,15 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
                 handle_no_response(runtime);
             } else if (result == EDGE_IO_OFFLINE) {
                 handle_offline(runtime);
+            } else if (result == EDGE_IO_PROTOCOL_ERROR && runtime->protocol == EDGE_DEVICE_S7) {
+                close_connection(runtime);
             }
         } else if (result == EDGE_IO_NO_RESPONSE) {
             handle_no_response(runtime);
         } else if (result == EDGE_IO_OFFLINE) {
             handle_offline(runtime);
+        } else if (result == EDGE_IO_PROTOCOL_ERROR && runtime->protocol == EDGE_DEVICE_S7) {
+            close_connection(runtime);
         }
 
         if (reported_after_write) {
@@ -211,6 +222,11 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
             runtime->driver.report(runtime->driver_context, runtime->platform_id,
                                    runtime->device_id, sample);
         }
+        /* Keep one TCP/COTP/S7 session for every point in this acquisition,
+         * but never carry it across scheduled cycles. Close even after a failed
+         * write/read; the next cycle must always negotiate a new session. */
+        if (runtime->close_after_read)
+            close_connection(runtime);
     }
 
     /* A newly applied configuration must become observable as soon as the
