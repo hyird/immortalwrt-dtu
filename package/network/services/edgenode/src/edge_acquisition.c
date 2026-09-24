@@ -3898,21 +3898,55 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
         serial_tick(acquisition, schedule_ms);
         if (schedule_ms < next_tick)
             continue;
+        size_t write_budget = 4U;
+        size_t written_indices[4] = {0U};
+        size_t written_count = 0U;
         for (size_t index = 0U; index < acquisition->device_count && !stop; ++index) {
-            if (!publish_derived_expiry(&acquisition->devices[index])) continue;
-            if (serial_paused(&acquisition->devices[index])) {
-                /* Manual control owns the port; leave other physical links running. */
-            } else if (acquisition->devices[index].sl651)
-                sl651_poll(&acquisition->devices[index], schedule_ms);
-            else
-                edge_device_runtime_tick(&acquisition->devices[index].runtime, schedule_ms,
-                                         current_ms());
-            while (!stop) {
+            /* Commands are accepted only between synchronous protocol exchanges: an
+             * already-sent request is allowed to finish or time out before any write. */
+            for (size_t received = 0U; received < 16U && !stop; ++received) {
                 struct pollfd pending = {.fd = worker_fd, .events = POLLIN};
                 if (poll(&pending, 1U, 0) <= 0)
                     break;
                 if (!worker_receive_control(acquisition, &stop))
                     goto done;
+            }
+            if (stop)
+                break;
+
+            /* apply_multi keeps devices in platform priority order. Select queued
+             * writes in that order, independent of the next background-read index. */
+            size_t write_index = acquisition->device_count;
+            if (write_budget != 0U) {
+                for (size_t candidate = 0U; candidate < acquisition->device_count; ++candidate) {
+                    edge_acquisition_device *device = &acquisition->devices[candidate];
+                    if (!device->sl651 && device->runtime.write_count != 0U &&
+                        !serial_paused(device)) {
+                        write_index = candidate;
+                        break;
+                    }
+                }
+            }
+            if (write_index < acquisition->device_count) {
+                edge_acquisition_device *write_device = &acquisition->devices[write_index];
+                if (publish_derived_expiry(write_device)) {
+                    edge_device_runtime_tick(&write_device->runtime, schedule_ms, current_ms());
+                    --write_budget;
+                    written_indices[written_count++] = write_index;
+                }
+            }
+
+            bool wrote_current_device = false;
+            for (size_t written = 0U; written < written_count; ++written)
+                wrote_current_device = wrote_current_device || written_indices[written] == index;
+            edge_acquisition_device *device = &acquisition->devices[index];
+            if (!publish_derived_expiry(device)) continue;
+            if (serial_paused(device)) {
+                /* Manual control owns the port; leave other physical links running. */
+            } else if (device->sl651) {
+                sl651_poll(device, schedule_ms);
+            } else if (device->runtime.write_count == 0U && !wrote_current_device) {
+                edge_device_runtime_tick(&device->runtime, schedule_ms, current_ms());
             }
         }
         for (size_t index = 0U; index < acquisition->platform_count; ++index) {

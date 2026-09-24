@@ -400,6 +400,7 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     iot_edge_v1_ConfigItem values[5];
     edge_runtime_config config = make_config(values);
     values[0].item.endpoint.port = ntohs(address.sin_port);
+    values[1].item.device.report_interval_sec = 1U;
     values[0].item.endpoint.debug_enabled = link_debug;
     values[1].item.device.debug_enabled = device_debug;
     values[3] = values[2];
@@ -417,7 +418,6 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
         values[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
         values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
         values[1].item.device.io_interval_ms = 300000U;
-        values[1].item.device.report_interval_sec = 300U;
         for (unsigned index = 2; index < 4; ++index) {
             values[index] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
             values[index].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_S7_AREA;
@@ -457,7 +457,7 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
         setup[11] = request[11]; setup[12] = request[12];
         assert(send(fd, setup, sizeof(setup), 0) == (ssize_t)sizeof(setup));
     }
-    for (unsigned index = 0; index < 2; ++index) {
+    for (unsigned index = 0; index < 4; ++index) {
         if (s7) {
             uint8_t request[1024];
             receive_s7_request(fd, request);
@@ -465,22 +465,22 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
             uint8_t response[] = {3,0,0,27,2,0xf0,0x80,0x32,3,0,0,0,0,0,2,0,6,0,0,
                                   4,1,0xff,4,0,16,0,0};
             response[11] = request[11]; response[12] = request[12];
-            response[26] = (uint8_t)(100 + index);
-            memcpy(expected_responses[index], response, sizeof(response));
+            response[26] = (uint8_t)(100 + index % 2U);
+            memcpy(expected_responses[index % 2U], response, sizeof(response));
             assert(send(fd, response, sizeof(response), 0) == (ssize_t)sizeof(response));
             continue;
         }
         uint8_t request[12];
         assert(recv(fd, request, sizeof(request), MSG_WAITALL) == (ssize_t)sizeof(request));
         assert(request[7] == 3);
-        assert(request[9] == (index == 0 ? 0 : 100));
-        uint8_t *response = expected_responses[index];
+        assert(request[9] == (index % 2U == 0U ? 0 : 100));
+        uint8_t *response = expected_responses[index % 2U];
         memcpy(response, request, 7);
         response[5] = 5;
         response[7] = 3;
         response[8] = 2;
         response[9] = 0;
-        response[10] = (uint8_t)(100 + index);
+        response[10] = (uint8_t)(100 + index % 2U);
         assert(send(fd, response, 11, 0) == 11);
     }
     const uint64_t deadline = monotonic_ms() + 3000;
@@ -493,31 +493,6 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); assert(debug_values == (s7 ? 2U : 3U)); }
     else { assert(debug_rx == 0 && debug_tx == 0 && debug_values == 0); }
     if (s7) {
-        /* The S7 TCP Client reuses its session for a silent 1-second scan. */
-        const unsigned background_debug_rx = debug_rx;
-        const unsigned background_debug_tx = debug_tx;
-        const unsigned background_debug_success = debug_success;
-        const unsigned background_debug_values = debug_values;
-        struct pollfd scan = {.fd = fd, .events = POLLIN | POLLHUP};
-        assert(poll(&scan, 1U, 3000) == 1 && (scan.revents & POLLIN) != 0);
-        for (unsigned index = 0; index < 2; ++index) {
-            uint8_t request[1024];
-            receive_s7_request(fd, request);
-            assert(request[17] == 4);
-            uint8_t response[] = {3,0,0,27,2,0xf0,0x80,0x32,3,0,0,0,0,0,2,0,6,0,0,
-                                  4,1,0xff,4,0,16,0,0};
-            response[11] = request[11]; response[12] = request[12];
-            response[26] = (uint8_t)(110 + index);
-            assert(send(fd, response, sizeof(response), 0) == (ssize_t)sizeof(response));
-        }
-        const uint64_t scan_deadline = monotonic_ms() + 1000U;
-        while (monotonic_ms() < scan_deadline) {
-            edge_acquisition_tick(acquisition, monotonic_ms());
-            usleep(10000);
-        }
-        assert(response_records == 1U && debug_rx == background_debug_rx &&
-               debug_tx == background_debug_tx && debug_success == background_debug_success &&
-               debug_values == background_debug_values);
         iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
         edge_acquisition_status(acquisition, &status);
         assert(status.devices_count == 1U &&
@@ -641,6 +616,150 @@ static void verify_industrial_acquisition(iot_edge_v1_Protocol protocol, bool va
     }
     assert(industrial_records && industrial_commands==1 && writes==1);
     close(fd);edge_acquisition_destroy(acquisition);close(listener);
+}
+
+static unsigned priority_telemetry_records, priority_command_results;
+static bool priority_telemetry(void *context, const uint8_t platform[16],
+                               const iot_edge_v1_TelemetryRecord *record) {
+    (void)context; (void)platform;
+    assert(record->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS);
+    assert(record->values_count == 1U);
+    assert(record->values[0].has_value);
+    assert(record->values[0].value.which_value == iot_edge_v1_ScalarValue_double_value_tag);
+    ++priority_telemetry_records;
+    return true;
+}
+static bool priority_command(void *context, const uint8_t platform[16],
+                             const iot_edge_v1_CommandResult *result) {
+    (void)context; (void)platform;
+    assert(result->state >= iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED);
+    ++priority_command_results;
+    return true;
+}
+static void receive_modbus_request(int fd, uint8_t request[12]) {
+    assert(recv(fd, request, 7, MSG_WAITALL) == 7);
+    const size_t length = (size_t)request[4] * 256U + request[5];
+    assert(length == 6U);
+    assert(recv(fd, request + 7, 5, MSG_WAITALL) == 5);
+}
+static void send_modbus_read_response(int fd, const uint8_t request[12], uint8_t value) {
+    uint8_t response[11];
+    memcpy(response, request, 7);
+    response[4] = 0; response[5] = 5;
+    response[7] = 3; response[8] = 2;
+    response[9] = 0; response[10] = value;
+    assert(send(fd, response, sizeof(response), 0) == (ssize_t)sizeof(response));
+}
+static void verify_write_priority_across_devices(void) {
+    int listener = socket(AF_INET, SOCK_STREAM, 0); assert(listener >= 0);
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
+    socklen_t address_size = sizeof(address);
+    assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
+    assert(listen(listener, 1) == 0);
+    int listener_b = socket(AF_INET, SOCK_STREAM, 0); assert(listener_b >= 0);
+    struct sockaddr_in address_b = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener_b, (struct sockaddr *)&address_b, sizeof(address_b)) == 0);
+    socklen_t address_b_size = sizeof(address_b);
+    assert(getsockname(listener_b, (struct sockaddr *)&address_b, &address_b_size) == 0);
+    assert(listen(listener_b, 1) == 0);
+
+    iot_edge_v1_ConfigItem items[6];
+    edge_runtime_config config = make_config(items);
+    items[0].item.endpoint.port = ntohs(address.sin_port);
+    items[1].item.device.io_interval_ms = 1000U;
+    items[1].item.device.report_interval_sec = 1U;
+    items[2].item.modbus_register.address = 10U;
+    items[2].item.modbus_register.writable = true;
+    items[3] = items[0];
+    const uint8_t endpoint_b_id[16] = {4U}, device_b_id[16] = {3U};
+    set_id(&items[3].item.endpoint.endpoint_id, endpoint_b_id);
+    items[3].item.endpoint.port = ntohs(address_b.sin_port);
+    items[4] = items[1];
+    set_id(&items[4].item.device.device_id, device_b_id);
+    set_id(&items[4].item.device.endpoint_id, endpoint_b_id);
+    copy_text(items[4].item.device.device_code, sizeof(items[4].item.device.device_code), "OFFLINE02");
+    items[4].item.device.modbus_slave_id = 2U;
+    items[5] = items[2];
+    set_id(&items[5].item.modbus_register.device_id, device_b_id);
+    copy_text(items[5].item.modbus_register.element_id,
+              sizeof(items[5].item.modbus_register.element_id), "holding-b");
+    items[5].item.modbus_register.address = 20U;
+    config.item_count = 6U;
+    config.endpoint_count = 2U;
+    config.device_count = 2U;
+
+    priority_telemetry_records = priority_command_results = 0U;
+    edge_acquisition *acquisition = edge_acquisition_create(priority_telemetry, priority_command, NULL);
+    assert(acquisition != NULL);
+    char error[256] = {0};
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_device_count(acquisition) == 2U);
+    iot_edge_v1_CommandRequest command_request = iot_edge_v1_CommandRequest_init_zero;
+    const uint8_t command_id[16] = {7U}, device_a_id[16] = {2U};
+    set_id(&command_request.command_id, command_id);
+    set_id(&command_request.device_id, device_a_id);
+    command_request.values_count = 1U;
+    copy_text(command_request.values[0].element_id, sizeof(command_request.values[0].element_id), "holding-1");
+    command_request.values[0].has_expected = true;
+    command_request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    command_request.values[0].expected.which_value = iot_edge_v1_ScalarValue_string_value_tag;
+    copy_text(command_request.values[0].expected.value.string_value,
+              sizeof(command_request.values[0].expected.value.string_value), "42");
+    command_request.timeout_ms = 10000U;
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    assert(edge_acquisition_command(acquisition, &command_request, error, sizeof(error)));
+
+    struct pollfd ready = {.fd = listener, .events = POLLIN};
+    assert(poll(&ready, 1, 3000) == 1);
+    int fd = accept(listener, NULL, NULL); assert(fd >= 0);
+    ready.fd = listener_b;
+    assert(poll(&ready, 1, 3000) == 1);
+    int fd_b = accept(listener_b, NULL, NULL); assert(fd_b >= 0);
+    struct timeval timeout = {.tv_sec = 5};
+    assert(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+    assert(setsockopt(fd_b, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+    uint8_t request[12];
+    receive_modbus_request(fd, request);
+    assert(request[6] == 1U && request[7] == 6U && request[8] == 0U && request[9] == 10U);
+    assert(request[10] == 0U && request[11] == 42U);
+    assert(send(fd, request, sizeof(request), 0) == (ssize_t)sizeof(request));
+
+    /* The queued write must precede both devices' reads in this worker pass. */
+    receive_modbus_request(fd, request);
+    assert(request[6] == 1U && request[7] == 3U && request[9] == 10U);
+    send_modbus_read_response(fd, request, 10U);
+    receive_modbus_request(fd_b, request);
+    assert(request[6] == 2U && request[7] == 3U && request[9] == 20U);
+    send_modbus_read_response(fd_b, request, 20U);
+
+    /* A later pass still polls A then B, and never replays the completed write. */
+    bool saw_next_a = false, saw_next_b = false;
+    const uint64_t deadline = monotonic_ms() + 5000U;
+    while ((!saw_next_a || !saw_next_b) && monotonic_ms() < deadline) {
+        if (!saw_next_a) {
+            receive_modbus_request(fd, request);
+            assert(request[6] == 1U && request[7] == 3U && request[9] == 10U);
+            saw_next_a = true;
+            send_modbus_read_response(fd, request, 11U);
+        } else {
+            receive_modbus_request(fd_b, request);
+            assert(request[6] == 2U && request[7] == 3U && request[9] == 20U);
+            saw_next_b = true;
+            send_modbus_read_response(fd_b, request, 21U);
+        }
+    }
+    assert(saw_next_a && saw_next_b);
+    const uint64_t result_deadline = monotonic_ms() + 3000U;
+    while (priority_command_results == 0U && monotonic_ms() < result_deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(priority_command_results == 1U);
+    edge_acquisition_tick(acquisition, monotonic_ms());
+    assert(priority_command_results == 1U);
+    close(fd); close(fd_b); close(listener); close(listener_b); edge_acquisition_destroy(acquisition);
 }
 
 static iot_edge_v1_SerialDebugEvent serial_events[512];
@@ -803,6 +922,7 @@ int main(void) {
     wait_for_status(acquisition);
     edge_acquisition_destroy(acquisition);
     verify_shared_resources();
+    verify_write_priority_across_devices();
     verify_sl651_commit();
     verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, false);
     verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, true);

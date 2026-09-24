@@ -4,12 +4,15 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
-## S7 TCP 采集（当前版本 0.3.62；兼容 0.3.44）
+## 主动轮询与遥测调度（0.3.63）
 
-- S7 TCP Client 不论平台下发的 `io_interval_ms` 为 0、1000 或 300000，节点后台只读轮询间隔均为 1000ms；该策略仅适用于 S7 TCP Client，不改变 Modbus/FINS/串口/TCP Server 的显式采集间隔。
-- `report_interval_sec` 独立控制正式遥测上报；例如 S7 TCP Client 配置 `io_interval_ms=300000`、`report_interval_sec=300` 时，首次成功读取立即上报，之后每秒静默读取、每 300 秒正式上报，并复用 TCP/COTP/S7 会话。
-- 写后回读和快报窗口契约不变；只有到期上报轮、首次上报及写后/快报采集生成自动调试事件和报文日志。后台读取不推送 RawPacket 或解析值。
-- 首次读取超时或响应无效时，关闭原连接并在同轮最多重新握手重读一次；写命令不自动重放。报时轮读取失败不使用旧快照上报。连接故障仍更新状态并保留必要告警。
+- 主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 使用 `EDGE_ACQUISITION_TICK_MS=1000ms` 为目标读取间隔；平台下发更慢的 `io_interval_ms` 不再降低读取频率。该值是调度目标，不是严格实时承诺；超时、共享物理链路和平台优先级会造成延迟。迟到调度跳过过期轮次，不补跑堆积读取。
+- `report_interval_sec` 独立控制普通遥测。配置生效后的首次成功读取不立即上报；首次也要等普通到期轮，并且只上报该轮新读取成功的完整样本。读失败、无连接或写命令占用到期轮时不拿旧样本补报。
+- Worker 在每次开始下一项读取前先有限量消费控制队列，并按既有平台优先级顺序优先执行已入队写任务；每轮最多插队 4 项写任务，随后仍处理当前扫描索引（同一设备刚执行过写时跳过该设备的重复普通读），不会因写任务跳过其他设备或被动 SL651 收帧。预算耗尽时，仍有待写命令的设备不执行普通读。单 Worker 的同步协议交换不可抢占：已发出的请求必须先完成或超时，之后才能写入；写请求只发送一次，不自动重放。共享物理资源仍由同一 Worker 串行操作，SL651 被动确认、DTU 透传及平台优先级规则不变。
+- 经验证的写命令可以启动快读窗口；快窗口仅在 fast due 轮成功取得新样本后上报。写入仍即时返回命令结果，不因写后回读额外发送自动遥测，也不会把写入占用到期轮的旧遥测补报。
+- 静默扫描不发自动 RawPacket、解析值或报文 debug；必要故障状态和命令结果即时上报，到期轮和显式人工调试按原路径处理。S7 TCP Client 持连及断线重连、共享串口资源和平台优先级保持原机制。
+- 被动 SL651 的确认、分包和主动上送，DTU 透传及串口监听不属于主动轮询；其既有行为不变、不受此扫描节奏约束，不丢帧。协议字段、固件身份及 0.3.44 升级兼容路径保持不变。
+- 行为变化：首次遥测延迟至 `report_interval_sec` 的首个到期轮，间隔较长时平台不再获得配置后立即样本；需要首轮遥测时应配置较短报告周期。此版本保持协议字段、固件身份和 0.3.44 兼容升级路径。
 
 ## 临时日志级别
 
@@ -132,16 +135,16 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
   `/tmp/edgenode/<platform_id>/`; process restarts recover them, device reboots do not;
 - before every tmpfs write, the daemon preserves 15% free space by rolling the oldest
   outbox message across all platforms; active and staging config are never rolled;
-- 采集 Worker 每秒检查调度，实际读取遵守设备配置间隔；S7 TCP Client 无论 `io_interval_ms` 是 0 还是非零都按 1000ms 只读轮询，正式遥测仍按 `report_interval_sec` 上报。其他模式下 `io_interval_ms=0` 通常使用 `report_interval_sec`，非零值接受 1000–3600000 ms；控制命令无需等待下一次周期读取。各平台独立上报，配置生效后的首次成功读取立即上报，随后按配置周期执行。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
+- 采集 Worker 每秒检查调度；主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 均以 1000ms 为目标读取周期，忽略更慢的 `io_interval_ms`，迟到轮次跳过且不追赶。普通遥测独立遵循 `report_interval_sec`，首次也只在首次普通到期且当轮读取成功时上报；命令结果即时返回。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
 - platforms may share a physical serial channel and use different baud/parity settings;
   the worker drains the prior request, applies the next task's serial settings, clears
   stale input, observes the RTU quiet interval, and then performs that task. TCP Server
   endpoints sharing a listen port use one listener. Lower numeric platform priority is
   scheduled first, while every platform task remains active;
-- Modbus TCP/RTU and S7 request/response codecs implement reads and writes. Every completed
-  write readback is reported immediately; a verified command then reports at the configured
-  fast-read interval for the configured window before returning to the regular interval.
-  A successful command requires readback equality;
+- Modbus TCP/RTU and S7 request/response codecs implement reads and writes. Command results
+  (including write readback) are reported immediately; a verified command then reports only
+  newly sampled data at the configured fast-read interval for the configured window before
+  returning to the regular interval. A successful command requires readback equality;
 - S7 读取超时后立即关闭 TCP，重新连接并完成 COTP、S7 Setup Communication，
   在同一采集周期重读一次；重连或握手失败、重读再次超时或断线时清理连接状态，等待下一配置采集周期。
   每周期最多立即重读一次，不改变原采集周期，不自动重发写入命令；其他协议行为不变。
