@@ -19,9 +19,11 @@ def listener():
     sock.settimeout(5)
     return sock
 
-def receive(sock, size):
+def receive(sock, size, quick_ack=False):
     result = bytearray()
     while len(result) < size:
+        if quick_ack and hasattr(socket, 'TCP_QUICKACK'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
         chunk = sock.recv(size - len(result))
         if not chunk:
             raise AssertionError('unexpected disconnect')
@@ -164,13 +166,36 @@ class RelayTest(unittest.TestCase):
 
     def test_slow_client_isolated(self):
         _, north, clients = self.server()
-        clients[2].setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        # Leave the client unread, but avoid an artificially tiny TCP window
+        # that makes draining already-buffered bytes take minutes on Linux.
+        clients[2].setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64 * 1024)
         payload = bytes(range(256)) * 32768
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            readers = [pool.submit(receive, client, len(payload)) for client in clients[:2]]
-            north.sendall(payload)
+        chunk_size = 64 * 1024
+
+        def send_in_chunks():
+            for offset in range(0, len(payload), chunk_size):
+                north.sendall(payload[offset:offset + chunk_size])
+                time.sleep(.001)  # Bound ingress while fast readers drain concurrently.
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            readers = [pool.submit(receive, client, len(payload), True) for client in clients[:2]]
+            sender = pool.submit(send_in_chunks)
+            sender.result(timeout=30)
             for reader in readers:
-                self.assertEqual(reader.result(timeout=15), payload)
+                self.assertEqual(reader.result(timeout=30), payload)
+
+        # Prove isolation rather than merely finishing the fast-client transfer.
+        clients[2].settimeout(5)
+        slow_received = 0
+        while True:
+            if hasattr(socket, 'TCP_QUICKACK'):
+                clients[2].setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+            chunk = clients[2].recv(65536)
+            if not chunk:
+                break
+            slow_received += len(chunk)
+        self.assertLess(slow_received, len(payload), 'slow client received the full broadcast')
+
         clients[0].sendall(b'still-live')
         self.assertEqual(receive(north, 10), b'still-live')
 
