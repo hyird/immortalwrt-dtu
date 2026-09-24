@@ -416,7 +416,7 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     if (s7) {
         values[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
         values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
-        values[1].item.device.io_interval_ms = 0U;
+        values[1].item.device.io_interval_ms = 300000U;
         values[1].item.device.report_interval_sec = 300U;
         for (unsigned index = 2; index < 4; ++index) {
             values[index] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;

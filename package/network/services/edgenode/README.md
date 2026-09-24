@@ -4,10 +4,11 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
-## S7 TCP 采集（当前版本 0.3.61；兼容 0.3.44）
+## S7 TCP 采集（当前版本 0.3.62；兼容 0.3.44）
 
-- S7 TCP Client 跨采集轮次复用 TCP、COTP 和 S7 会话；TCP Client 的 `io_interval_ms=0` 时后台只读采集间隔为 1000ms，显式配置的采集间隔不变。串口、TCP Server 和其他协议保持原有调度行为。
-- `report_interval_sec` 独立控制普通遥测上报。首次成功读取立即上报，写后回读和快报窗口契约不变；只有到期上报轮、首次上报及写后/快报采集生成自动调试事件和报文日志。后台读取不推送 RawPacket 或解析值。
+- S7 TCP Client 不论平台下发的 `io_interval_ms` 为 0、1000 或 300000，节点后台只读轮询间隔均为 1000ms；该策略仅适用于 S7 TCP Client，不改变 Modbus/FINS/串口/TCP Server 的显式采集间隔。
+- `report_interval_sec` 独立控制正式遥测上报；例如 S7 TCP Client 配置 `io_interval_ms=300000`、`report_interval_sec=300` 时，首次成功读取立即上报，之后每秒静默读取、每 300 秒正式上报，并复用 TCP/COTP/S7 会话。
+- 写后回读和快报窗口契约不变；只有到期上报轮、首次上报及写后/快报采集生成自动调试事件和报文日志。后台读取不推送 RawPacket 或解析值。
 - 首次读取超时或响应无效时，关闭原连接并在同轮最多重新握手重读一次；写命令不自动重放。报时轮读取失败不使用旧快照上报。连接故障仍更新状态并保留必要告警。
 
 ## 临时日志级别
@@ -131,10 +132,7 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
   `/tmp/edgenode/<platform_id>/`; process restarts recover them, device reboots do not;
 - before every tmpfs write, the daemon preserves 15% free space by rolling the oldest
   outbox message across all platforms; active and staging config are never rolled;
-- 采集 Worker 每秒检查调度，但实际读取遵守设备配置间隔。`io_interval_ms=0`
-  时通常使用 `report_interval_sec`，S7 TCP Client 特例为 1000ms；非零时接受 1000–3600000 ms；控制命令无需等待
-  下一次周期读取。各平台独立上报，配置生效后的首次成功读取立即上报，随后按配置周期
-  执行。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
+- 采集 Worker 每秒检查调度，实际读取遵守设备配置间隔；S7 TCP Client 无论 `io_interval_ms` 是 0 还是非零都按 1000ms 只读轮询，正式遥测仍按 `report_interval_sec` 上报。其他模式下 `io_interval_ms=0` 通常使用 `report_interval_sec`，非零值接受 1000–3600000 ms；控制命令无需等待下一次周期读取。各平台独立上报，配置生效后的首次成功读取立即上报，随后按配置周期执行。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
 - platforms may share a physical serial channel and use different baud/parity settings;
   the worker drains the prior request, applies the next task's serial settings, clears
   stale input, observes the RTU quiet interval, and then performs that task. TCP Server
