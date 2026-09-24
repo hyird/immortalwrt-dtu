@@ -200,6 +200,10 @@ typedef struct {
     edge_io_result next_connect_result;
     edge_io_result next_handshake_result;
     uint8_t last_platform[16];
+    edge_device_runtime *runtime;
+    unsigned debug_reads;
+    unsigned silent_reads;
+    unsigned silent_writes;
 } fake_device;
 
 static edge_io_result fake_connect(void *context) {
@@ -221,6 +225,10 @@ static edge_io_result fake_handshake(void *context) {
 static edge_io_result fake_read(void *context, edge_device_sample *sample) {
     fake_device *fake = context;
     ++fake->reads;
+    if (fake->runtime != NULL && fake->runtime->debug_read)
+        ++fake->debug_reads;
+    if (fake->runtime != NULL && fake->runtime->silent_background_read)
+        ++fake->silent_reads;
     if (fake->read_timeouts != 0U) {
         --fake->read_timeouts;
         return EDGE_IO_NO_RESPONSE;
@@ -242,6 +250,8 @@ static edge_io_result fake_write(void *context, const edge_write_command *comman
                                  edge_device_sample *actual) {
     fake_device *fake = context;
     ++fake->writes;
+    if (fake->runtime != NULL && fake->runtime->silent_background_read)
+        ++fake->silent_writes;
     const edge_io_result result = fake->next_write_result;
     fake->next_write_result = EDGE_IO_OK;
     if (result != EDGE_IO_OK) return result;
@@ -561,7 +571,7 @@ static void test_s7_protocol_error_reconnects(void) {
     edge_device_runtime_close(&runtime);
 }
 
-static void test_s7_tcp_client_closes_after_each_cycle(void) {
+static void test_s7_tcp_client_scan_and_report_intervals(void) {
     const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
     const edge_device_driver driver = {
         .connect = fake_connect, .handshake = fake_handshake,
@@ -571,49 +581,82 @@ static void test_s7_tcp_client_closes_after_each_cycle(void) {
     fake_device fake = {0};
     edge_device_runtime runtime;
     require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
-        platform_id, device_id, 0U, 300U, 0U, &driver, &fake),
-        "S7 300-second runtime init failed");
-    runtime.close_after_read = true;
+        platform_id, device_id, EDGE_ACQUISITION_TICK_MS, 300U, 0U, &driver, &fake),
+        "S7 300-second report runtime init failed");
+    runtime.s7_tcp_client = true;
+    fake.runtime = &runtime;
 
     edge_device_runtime_tick(&runtime, 0U, 0);
-    require_true(fake.connects == 1U && fake.handshakes == 1U && fake.reads == 1U &&
-        fake.disconnects == 1U && fake.reports == 1U &&
-        !runtime.connected && !runtime.handshaken,
-        "first S7 scan did not report and close its TCP session");
+    require_true(fake.reads == 1U && fake.reports == 1U && runtime.debug_read,
+        "first successful S7 read was not reported/debugged immediately");
     edge_device_runtime_tick(&runtime, 1000U, 1000);
-    require_true(fake.connects == 1U && fake.handshakes == 1U && fake.disconnects == 1U,
-        "idle tick reconnected S7 before the next read deadline");
+    require_true(fake.reads == 2U && fake.connects == 1U && fake.handshakes == 1U &&
+        fake.disconnects == 0U && fake.reports == 1U && !runtime.debug_read &&
+        runtime.silent_background_read == false && fake.silent_reads == 1U,
+        "background 1-second scan did not reuse the session or isolate silent debug state");
+    edge_device_runtime_tick(&runtime, 299000U, 299000);
+    require_true(fake.reads == 3U && fake.reports == 1U && !runtime.debug_read &&
+        fake.debug_reads == 1U && fake.silent_reads == 2U,
+        "background S7 scans disturbed reporting or emitted automatic debug reads");
     edge_device_runtime_tick(&runtime, 300000U, 300000);
-    require_true(fake.connects == 2U && fake.handshakes == 2U && fake.reads == 2U &&
-        fake.disconnects == 2U && fake.reports == 2U &&
-        !runtime.connected && !runtime.handshaken,
-        "next S7 scan reused the old TCP session or failed to report");
+    require_true(fake.reads == 4U && fake.reports == 2U && runtime.debug_read &&
+        fake.connects == 1U && fake.handshakes == 1U && fake.disconnects == 0U,
+        "due S7 report did not use a fresh scan on the persistent session");
 
-    edge_write_command command = {.value = {0x55U}, .value_size = 1U};
-    require_true(edge_device_runtime_enqueue_write(&runtime, &command), "enqueue failed");
-    edge_device_runtime_tick(&runtime, 301000U, 301000);
-    require_true(fake.connects == 3U && fake.handshakes == 3U && fake.writes == 1U &&
-        fake.reads == 3U && fake.completions == 1U &&
-        fake.last_command_result == EDGE_COMMAND_SUCCEEDED &&
-        fake.disconnects == 3U && runtime.next_io_at_ms == 600000U,
-        "write/readback was replayed or changed the scheduled S7 scan");
-
-    fake.read_timeouts = 2U;
+    fake.next_read_result = EDGE_IO_OFFLINE;
     edge_device_runtime_tick(&runtime, 600000U, 600000);
-    require_true(fake.connects == 5U && fake.handshakes == 5U && fake.reads == 5U &&
-        fake.disconnects == 5U && fake.writes == 1U &&
-        !runtime.connected && !runtime.handshaken,
-        "S7 timeout retried beyond one fresh session or retained a failed socket");
-    edge_device_runtime_tick(&runtime, 900000U, 900000);
-    require_true(fake.connects == 6U && fake.handshakes == 6U && fake.reads == 6U &&
-        fake.disconnects == 6U && !runtime.connected && !runtime.handshaken,
-        "S7 did not recover with a new session on the following scheduled scan");
+    require_true(fake.reports == 2U && runtime.latest.sampled_at_ms == 300000,
+        "failed due S7 scan reported a stale snapshot");
     edge_device_runtime_close(&runtime);
-    require_true(fake.disconnects == 6U, "S7 shutdown closed an already idle TCP session twice");
+    require_true(fake.disconnects == 1U, "S7 client session was not closed at shutdown");
+
+    fake_device explicit_command = {0};
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+        platform_id, device_id, EDGE_ACQUISITION_TICK_MS, 300U, 0U, &driver, &explicit_command),
+        "S7 command runtime init failed");
+    runtime.s7_tcp_client = true;
+    explicit_command.runtime = &runtime;
+    edge_device_runtime_tick(&runtime, 0U, 0);
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    runtime.debug_read = false;
+    edge_write_command explicit_write = {.value = {0x55U}, .value_size = 1U};
+    require_true(edge_device_runtime_enqueue_write(&runtime, &explicit_write),
+        "S7 explicit command enqueue failed");
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(explicit_command.writes == 1U && explicit_command.silent_writes == 0U &&
+        explicit_command.silent_reads == 1U,
+        "silent background-read state suppressed an explicit S7 command");
+    explicit_command.next_write_result = EDGE_IO_PROTOCOL_ERROR;
+    edge_write_command failed_write = {.value = {0x66U}, .value_size = 1U};
+    require_true(edge_device_runtime_enqueue_write(&runtime, &failed_write),
+        "S7 failed command enqueue failed");
+    edge_device_runtime_tick(&runtime, 3000U, 3000);
+    require_true(explicit_command.writes == 2U && explicit_command.completions == 2U &&
+        explicit_command.last_command_result == EDGE_COMMAND_FAILED && !runtime.connected,
+        "failed write on a persistent S7 session was replayed or left the session open");
+    edge_device_runtime_tick(&runtime, 4000U, 4000);
+    require_true(explicit_command.writes == 2U && explicit_command.connects == 2U &&
+        explicit_command.handshakes == 2U && runtime.connected,
+        "persistent S7 client did not reconnect for the next read without replaying its write");
+    edge_device_runtime_close(&runtime);
+
+    fake_device explicit_interval = {0};
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+        platform_id, device_id, 300000U, 300U, 0U, &driver, &explicit_interval),
+        "explicit S7 300-second scan interval rejected");
+    runtime.s7_tcp_client = true;
+    edge_device_runtime_tick(&runtime, 0U, 0);
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(explicit_interval.reads == 1U,
+        "explicit 300-second S7 io interval was replaced by the 1-second default");
+    edge_device_runtime_tick(&runtime, 300000U, 300000);
+    require_true(explicit_interval.reads == 2U && explicit_interval.reports == 2U,
+        "explicit S7 300-second scan/report deadlines were not respected");
+    edge_device_runtime_close(&runtime);
 }
 
 int main(void) {
-    test_s7_tcp_client_closes_after_each_cycle();
+    test_s7_tcp_client_scan_and_report_intervals();
     test_s7_protocol_error_reconnects();
     test_s7_immediate_retry_is_bounded();
     test_configured_read_interval();

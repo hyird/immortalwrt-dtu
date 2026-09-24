@@ -140,11 +140,21 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         return;
 
     bool reported_after_write = false;
+    bool sampled_this_cycle = false;
     edge_device_sample write_actual = {0};
+    const bool fast_report_due = runtime->fast_report_until_ms != 0U &&
+        runtime->next_fast_report_at_ms <= runtime->fast_report_until_ms &&
+        schedule_ms >= runtime->next_fast_report_at_ms;
+    const bool configured_report_due = schedule_ms >= runtime->next_report_at_ms &&
+        !(runtime->fast_report_until_ms != 0U && schedule_ms <= runtime->fast_report_until_ms);
+    runtime->debug_read = !runtime->s7_tcp_client || runtime->initial_report_pending ||
+        runtime->write_count != 0U || fast_report_due || configured_report_due;
 
     if (schedule_ms >= runtime->next_io_at_ms || runtime->write_count != 0U) {
         runtime->next_io_at_ms = advance_deadline(runtime->next_io_at_ms,
                                                   runtime->io_interval_ms, schedule_ms);
+        runtime->silent_background_read = runtime->s7_tcp_client && !runtime->debug_read &&
+            runtime->write_count == 0U;
         edge_io_result result = ensure_ready(runtime);
         if (result == EDGE_IO_OK && runtime->write_count != 0U) {
             edge_device_sample actual = {0};
@@ -200,6 +210,7 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
                 sample.sampled_at_ms = observed_at_ms;
                 runtime->latest = sample;
                 runtime->has_sample = true;
+                sampled_this_cycle = true;
             } else if (result == EDGE_IO_NO_RESPONSE) {
                 handle_no_response(runtime);
             } else if (result == EDGE_IO_OFFLINE) {
@@ -215,6 +226,8 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
             close_connection(runtime);
         }
 
+        runtime->silent_background_read = false;
+
         if (reported_after_write) {
             const edge_device_sample *sample = &write_actual;
             if (runtime->has_sample && runtime->latest.sampled_at_ms == observed_at_ms)
@@ -222,11 +235,6 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
             runtime->driver.report(runtime->driver_context, runtime->platform_id,
                                    runtime->device_id, sample);
         }
-        /* Keep one TCP/COTP/S7 session for every point in this acquisition,
-         * but never carry it across scheduled cycles. Close even after a failed
-         * write/read; the next cycle must always negotiate a new session. */
-        if (runtime->close_after_read)
-            close_connection(runtime);
     }
 
     /* A newly applied configuration must become observable as soon as the
@@ -266,7 +274,8 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         if (!fast_window_active)
             report_due = true;
     }
-    if (report_due && !reported_after_write && runtime->has_sample)
+    if (report_due && !reported_after_write && runtime->has_sample &&
+        (!runtime->s7_tcp_client || sampled_this_cycle))
         runtime->driver.report(runtime->driver_context, runtime->platform_id,
                                runtime->device_id, &runtime->latest);
 }

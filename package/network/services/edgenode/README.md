@@ -4,11 +4,11 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
-## S7 TCP 采集（0.3.60）
+## S7 TCP 采集（当前版本 0.3.61；兼容 0.3.44）
 
-- 仅 S7 TCP Client 在一轮全部点位读取及必要的写后回读结束后关闭 TCP；下一轮采集或新的命令重新建立 TCP、COTP 和 S7 会话。串口、TCP Server 和其他协议不改连接生命周期。
-- 首次读取超时或响应无效时，关闭原连接并在同轮最多重新握手重读一次；写命令不自动重放。失败后保持原定采集间隔，不做周期探活或额外业务轮询。
-- 主动关闭后的空闲状态保留最近一次成功采集的逻辑连接状态，但客户端连接数为零；后续 I/O 失败仍报告重连状态和原因。
+- S7 TCP Client 跨采集轮次复用 TCP、COTP 和 S7 会话；TCP Client 的 `io_interval_ms=0` 时后台只读采集间隔为 1000ms，显式配置的采集间隔不变。串口、TCP Server 和其他协议保持原有调度行为。
+- `report_interval_sec` 独立控制普通遥测上报。首次成功读取立即上报，写后回读和快报窗口契约不变；只有到期上报轮、首次上报及写后/快报采集生成自动调试事件和报文日志。后台读取不推送 RawPacket 或解析值。
+- 首次读取超时或响应无效时，关闭原连接并在同轮最多重新握手重读一次；写命令不自动重放。报时轮读取失败不使用旧快照上报。连接故障仍更新状态并保留必要告警。
 
 ## 临时日志级别
 
@@ -132,7 +132,7 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
 - before every tmpfs write, the daemon preserves 15% free space by rolling the oldest
   outbox message across all platforms; active and staging config are never rolled;
 - 采集 Worker 每秒检查调度，但实际读取遵守设备配置间隔。`io_interval_ms=0`
-  时使用 `report_interval_sec`，非零时接受 1000–3600000 ms；控制命令无需等待
+  时通常使用 `report_interval_sec`，S7 TCP Client 特例为 1000ms；非零时接受 1000–3600000 ms；控制命令无需等待
   下一次周期读取。各平台独立上报，配置生效后的首次成功读取立即上报，随后按配置周期
   执行。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
 - platforms may share a physical serial channel and use different baud/parity settings;

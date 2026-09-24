@@ -74,7 +74,9 @@ typedef struct {
     uint32_t fast_report_interval_sec;
     bool connected;
     bool handshaken;
-    bool close_after_read; /* S7 TCP Client: close after a full read cycle, not after each point. */
+    bool s7_tcp_client;
+    bool debug_read;
+    bool silent_background_read;
     bool initial_report_pending;
     bool has_sample;
     edge_device_sample latest;

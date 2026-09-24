@@ -536,8 +536,13 @@ static int wait_fd(int fd, short events) {
     }
 }
 
+static bool automatic_debug_enabled(const edge_acquisition_device *device) {
+    return !device->runtime.silent_background_read;
+}
+
 static void debug_acquisition_state(edge_acquisition_device *device, const char *state) {
-    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) || !device->owner->debug) return;
+    if (!automatic_debug_enabled(device) ||
+        (!device->endpoint->debug_enabled && !device->config->debug_enabled) || !device->owner->debug) return;
     iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
     packet.debug = true;
     packet.acquisition_id.size = 16;
@@ -562,7 +567,8 @@ static void finish_debug_acquisition(edge_acquisition_device *device, edge_io_re
 
 static void debug_packet_with_id(edge_acquisition_device *device, const uint8_t id[16], const char *direction,
                          const uint8_t *data, size_t size, bool identified, bool device_only) {
-    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
+    if (!automatic_debug_enabled(device) ||
+        (!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
         !device->owner->debug || !data || !size) return;
     for (size_t offset = 0; offset < size; offset += 4096U) {
         iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
@@ -616,7 +622,8 @@ static void debug_request_status(edge_acquisition_device *device, const char *st
 
 static void debug_request_begin(edge_acquisition_device *device, const uint8_t *request, size_t size) {
     debug_request_status(device, "failed", "request_replaced", true);
-    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
+    if (!automatic_debug_enabled(device) ||
+        (!device->endpoint->debug_enabled && !device->config->debug_enabled) ||
         !device->owner->debug || !size || size > 4096U) return;
     iot_edge_v1_RawPacket *packet = calloc(1, sizeof(*packet));
     if (!packet) return;
@@ -1093,7 +1100,8 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
         return false;
     }
     device->last_activity_at_ms = current_ms();
-    edge_log_packet(log_source(device), "tx", device_label(device), logged_request, request_size);
+    if (automatic_debug_enabled(device))
+        edge_log_packet(log_source(device), "tx", device_label(device), logged_request, request_size);
     debug_request_status(device, "waiting", "", false);
     bool received = false;
     if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
@@ -1111,8 +1119,9 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
                 received = true;
                 break;
             }
-            edge_log_packet(log_source(device), "drop", device_label(device), response,
-                            *response_size);
+            if (automatic_debug_enabled(device))
+                edge_log_packet(log_source(device), "drop", device_label(device), response,
+                                *response_size);
             if (++dropped >= EDGE_MODBUS_TCP_MAX_DROPPED_FRAMES)
                 break;
         }
@@ -1128,8 +1137,9 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
         device->received_packet_time = current_ms();
         debug_packet_with_id(device, device->received_packet_id, "RX", logged_response, *response_size, true, false);
         device->last_activity_at_ms = current_ms();
-        edge_log_packet(log_source(device), "rx", device_label(device), logged_response,
-                        *response_size);
+        if (automatic_debug_enabled(device))
+            edge_log_packet(log_source(device), "rx", device_label(device), logged_response,
+                            *response_size);
     } else if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 ||
                edge_industrial_protocol(device->config->protocol)) {
         close_fd(&device->link->fd);
@@ -1622,7 +1632,8 @@ static bool decode_scalar(const iot_edge_v1_ConfigItem *item, const uint8_t *raw
 /* Share the decoded value with debug before history policy or outbox work. */
 static void publish_debug_value(edge_acquisition_device *device, const uint8_t packet_id[16],
                                 const iot_edge_v1_TelemetryValue *value) {
-    if ((!device->endpoint->debug_enabled && !device->config->debug_enabled) || !device->owner->debug)
+    if (!automatic_debug_enabled(device) ||
+        (!device->endpoint->debug_enabled && !device->config->debug_enabled) || !device->owner->debug)
         return;
     iot_edge_v1_RawPacket packet = iot_edge_v1_RawPacket_init_zero;
     packet.debug = true;
@@ -3002,7 +3013,10 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
             if (!edge_device_runtime_init(&runtime->runtime, protocol,
                                           source->platform_id,
                                           device->device_id.bytes,
-                                          device->io_interval_ms,
+                                          device->io_interval_ms == 0U && protocol == EDGE_DEVICE_S7 &&
+                                                  runtime->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&
+                                                  runtime->endpoint->mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_CLIENT
+                                              ? EDGE_ACQUISITION_TICK_MS : device->io_interval_ms,
                                           device->report_interval_sec, now_ms,
                                           &kDriver, runtime)) {
                 free_devices(devices, output + 1U);
@@ -3011,9 +3025,9 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                           "device runtime initialization failed");
                 return false;
             }
-            /* TCP Client links are owned by this device (unlike serial and
-             * TCP Server links). Only S7 TCP Client uses per-cycle sessions. */
-            runtime->runtime.close_after_read =
+            /* S7 TCP Client scans use the short default interval and retain
+             * their negotiated session across acquisition cycles. */
+            runtime->runtime.s7_tcp_client =
                 protocol == EDGE_DEVICE_S7 &&
                 runtime->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&
                 runtime->endpoint->mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_CLIENT;
@@ -3072,12 +3086,7 @@ static void acquisition_status_local(edge_acquisition *acquisition,
         edge_protocol_set_bytes(&status->device_id, sizeof(status->device_id.bytes),
                                  device->config->device_id.bytes, 16U);
         const bool connected = device->link->fd >= 0;
-        const bool ready_between_cycles =
-            device->runtime.close_after_read && device->runtime.has_sample &&
-            device->has_last_io_result && device->last_io_result == EDGE_IO_OK;
-        if (connected || ready_between_cycles) {
-            /* A successful S7 scan deliberately closes TCP. Report its logical
-             * readiness without claiming an active client connection. */
+        if (connected) {
             copy_text(status->state, sizeof(status->state), "connected");
             status->client_count =
                 connected && device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET ? 1U : 0U;

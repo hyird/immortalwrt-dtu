@@ -416,6 +416,8 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     if (s7) {
         values[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
         values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
+        values[1].item.device.io_interval_ms = 0U;
+        values[1].item.device.report_interval_sec = 300U;
         for (unsigned index = 2; index < 4; ++index) {
             values[index] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
             values[index].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_S7_AREA;
@@ -491,28 +493,36 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); assert(debug_values == (s7 ? 2U : 3U)); }
     else { assert(debug_rx == 0 && debug_tx == 0 && debug_values == 0); }
     if (s7) {
-        /* Both ReadVar requests belong to one TCP session. The complete
-         * acquisition, not each point, must release that session. */
-        struct pollfd closed = {.fd = fd, .events = POLLIN | POLLHUP};
-        assert(poll(&closed, 1U, 3000) == 1);
-        uint8_t byte = 0U;
-        assert(recv(fd, &byte, 1U, MSG_PEEK) == 0);
-        bool idle_ready = false;
-        const uint64_t status_deadline = monotonic_ms() + 3000U;
-        while (monotonic_ms() < status_deadline) {
-            iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
-            edge_acquisition_status(acquisition, &status);
-            if (status.devices_count == 1U &&
-                strcmp(status.devices[0].state, "connected") == 0 &&
-                status.devices[0].client_count == 0U) {
-                idle_ready = true;
-                break;
-            }
-            struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
-            (void)poll(&event, 1U, 100);
-            edge_acquisition_tick(acquisition, monotonic_ms());
+        /* The S7 TCP Client reuses its session for a silent 1-second scan. */
+        const unsigned background_debug_rx = debug_rx;
+        const unsigned background_debug_tx = debug_tx;
+        const unsigned background_debug_success = debug_success;
+        const unsigned background_debug_values = debug_values;
+        struct pollfd scan = {.fd = fd, .events = POLLIN | POLLHUP};
+        assert(poll(&scan, 1U, 3000) == 1 && (scan.revents & POLLIN) != 0);
+        for (unsigned index = 0; index < 2; ++index) {
+            uint8_t request[1024];
+            receive_s7_request(fd, request);
+            assert(request[17] == 4);
+            uint8_t response[] = {3,0,0,27,2,0xf0,0x80,0x32,3,0,0,0,0,0,2,0,6,0,0,
+                                  4,1,0xff,4,0,16,0,0};
+            response[11] = request[11]; response[12] = request[12];
+            response[26] = (uint8_t)(110 + index);
+            assert(send(fd, response, sizeof(response), 0) == (ssize_t)sizeof(response));
         }
-        assert(idle_ready);
+        const uint64_t scan_deadline = monotonic_ms() + 1000U;
+        while (monotonic_ms() < scan_deadline) {
+            edge_acquisition_tick(acquisition, monotonic_ms());
+            usleep(10000);
+        }
+        assert(response_records == 1U && debug_rx == background_debug_rx &&
+               debug_tx == background_debug_tx && debug_success == background_debug_success &&
+               debug_values == background_debug_values);
+        iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
+        edge_acquisition_status(acquisition, &status);
+        assert(status.devices_count == 1U &&
+               strcmp(status.devices[0].state, "connected") == 0 &&
+               status.devices[0].client_count == 1U);
     } else {
         uint8_t byte = 0U;
         assert(recv(fd, &byte, 1U, MSG_PEEK | MSG_DONTWAIT) == -1 &&

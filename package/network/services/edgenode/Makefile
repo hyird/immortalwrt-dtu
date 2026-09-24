@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.60
+PKG_VERSION:=0.3.61
 PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
