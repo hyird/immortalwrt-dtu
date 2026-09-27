@@ -171,6 +171,8 @@ message Hello {
   bool supports_firmware_stream = 34;
   // Supports 300s probes and a >=900s application watchdog; absent preserves legacy timing.
   bool supports_sparse_heartbeat = 35;
+  // Enables start_before_ms only when correlated database-time samples are usable; otherwise fail closed.
+  bool supports_command_start_before = 36;
 }
 
 message HelloAck {
@@ -180,6 +182,10 @@ message HelloAck {
   uint32 heartbeat_interval_sec = 4;
   uint32 max_message_size = 5;
   int64 platform_time_ms = 6;
+  // PostgreSQL clock_timestamp() sample (UTC Unix milliseconds), set only when the Hello negotiated
+  // supports_command_start_before and sampled after that Hello, before this ack is sent.
+  // This is not a monotonic guarantee: clients must bound RTT monotonically and fail closed if uncertain.
+  optional int64 database_time_ms = 7;
 }
 
 message EnrollmentStatus {
@@ -274,6 +280,8 @@ message Heartbeat {
   string log_level = 23 [(nanopb).max_length = 8];
   TcpTraffic tcp_traffic = 24;
   TcpTraffic vpn_traffic = 25;
+  // Nonzero per-request nonce; correlate a HeartbeatAck before using its database-time sample.
+  optional uint64 nonce = 26;
 }
 
 message HeartbeatAck {
@@ -282,6 +290,11 @@ message HeartbeatAck {
   bool request_device_status = 3;
   uint64 traffic_sample_id = 4;
   uint64 vpn_traffic_sample_id = 5;
+  // Echoed only for the corresponding Heartbeat; unsolicited acknowledgements have no nonce.
+  optional uint64 nonce = 6;
+  // PostgreSQL clock_timestamp() sample for the echoed nonce; DB wall-clock jumps have no hard bound.
+  // Clients must account for RTT with a monotonic upper bound and fail closed if they cannot bound it.
+  optional int64 database_time_ms = 7;
 }
 
 message DeviceStatus {
@@ -693,6 +706,8 @@ message CommandRequest {
   uint32 readback_count = 5;
   uint32 fast_read_duration_sec = 6;
   uint32 fast_read_interval_sec = 7;
+  // Optional UTC Unix epoch deadline, derived from the persisted command_attempt.deadline.
+  optional int64 start_before_ms = 8;
 }
 
 message CommandProgress {

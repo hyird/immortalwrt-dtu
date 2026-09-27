@@ -44,6 +44,14 @@
 
 static void send_pending_modem_result(edge_ws_session *session);
 
+static void invalidate_command_clock(edge_ws_session *session) {
+    const bool was_valid = session->command_clock.valid;
+    edge_command_clock_invalidate(&session->command_clock);
+    if (was_valid)
+        edge_acquisition_invalidate_command_clock(session->app->acquisition,
+                                                 session->config->id);
+}
+
 static void reset_terminal_flow(edge_ws_session *session) {
     memset(session->terminal_output, 0, sizeof(session->terminal_output));
     session->terminal_output_size = 0U;
@@ -485,6 +493,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_firmware_update = true;
     hello->supports_firmware_stream = true;
     hello->supports_sparse_heartbeat = true;
+    hello->supports_command_start_before = true;
     hello->supports_device_config = true;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -512,7 +521,12 @@ static bool send_hello(edge_ws_session *session) {
         hello->mobile_connected = modem.connected;
         safe_copy(hello->mobile_ipv4, sizeof(hello->mobile_ipv4), modem.mobile_ipv4);
     }
+    session->hello_sent_monotonic_ms = monotonic_ms();
     const bool sent = send_envelope(session, envelope);
+    if (!sent || session->hello_sent_monotonic_ms == 0U) {
+        session->hello_sent_monotonic_ms = 0U;
+        invalidate_command_clock(session);
+    }
     return sent;
 }
 
@@ -629,6 +643,8 @@ static void schedule_reconnect(edge_ws_session *session) {
     session->last_heartbeat_ms = 0U;
     session->client_active = false;
     session->network_probe_nonce = 0U;
+    session->hello_sent_monotonic_ms = 0U;
+    invalidate_command_clock(session);
     ev_timer_stop(session->app->loop, &session->liveness_timer);
     ev_timer_stop(session->app->loop, &session->heartbeat_timer);
     ev_timer_stop(session->app->loop, &session->network_timer);
@@ -648,6 +664,9 @@ static void websocket_open(void *user) {
         (size_t)(session - session->app->sessions),
         lws_get_socket_fd(session->transport.socket));
     session->websocket_open = true;
+    session->hello_sent_monotonic_ms = 0U;
+    invalidate_command_clock(session);
+    edge_command_clock_reset(&session->command_clock);
     session->last_liveness_probe_ms = monotonic_ms();
     edge_retry_transport_connected(&session->retry, monotonic_ms(),
                                    EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS);
@@ -901,9 +920,21 @@ static void handle_device_command(edge_ws_session *session,
     if (request->device_id.size == 16U)
         memcpy(device_id, request->device_id.bytes, sizeof(device_id));
     char error[257] = {0};
-    if (edge_acquisition_command_for_platform(session->app->acquisition,
-                                              session->config->id, request,
-                                              error, sizeof(error))) {
+    uint64_t start_before_monotonic_ms = 0U;
+    uint64_t mapping_valid_until_monotonic_ms = 0U;
+    if (!request->has_start_before_ms ||
+        !edge_command_clock_deadline(&session->command_clock,
+                                     request->start_before_ms, monotonic_ms(),
+                                     &start_before_monotonic_ms,
+                                     &mapping_valid_until_monotonic_ms)) {
+        safe_copy(error, sizeof(error),
+                  "trusted database-time mapping is missing, stale, or deadline expired");
+    }
+    if (error[0] == '\0' &&
+        edge_acquisition_command_for_platform_until(
+            session->app->acquisition, session->config->id, request,
+            start_before_monotonic_ms, mapping_valid_until_monotonic_ms,
+            error, sizeof(error))) {
         char device_uuid[37];
         edge_config_format_uuid(device_id, device_uuid);
         char summary[160];
@@ -1170,9 +1201,23 @@ static void handle_network_config(edge_ws_session *session,
 }
 
 static bool send_heartbeat(edge_ws_session *session) {
-    iot_edge_v1_Envelope *envelope = &session->app->envelope;
-    if (!init_envelope(session, envelope))
+    const uint64_t probe_sent_ms = monotonic_ms();
+    const bool mapping_was_valid = session->command_clock.valid;
+    uint64_t clock_nonce = 0U;
+    if (probe_sent_ms == 0U ||
+        !edge_command_clock_begin_heartbeat(&session->command_clock,
+                                            probe_sent_ms, &clock_nonce)) {
+        invalidate_command_clock(session);
         return false;
+    }
+    if (mapping_was_valid && !session->command_clock.valid)
+        edge_acquisition_invalidate_command_clock(session->app->acquisition,
+                                                 session->config->id);
+    iot_edge_v1_Envelope *envelope = &session->app->envelope;
+    if (!init_envelope(session, envelope)) {
+        invalidate_command_clock(session);
+        return false;
+    }
     envelope->which_payload = iot_edge_v1_Envelope_heartbeat_tag;
     iot_edge_v1_Heartbeat *heartbeat = &envelope->payload.heartbeat;
     edge_traffic_sample(&session->app->traffic,
@@ -1208,14 +1253,18 @@ static bool send_heartbeat(edge_ws_session *session) {
     struct sysinfo info;
     if (sysinfo(&info) == 0)
         heartbeat->uptime_sec = (uint64_t)info.uptime;
+    heartbeat->has_nonce = true;
+    heartbeat->nonce = clock_nonce;
     heartbeat->active_config_version = session->active_revision;
     heartbeat->managed_endpoint_count = session->runtime_config.endpoint_count;
     heartbeat->managed_device_count = session->runtime_config.device_count;
     edge_spool_maintain(&session->spool);
     heartbeat->outbox_records = session->spool.outbox.count;
     heartbeat->outbox_bytes = session->spool.outbox.bytes;
-    if (!send_envelope(session, envelope))
+    if (!send_envelope(session, envelope)) {
+        invalidate_command_clock(session);
         return false;
+    }
     session->last_heartbeat_ms = monotonic_ms();
     send_outbox_window(session);
     report_network_rollback(session->app);
@@ -1492,6 +1541,19 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
             edge_ws_transport_close(&session->transport, 1002, "invalid hello ack");
             return;
         }
+        const uint64_t hello_ack_received_ms = session->last_inbound_ms;
+        if (ack->has_database_time_ms && session->hello_sent_monotonic_ms != 0U) {
+            const bool was_valid = session->command_clock.valid;
+            const bool accepted = edge_command_clock_accept_hello(
+                &session->command_clock, ack->database_time_ms,
+                session->hello_sent_monotonic_ms, hello_ack_received_ms);
+            if (!accepted && was_valid)
+                edge_acquisition_invalidate_command_clock(session->app->acquisition,
+                                                         session->config->id);
+        } else {
+            invalidate_command_clock(session);
+        }
+        session->hello_sent_monotonic_ms = 0U;
         memcpy(session->node_id, ack->assigned_node_id.bytes, 16U);
         session->session_epoch = ack->session_epoch;
         session->enrolled = true;
@@ -1518,6 +1580,17 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         break;
     }
     case iot_edge_v1_Envelope_heartbeat_ack_tag: {
+        const iot_edge_v1_HeartbeatAck *ack = &envelope->payload.heartbeat_ack;
+        {
+            const bool was_valid = session->command_clock.valid;
+            const bool accepted = edge_command_clock_accept_heartbeat(
+                &session->command_clock, ack->has_nonce, ack->nonce,
+                ack->has_database_time_ms, ack->database_time_ms,
+                session->last_inbound_ms);
+            if (!accepted && was_valid && !session->command_clock.valid)
+                edge_acquisition_invalidate_command_clock(session->app->acquisition,
+                                                         session->config->id);
+        }
         edge_traffic_ack(&session->app->traffic,
             (size_t)(session - session->app->sessions),
             envelope->payload.heartbeat_ack.traffic_sample_id);

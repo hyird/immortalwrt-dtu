@@ -30,6 +30,7 @@ typedef struct {
 
 uint16_t edge_sl651_crc(const uint8_t *bytes, size_t size);
 bool edge_sl651_parse(const uint8_t *bytes, size_t size, edge_sl651_frame *frame);
+bool edge_sl651_is_control_request(const uint8_t *bytes, size_t size);
 size_t edge_sl651_confirm(const edge_sl651_frame *frame, uint8_t ending, uint16_t sequence,
                           const uint8_t time[6], uint8_t *output, size_t capacity);
 bool edge_sl651_field(const uint8_t *body, size_t size, bool fixed, size_t offset,

@@ -27,6 +27,12 @@ static bool report_body(const uint8_t *p, size_t n) {
            day <= days[month - 1] + (month == 2 && decimal(p[2]) % 4 == 0) && decimal(p[5]) < 24 &&
            decimal(p[6]) < 60 && decimal(p[7]) < 60;
 }
+bool edge_sl651_is_control_request(const uint8_t *p, size_t n) {
+    return p != NULL && n >= 17U && p[0] == 0x7EU && p[1] == 0x7EU &&
+        (p[11] & 0xF0U) == 0x80U && (be16(p + 11) & 0xFFFU) + 17U == n &&
+        (p[13] == 2U || p[13] == 0x16U) && p[n - 3U] == 5U &&
+        edge_sl651_crc(p, n - 2U) == be16(p + n - 2U);
+}
 bool edge_sl651_parse(const uint8_t *p, size_t n, edge_sl651_frame *f) {
     if (!p || !f || n < 17 || p[0] != 0x7E || p[1] != 0x7E || (p[11] & 0xF0U) != 0 || !p[2] ||
         (p[13] != 2 && p[13] != 0x16) || (p[n - 3] != 3 && p[n - 3] != 0x17) ||

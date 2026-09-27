@@ -72,6 +72,32 @@ static size_t packet(uint8_t *out, unsigned total, unsigned sequence, uint8_t en
     out[19 + size] = (uint8_t)crc;
     return 20 + size;
 }
+static void test_control_request_classification(void) {
+    const uint8_t station[5] = {0, 0, 0, 0, 1}, time[6] = {0x24, 1, 2, 3, 4, 5};
+    edge_sl651_callbacks callbacks = {send_bytes, report, command, trace_packet};
+    edge_sl651_session *s = edge_sl651_create(2, station, callbacks, NULL);
+    uint8_t input[64], response[64];
+    const size_t input_size = upstream(input, 0x32, 3, 1);
+    reports = 0;
+    edge_sl651_receive(s, input, input_size, 1000U, time);
+    edge_sl651_commit(s, token, 1000U, time);
+
+    const uint8_t command_id[16] = {0x74U};
+    assert(edge_sl651_query(s, command_id, 0x37, NULL, 0U, 2000U, 1000U, time));
+    assert(edge_sl651_is_control_request(sent, sent_size));
+
+    edge_sl651_frame frame;
+    assert(edge_sl651_parse(input, input_size, &frame));
+    const uint8_t endings[] = {6U, 0x15U, 4U};
+    for (size_t index = 0; index < sizeof(endings); ++index) {
+        const size_t response_size = edge_sl651_confirm(
+            &frame, endings[index], 0U, time, response, sizeof(response));
+        assert(response_size != 0U &&
+               !edge_sl651_is_control_request(response, response_size));
+    }
+    edge_sl651_destroy(s);
+}
+
 static void test_missing_packets_and_timeout(void) {
     const uint8_t station[5] = {0, 0, 0, 0, 1}, time[6] = {0x24, 1, 2, 3, 4, 5};
     edge_sl651_callbacks callbacks = {send_bytes, report, command, trace_packet};
@@ -135,6 +161,7 @@ static void test_missing_packets_and_timeout(void) {
     edge_sl651_destroy(s);
 }
 int main(void) {
+    test_control_request_classification();
     test_missing_packets_and_timeout();
     const uint8_t station[5] = {0, 0, 0, 0, 1}, time[6] = {0x24, 1, 2, 3, 4, 5};
     for (unsigned mode = 1; mode <= 4; ++mode) {

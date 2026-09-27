@@ -2,6 +2,222 @@
 
 #include <string.h>
 
+void edge_command_clock_reset(edge_command_clock *clock) {
+    if (clock != NULL)
+        memset(clock, 0, sizeof(*clock));
+}
+
+void edge_command_clock_invalidate(edge_command_clock *clock) {
+    if (clock == NULL)
+        return;
+    clock->valid = false;
+    clock->pending = false;
+    clock->pending_nonce = 0U;
+    clock->pending_sent_monotonic_ms = 0U;
+    clock->sample_sent_monotonic_ms = 0U;
+    clock->sample_received_monotonic_ms = 0U;
+    clock->database_time_ms = 0;
+}
+
+static bool database_clock_sample_is_stable(const edge_command_clock *clock,
+                                             int64_t database_time_ms,
+                                             uint64_t sent_ms, uint64_t received_ms) {
+    if (!clock->valid)
+        return true;
+    if (database_time_ms < clock->database_time_ms ||
+        received_ms < clock->sample_sent_monotonic_ms)
+        return false;
+
+    const uint64_t earliest_elapsed = sent_ms > clock->sample_received_monotonic_ms
+        ? sent_ms - clock->sample_received_monotonic_ms : 0U;
+    const uint64_t latest_elapsed = received_ms - clock->sample_sent_monotonic_ms;
+    if (latest_elapsed > UINT64_MAX / EDGE_COMMAND_CLOCK_RATE_ERROR_PPM)
+        return false;
+    const uint64_t scaled_error = latest_elapsed * EDGE_COMMAND_CLOCK_RATE_ERROR_PPM;
+    const uint64_t rate_error = scaled_error / 1000000U +
+        (scaled_error % 1000000U != 0U ? 1U : 0U);
+    const uint64_t scaled_minimum_error =
+        earliest_elapsed * EDGE_COMMAND_CLOCK_RATE_ERROR_PPM;
+    const uint64_t minimum_rate_error = scaled_minimum_error / 1000000U +
+        (scaled_minimum_error % 1000000U != 0U ? 1U : 0U);
+    if (latest_elapsed > UINT64_MAX - rate_error - 2U)
+        return false;
+
+    /* Each DB timestamp may fall anywhere inside its request's measured RTT;
+     * allow both RTTs, millisecond truncation, and positive or negative drift. */
+    const uint64_t minimum_uncertainty = minimum_rate_error + 2U;
+    const uint64_t minimum_delta = earliest_elapsed > minimum_uncertainty
+        ? earliest_elapsed - minimum_uncertainty : 0U;
+    const uint64_t maximum_delta = latest_elapsed + rate_error + 2U;
+    const uint64_t database_delta = (uint64_t)database_time_ms -
+                                    (uint64_t)clock->database_time_ms;
+    return database_delta >= minimum_delta && database_delta <= maximum_delta;
+}
+
+static bool command_clock_nonce_was_issued(const edge_command_clock *clock,
+                                           uint64_t nonce) {
+    if (clock == NULL || nonce == 0U)
+        return false;
+    for (uint8_t index = 0U; index < clock->issued_nonce_count; ++index) {
+        const uint8_t slot = (uint8_t)((clock->issued_nonce_next +
+            EDGE_COMMAND_CLOCK_ISSUED_NONCES - clock->issued_nonce_count + index) %
+            EDGE_COMMAND_CLOCK_ISSUED_NONCES);
+        if (clock->issued_nonces[slot] == nonce)
+            return true;
+    }
+    return false;
+}
+
+static void command_clock_remember_nonce(edge_command_clock *clock, uint64_t nonce) {
+    if (nonce == 0U || command_clock_nonce_was_issued(clock, nonce))
+        return;
+    clock->issued_nonces[clock->issued_nonce_next] = nonce;
+    clock->issued_nonce_next = (uint8_t)((clock->issued_nonce_next + 1U) %
+                                         EDGE_COMMAND_CLOCK_ISSUED_NONCES);
+    if (clock->issued_nonce_count < EDGE_COMMAND_CLOCK_ISSUED_NONCES)
+        ++clock->issued_nonce_count;
+}
+
+static bool accept_database_time(edge_command_clock *clock, int64_t database_time_ms,
+                                 uint64_t sent_ms, uint64_t received_ms) {
+    if (clock == NULL || database_time_ms <= 0 || sent_ms > received_ms ||
+        received_ms - sent_ms > EDGE_COMMAND_CLOCK_MAX_RTT_MS ||
+        !database_clock_sample_is_stable(clock, database_time_ms, sent_ms, received_ms)) {
+        edge_command_clock_invalidate(clock);
+        return false;
+    }
+    clock->database_time_ms = database_time_ms;
+    clock->sample_sent_monotonic_ms = sent_ms;
+    clock->sample_received_monotonic_ms = received_ms;
+    clock->valid = true;
+    return true;
+}
+
+bool edge_command_clock_accept_hello(edge_command_clock *clock,
+                                     int64_t database_time_ms,
+                                     uint64_t sent_monotonic_ms,
+                                     uint64_t received_monotonic_ms) {
+    if (clock == NULL)
+        return false;
+    clock->pending = false;
+    clock->pending_nonce = 0U;
+    return accept_database_time(clock, database_time_ms, sent_monotonic_ms,
+                                received_monotonic_ms);
+}
+
+bool edge_command_clock_begin_heartbeat(edge_command_clock *clock,
+                                        uint64_t sent_monotonic_ms,
+                                        uint64_t *nonce) {
+    if (clock == NULL || nonce == NULL)
+        return false;
+    if (clock->pending) {
+        if (sent_monotonic_ms >= clock->pending_sent_monotonic_ms &&
+            sent_monotonic_ms - clock->pending_sent_monotonic_ms <=
+                EDGE_COMMAND_CLOCK_MAX_RTT_MS) {
+            *nonce = clock->pending_nonce;
+            return true;
+        }
+        edge_command_clock_invalidate(clock);
+    }
+    if (++clock->next_nonce == 0U)
+        ++clock->next_nonce;
+    clock->pending_nonce = clock->next_nonce;
+    command_clock_remember_nonce(clock, clock->pending_nonce);
+    clock->pending_sent_monotonic_ms = sent_monotonic_ms;
+    clock->pending = true;
+    *nonce = clock->pending_nonce;
+    return true;
+}
+
+bool edge_command_clock_accept_heartbeat(edge_command_clock *clock,
+                                         bool has_nonce, uint64_t nonce,
+                                         bool has_database_time,
+                                         int64_t database_time_ms,
+                                         uint64_t received_monotonic_ms) {
+    if (clock == NULL)
+        return false;
+    if (!clock->pending) {
+        if (!has_nonce && has_database_time)
+            edge_command_clock_invalidate(clock);
+        /* Repeated responses to overlapping heartbeats and delayed stale ACKs
+         * are not fresh samples; never let them poison a newer valid mapping. */
+        return false;
+    }
+    if (!has_nonce || nonce == 0U) {
+        edge_command_clock_invalidate(clock);
+        return false;
+    }
+    if (nonce != clock->pending_nonce) {
+        if (command_clock_nonce_was_issued(clock, nonce))
+            return false;
+        edge_command_clock_invalidate(clock);
+        return false;
+    }
+    const uint64_t sent_ms = clock->pending_sent_monotonic_ms;
+    clock->pending = false;
+    clock->pending_nonce = 0U;
+    clock->pending_sent_monotonic_ms = 0U;
+    if (!has_database_time) {
+        edge_command_clock_invalidate(clock);
+        return false;
+    }
+    return accept_database_time(clock, database_time_ms, sent_ms,
+                                received_monotonic_ms);
+}
+
+bool edge_command_clock_deadline(const edge_command_clock *clock,
+                                 int64_t start_before_ms,
+                                 uint64_t now_monotonic_ms,
+                                 uint64_t *deadline_monotonic_ms,
+                                 uint64_t *mapping_valid_until_monotonic_ms) {
+    if (clock == NULL || deadline_monotonic_ms == NULL ||
+        mapping_valid_until_monotonic_ms == NULL || !clock->valid ||
+        start_before_ms <= 0 || now_monotonic_ms < clock->sample_received_monotonic_ms ||
+        now_monotonic_ms - clock->sample_received_monotonic_ms >=
+            EDGE_COMMAND_CLOCK_MAX_AGE_MS ||
+        clock->sample_received_monotonic_ms > UINT64_MAX - EDGE_COMMAND_CLOCK_MAX_AGE_MS ||
+        now_monotonic_ms < clock->sample_sent_monotonic_ms)
+        return false;
+    *mapping_valid_until_monotonic_ms =
+        clock->sample_received_monotonic_ms + EDGE_COMMAND_CLOCK_MAX_AGE_MS;
+
+    const uint64_t elapsed = now_monotonic_ms - clock->sample_sent_monotonic_ms;
+    if (elapsed > UINT64_MAX / EDGE_COMMAND_CLOCK_RATE_ERROR_PPM)
+        return false;
+    const uint64_t scaled_error = elapsed * EDGE_COMMAND_CLOCK_RATE_ERROR_PPM;
+    const uint64_t rate_error = scaled_error / 1000000U +
+                                (scaled_error % 1000000U != 0U ? 1U : 0U);
+    const uint64_t database_time = (uint64_t)clock->database_time_ms;
+    if (database_time > UINT64_MAX - elapsed ||
+        database_time + elapsed > UINT64_MAX - rate_error - 1U)
+        return false;
+    /* The sample is no earlier than the monotonic send boundary. Advancing the
+     * sample by the entire send-to-now interval is therefore conservative;
+     * +1ms covers database timestamp truncation, and the ppm term bounds drift
+     * only while the database clock remains stable. */
+    const uint64_t upper_database_now = database_time + elapsed + rate_error + 1U;
+    if ((uint64_t)start_before_ms <= upper_database_now)
+        return false;
+    const uint64_t remaining = (uint64_t)start_before_ms - upper_database_now;
+    if (remaining > EDGE_COMMAND_CLOCK_MAX_START_WINDOW_MS)
+        return false;
+    const uint64_t monotonic_remaining =
+        (remaining * 1000000U) / (1000000U + EDGE_COMMAND_CLOCK_RATE_ERROR_PPM);
+    /* Round early for the next drift interval and two separately rounded ppm
+     * terms; deadlines with too little safe margin are rejected outright. */
+    if (monotonic_remaining <= 2U ||
+        now_monotonic_ms > UINT64_MAX - (monotonic_remaining - 2U))
+        return false;
+    *deadline_monotonic_ms = now_monotonic_ms + monotonic_remaining - 2U;
+    return *deadline_monotonic_ms > now_monotonic_ms;
+}
+
+static uint64_t runtime_now(const edge_device_runtime *runtime, uint64_t fallback) {
+    return runtime->driver.monotonic_ms != NULL
+               ? runtime->driver.monotonic_ms(runtime->driver_context)
+               : fallback;
+}
+
 static uint64_t advance_deadline(uint64_t current, uint64_t period, uint64_t now) {
     if (current > now)
         return current;
@@ -71,12 +287,47 @@ bool edge_device_runtime_init(edge_device_runtime *runtime,
     return true;
 }
 
+bool edge_device_runtime_command_id_seen(const edge_device_runtime *runtime,
+                                         const uint8_t command_id[16]) {
+    if (runtime == NULL || command_id == NULL)
+        return false;
+    for (uint8_t index = 0U; index < runtime->seen_command_count; ++index) {
+        const uint8_t slot = (uint8_t)((runtime->seen_command_next + 16U -
+                                        runtime->seen_command_count + index) % 16U);
+        if (memcmp(runtime->seen_command_ids[slot], command_id, 16U) == 0)
+            return true;
+    }
+    return false;
+}
+
+bool edge_device_runtime_claim_command_id(edge_device_runtime *runtime,
+                                          const uint8_t command_id[16]) {
+    if (runtime == NULL || command_id == NULL ||
+        edge_device_runtime_command_id_seen(runtime, command_id))
+        return false;
+    memcpy(runtime->seen_command_ids[runtime->seen_command_next], command_id, 16U);
+    runtime->seen_command_next = (uint8_t)((runtime->seen_command_next + 1U) % 16U);
+    if (runtime->seen_command_count < 16U)
+        ++runtime->seen_command_count;
+    return true;
+}
+
 bool edge_device_runtime_enqueue_write(edge_device_runtime *runtime,
                                        const edge_write_command *command) {
     if (runtime == NULL || command == NULL || command->value_size == 0U ||
         command->value_size > EDGE_DEVICE_VALUE_MAX ||
-        runtime->write_count >= EDGE_DEVICE_WRITE_QUEUE)
+        command->start_before_monotonic_ms == 0U)
         return false;
+    for (uint8_t index = 0U; index < runtime->seen_command_count; ++index) {
+        const uint8_t slot = (uint8_t)((runtime->seen_command_next + 16U -
+                                        runtime->seen_command_count + index) % 16U);
+        if (memcmp(runtime->seen_command_ids[slot], command->command_id, 16U) == 0)
+            return true;
+    }
+    if (runtime->write_count >= EDGE_DEVICE_WRITE_QUEUE)
+        return false;
+    if (!edge_device_runtime_claim_command_id(runtime, command->command_id))
+        return true;
     const uint8_t tail = (uint8_t)((runtime->write_head + runtime->write_count) %
                                    EDGE_DEVICE_WRITE_QUEUE);
     runtime->writes[tail] = *command;
@@ -135,11 +386,41 @@ static void handle_offline(edge_device_runtime *runtime) {
     close_connection(runtime);
 }
 
+void edge_device_runtime_reject_write(edge_device_runtime *runtime) {
+    if (runtime == NULL || runtime->write_count == 0U)
+        return;
+    runtime->southbound_write_started = false;
+    runtime->write_ack_received = false;
+    complete_write(runtime, EDGE_COMMAND_REJECTED_START_EXPIRED, NULL);
+}
+
+static bool reject_expired_write(edge_device_runtime *runtime, uint64_t now_ms) {
+    if (runtime->write_count == 0U)
+        return false;
+    const edge_write_command *command = &runtime->writes[runtime->write_head];
+    const bool start_is_future = runtime->driver.monotonic_ms == NULL
+        ? now_ms < command->start_before_monotonic_ms
+        : now_ms != 0U && now_ms < command->start_before_monotonic_ms;
+    const bool mapping_is_future = command->mapping_valid_until_monotonic_ms == 0U ||
+        now_ms < command->mapping_valid_until_monotonic_ms;
+    if (start_is_future && mapping_is_future)
+        return false;
+    edge_device_runtime_reject_write(runtime);
+    return true;
+}
+
+void edge_device_runtime_expire_write(edge_device_runtime *runtime, uint64_t now_ms) {
+    if (runtime != NULL)
+        (void)reject_expired_write(runtime, runtime_now(runtime, now_ms));
+}
+
 void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms,
                               int64_t observed_at_ms) {
     if (runtime == NULL)
         return;
 
+    const bool expired_before_io =
+        reject_expired_write(runtime, runtime_now(runtime, schedule_ms));
     bool sampled_this_cycle = false;
     const bool fast_report_due = runtime->fast_report_until_ms != 0U &&
         runtime->next_fast_report_at_ms <= runtime->fast_report_until_ms &&
@@ -170,16 +451,27 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
             runtime->next_io_at_ms = advance_deadline(runtime->next_io_at_ms,
                                                       runtime->io_interval_ms, schedule_ms);
         runtime->silent_background_read = !runtime->debug_read && runtime->write_count == 0U;
-        const bool command_cycle = runtime->write_count != 0U;
+        const bool command_cycle = runtime->write_count != 0U || expired_before_io;
         edge_io_result result = ensure_ready(runtime);
-        if (result == EDGE_IO_OK && runtime->write_count != 0U) {
+        const bool expired_after_ready = runtime->write_count != 0U &&
+            reject_expired_write(runtime, runtime_now(runtime, schedule_ms));
+        if (expired_after_ready)
+            result = EDGE_IO_OK;
+        if (result == EDGE_IO_OK && runtime->write_count != 0U &&
+            !expired_before_io && !expired_after_ready) {
             edge_device_sample actual = {0};
             const edge_write_command *command = &runtime->writes[runtime->write_head];
+            runtime->southbound_write_started = false;
+            runtime->write_ack_received = false;
             if (runtime->driver.write_readback == NULL) {
                 complete_write(runtime, EDGE_COMMAND_FAILED, NULL);
             } else {
                 result = runtime->driver.write_readback(runtime->driver_context, command, &actual);
-                if (result == EDGE_IO_OK) {
+                if (result == EDGE_IO_COMMAND_START_EXPIRED &&
+                    !runtime->southbound_write_started) {
+                    complete_write(runtime, EDGE_COMMAND_REJECTED_START_EXPIRED, NULL);
+                    result = EDGE_IO_OK;
+                } else if (result == EDGE_IO_OK) {
                     const bool verified = same_value(command, &actual);
                     actual.sampled_at_ms = observed_at_ms;
                     if (verified)

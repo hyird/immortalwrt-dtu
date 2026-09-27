@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -31,6 +32,8 @@ static void set_id(void *field, const uint8_t id[16]) {
 static void copy_text(char *output, size_t capacity, const char *input) {
     snprintf(output, capacity, "%s", input);
 }
+
+static void receive_modbus_request(int fd, uint8_t request[12]);
 
 static bool telemetry(void *context, const uint8_t platform_id[16],
                       const iot_edge_v1_TelemetryRecord *record) {
@@ -176,7 +179,8 @@ static void verify_shared_resources(void) {
     edge_acquisition_destroy(acquisition);
 }
 
-static bool sl651_allow_report, sl651_allow_command;
+static bool sl651_allow_report, sl651_allow_command, sl651_expect_failure;
+static bool sl651_last_ack_missing;
 static unsigned sl651_reports, sl651_results, sl651_images;
 static unsigned sl651_raw_frames;
 static bool sl651_store_report(void *context, const uint8_t platform[16], const iot_edge_v1_TelemetryRecord *record) {
@@ -208,7 +212,10 @@ static bool sl651_store_report(void *context, const uint8_t platform[16], const 
 }
 static bool sl651_store_command(void *context, const uint8_t platform[16], const iot_edge_v1_CommandResult *result) {
     (void)context; (void)platform;
-    assert(result->state == iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED);
+    assert(result->state == (sl651_expect_failure
+        ? iot_edge_v1_CommandState_COMMAND_STATE_FAILED
+        : iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED));
+    sl651_last_ack_missing = result->write_ack_missing;
     ++sl651_results; return sl651_allow_command;
 }
 static void sl651_pump(edge_acquisition *acquisition, unsigned milliseconds) {
@@ -224,9 +231,9 @@ static ssize_t sl651_read(edge_acquisition *acquisition, int fd, uint8_t *bytes,
     }
     return -1;
 }
-static void sl651_send_report(int fd, uint8_t function, uint8_t serial) {
+static void sl651_send_report(int fd, uint8_t function, uint8_t serial, uint8_t ending) {
     uint8_t bytes[] = {0x7E,0x7E,1,0,0,0,0,1,0,0,0,0,10,2,0,0,0x24,1,2,3,4,5,0x12,0x34,3,0,0};
-    bytes[10] = function; bytes[15] = serial;
+    bytes[10] = function; bytes[15] = serial; bytes[sizeof(bytes) - 3U] = ending;
     uint16_t crc = edge_sl651_crc(bytes, sizeof(bytes) - 2);
     bytes[sizeof(bytes)-2] = (uint8_t)(crc >> 8U); bytes[sizeof(bytes)-1] = (uint8_t)crc;
     assert(write(fd, bytes, sizeof(bytes)) == (ssize_t)sizeof(bytes));
@@ -270,7 +277,7 @@ static void verify_sl651_commit(void) {
         if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) break;
         close(fd); fd = -1; sl651_pump(acquisition, 100);
     }
-    assert(fd >= 0); sl651_send_report(fd, 0x32, 1);
+    assert(fd >= 0); sl651_send_report(fd, 0x32, 1, 3);
     uint64_t until = monotonic_ms() + 5000;
     while (!sl651_reports && monotonic_ms() < until) sl651_pump(acquisition, 20);
     assert(sl651_reports); struct pollfd ready = {.fd = fd, .events = POLLIN};
@@ -283,12 +290,61 @@ static void verify_sl651_commit(void) {
     request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
     request.values[0].expected.which_value = iot_edge_v1_ScalarValue_string_value_tag;
     strcpy(request.values[0].expected.value.string_value, "12.34"); request.timeout_ms = 10000;
-    assert(edge_acquisition_command(acquisition, &request, error, sizeof(error)));
+    request.has_start_before_ms = true; request.start_before_ms = 1;
+    const uint8_t platform_id[16] = {0};
+    assert(edge_acquisition_command_for_platform_until(acquisition, platform_id,
+        &request, monotonic_ms() + 30000U, UINT64_MAX, error, sizeof(error)));
     n = sl651_read(acquisition, fd, bytes, sizeof(bytes)); assert(n == 27 && bytes[n-3] == 5 && bytes[14] == 0 && bytes[15] == 0 && bytes[22] == 0x12);
-    sl651_send_report(fd, 0x4C, 2); until = monotonic_ms() + 5000;
+    sl651_send_report(fd, 0x4C, 2, 3); until = monotonic_ms() + 5000;
     while (!sl651_results && monotonic_ms() < until) sl651_pump(acquisition, 20);
     assert(sl651_results && poll(&ready, 1, 100) == 0);
     sl651_allow_command = true; n = sl651_read(acquisition, fd, bytes, sizeof(bytes)); assert(n >= 25 && bytes[n-3] == 4 && bytes[15] == 2);
+
+    const unsigned prior_results = sl651_results;
+    const uint8_t continuous_command_id[16] = {10};
+    set_id(&request.command_id, continuous_command_id);
+    request.timeout_ms = 100U;
+    const uint64_t continuous_start = monotonic_ms();
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, platform_id, &request, continuous_start + 30000U,
+        continuous_start + 30000U, error, sizeof(error)));
+    n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
+    assert(n == 27 && bytes[n - 3] == 5 && bytes[10] == 0x4C);
+    sl651_send_report(fd, 0x4C, 3, 0x17);
+    n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
+    assert(n == 25 && bytes[n - 3] == 6 && bytes[10] == 0x4C);
+    /* The station repeats the continuation after its first ACK is lost. It gets
+     * another ACK, never a resend of the already-started control request. */
+    sl651_send_report(fd, 0x4C, 3, 0x17);
+    n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
+    assert(n == 25 && bytes[n - 3] == 6 && bytes[10] == 0x4C);
+    sl651_send_report(fd, 0x4C, 4, 3);
+    until = monotonic_ms() + 5000U;
+    while (sl651_results == prior_results && monotonic_ms() < until)
+        sl651_pump(acquisition, 20U);
+    assert(sl651_results == prior_results + 1U);
+    n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
+    assert(n >= 25 && bytes[n - 3] == 4);
+
+    const unsigned before_timeout = sl651_results;
+    const uint8_t timeout_command_id[16] = {11};
+    set_id(&request.command_id, timeout_command_id);
+    sl651_expect_failure = true;
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, platform_id, &request, monotonic_ms() + 30000U,
+        monotonic_ms() + 30000U, error, sizeof(error)));
+    n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
+    assert(n == 27 && bytes[n - 3] == 5 && bytes[10] == 0x4C);
+    until = monotonic_ms() + 11000U;
+    while (sl651_results == before_timeout && monotonic_ms() < until) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        struct pollfd no_resend = {.fd = fd, .events = POLLIN};
+        assert(poll(&no_resend, 1, 0) == 0);
+        usleep(10000U);
+    }
+    assert(sl651_results > before_timeout && sl651_last_ack_missing);
+    sl651_expect_failure = false;
+
     uint8_t image_body[8202] = {0,3,0x24,1,2,3,4,5,0xF3,0xF3,0xFF,0xD8};
     image_body[8200] = 0xFF; image_body[8201] = 0xD9;
     size_t offset = 0;
@@ -508,6 +564,469 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     close(listener);
 }
 
+#define TEST_S7_POINT_COUNT 11U
+
+typedef enum {
+    TEST_S7_RESPONSE_VALID,
+    TEST_S7_RESPONSE_SHORT,
+    TEST_S7_RESPONSE_WRONG_TRANSPORT,
+    TEST_S7_RESPONSE_UNDECODABLE,
+} test_s7_response_case;
+
+static unsigned s7_test_records;
+static unsigned s7_invalid_responses;
+
+static int open_s7_listener(struct sockaddr_in *address) {
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    memset(address, 0, sizeof(*address));
+    address->sin_family = AF_INET;
+    address->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(bind(listener, (struct sockaddr *)address, sizeof(*address)) == 0);
+    socklen_t length = sizeof(*address);
+    assert(getsockname(listener, (struct sockaddr *)address, &length) == 0);
+    assert(listen(listener, 4) == 0);
+    return listener;
+}
+
+static edge_runtime_config make_s7_config(iot_edge_v1_ConfigItem *items,
+                                           uint16_t port, size_t point_count,
+                                           bool undecodable_last_point,
+                                           uint32_t report_interval_sec) {
+    edge_runtime_config config = make_config(items);
+    items[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
+    items[0].item.endpoint.port = port;
+    items[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
+    items[1].item.device.io_interval_ms = 300000U;
+    items[1].item.device.report_interval_sec = report_interval_sec;
+    for (size_t index = 0U; index < point_count; ++index) {
+        iot_edge_v1_ConfigItem *item = &items[index + 2U];
+        *item = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+        item->kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_S7_AREA;
+        item->which_item = iot_edge_v1_ConfigItem_s7_area_tag;
+        iot_edge_v1_S7AreaConfig *point = &item->item.s7_area;
+        set_id(&point->device_id, items[1].item.device.device_id.bytes);
+        snprintf(point->element_id, sizeof(point->element_id), "s7-%02zu", index);
+        copy_text(point->area, sizeof(point->area), "DB");
+        copy_text(point->data_type, sizeof(point->data_type),
+                  undecodable_last_point && index + 1U == point_count
+                      ? "FLOAT32" : "UINT16");
+        point->db_number = 1U;
+        point->start = (uint32_t)(index * 4U);
+        point->size = 2U;
+        point->scale = 1.0;
+        point->decimals = -1;
+    }
+    config.item_count = (uint32_t)(point_count + 2U);
+    return config;
+}
+
+static bool count_s7_telemetry(void *context, const uint8_t platform_id[16],
+                               const iot_edge_v1_TelemetryRecord *record) {
+    (void)context;
+    (void)platform_id;
+    assert(record->protocol == iot_edge_v1_Protocol_PROTOCOL_S7);
+    ++s7_test_records;
+    return true;
+}
+
+static bool verify_s7_full_telemetry(void *context, const uint8_t platform_id[16],
+                                     const iot_edge_v1_TelemetryRecord *record) {
+    (void)context;
+    (void)platform_id;
+    assert(record->protocol == iot_edge_v1_Protocol_PROTOCOL_S7);
+    assert(record->values_count == TEST_S7_POINT_COUNT);
+    assert(record->raw_payloads_count == TEST_S7_POINT_COUNT);
+    assert(record->raw_packet_ids_count == TEST_S7_POINT_COUNT);
+    for (size_t index = 0U; index < TEST_S7_POINT_COUNT; ++index) {
+        char element_id[32];
+        snprintf(element_id, sizeof(element_id), "s7-%02zu", index);
+        const iot_edge_v1_TelemetryValue *value = NULL;
+        for (pb_size_t candidate = 0U; candidate < record->values_count; ++candidate)
+            if (strcmp(record->values[candidate].element_id, element_id) == 0)
+                value = &record->values[candidate];
+        assert(value != NULL && value->has_value);
+        assert(value->value.which_value == iot_edge_v1_ScalarValue_unsigned_value_tag);
+        assert(value->value.value.unsigned_value == 100U + index);
+        assert(record->raw_payloads[index]->size == 27U);
+        assert(record->raw_packet_ids[index]->size == 16U);
+        for (size_t previous = 0U; previous < index; ++previous)
+            assert(memcmp(record->raw_packet_ids[index]->bytes,
+                          record->raw_packet_ids[previous]->bytes, 16U) != 0);
+    }
+    ++s7_test_records;
+    return true;
+}
+
+static void s7_set_timeout(int fd) {
+    const struct timeval timeout = {.tv_sec = 3};
+    assert(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+}
+
+static void s7_send_bytes(int fd, const uint8_t *bytes, size_t size) {
+    size_t offset = 0U;
+    while (offset < size) {
+        const ssize_t sent = send(fd, bytes + offset, size - offset, 0);
+        assert(sent > 0);
+        offset += (size_t)sent;
+    }
+}
+
+static void s7_server_handshake(int fd) {
+    uint8_t request[1024];
+    receive_s7_request(fd, request);
+    assert(request[4] == 0x11U && request[5] == 0xe0U);
+    const uint8_t cotp[] = {3,0,0,11,6,0xd0,0,1,0,6,0};
+    s7_send_bytes(fd, cotp, sizeof(cotp));
+    receive_s7_request(fd, request);
+    assert(request[17] == 0xf0U);
+    uint8_t setup[] = {3,0,0,27,2,0xf0,0x80,0x32,3,0,0,0,0,0,8,0,0,0,0,
+                       0xf0,0,0,1,0,1,1,0xe0};
+    setup[11] = request[11];
+    setup[12] = request[12];
+    s7_send_bytes(fd, setup, sizeof(setup));
+}
+
+static void s7_send_read_response(int fd, const uint8_t request[1024],
+                                  size_t point_index,
+                                  test_s7_response_case response_case) {
+    uint8_t response[] = {3,0,0,27,2,0xf0,0x80,0x32,3,0,0,0,0,0,2,0,6,0,0,
+                          4,1,0xff,4,0,16,0,0};
+    response[11] = request[11];
+    response[12] = request[12];
+    response[26] = (uint8_t)(100U + point_index);
+    if (response_case == TEST_S7_RESPONSE_SHORT) {
+        response[3] = 26U;
+        response[16] = 5U;
+        s7_send_bytes(fd, response, sizeof(response) - 1U);
+        ++s7_invalid_responses;
+        return;
+    }
+    if (response_case == TEST_S7_RESPONSE_WRONG_TRANSPORT)
+        response[22] = 0x03U;
+    s7_send_bytes(fd, response, sizeof(response));
+    if (response_case != TEST_S7_RESPONSE_VALID)
+        ++s7_invalid_responses;
+}
+
+static int accept_s7_with_ticks(int listener, edge_acquisition *acquisition,
+                                uint64_t timeout_ms) {
+    const uint64_t deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        struct pollfd ready = {.fd = listener, .events = POLLIN};
+        const int result = poll(&ready, 1U, 10);
+        if (result < 0 && errno == EINTR)
+            continue;
+        if (result > 0 && (ready.revents & POLLIN) != 0) {
+            const int fd = accept(listener, NULL, NULL);
+            assert(fd >= 0);
+            s7_set_timeout(fd);
+            return fd;
+        }
+    }
+    return -1;
+}
+
+static void wait_s7_peer_close(edge_acquisition *acquisition, int fd,
+                               uint64_t timeout_ms) {
+    const uint64_t deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        struct pollfd ready = {.fd = fd, .events = POLLIN};
+        const int result = poll(&ready, 1U, 10);
+        if (result < 0 && errno == EINTR)
+            continue;
+        if (result > 0 && (ready.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+            uint8_t byte;
+            const ssize_t received = recv(fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
+            if (received == 0)
+                return;
+            assert(received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+        }
+    }
+    assert(!"S7 client did not close its timed-out TCP session");
+}
+
+static bool s7_status_is(edge_acquisition *acquisition, const char *state) {
+    iot_edge_v1_DeviceStatusReport report =
+        iot_edge_v1_DeviceStatusReport_init_zero;
+    edge_acquisition_status(acquisition, &report);
+    return report.devices_count == 1U &&
+           strcmp(report.devices[0].state, state) == 0;
+}
+
+static int accept_s7_retry_session(int listener, edge_acquisition *acquisition,
+                                   uint64_t timeout_ms) {
+    const uint64_t deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        if (s7_status_is(acquisition, "reconnecting"))
+            return -1;
+        struct pollfd descriptors[2] = {
+            {.fd = listener, .events = POLLIN},
+            {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN},
+        };
+        const int result = poll(descriptors, 2U, 10);
+        if (result < 0 && errno == EINTR)
+            continue;
+        assert(result >= 0);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        if (s7_status_is(acquisition, "reconnecting"))
+            return -1;
+        if (result > 0 && (descriptors[0].revents & POLLIN) != 0) {
+            const int fd = accept(listener, NULL, NULL);
+            assert(fd >= 0);
+            s7_set_timeout(fd);
+            return fd;
+        }
+    }
+    return -1;
+}
+
+static bool wait_s7_status(edge_acquisition *acquisition, const char *state,
+                           uint64_t timeout_ms) {
+    const uint64_t deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        if (s7_status_is(acquisition, state))
+            return true;
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 10);
+    }
+    return false;
+}
+
+static bool wait_s7_activity_after(edge_acquisition *acquisition,
+                                  int64_t previous_activity_ms,
+                                  uint64_t timeout_ms) {
+    const uint64_t deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        iot_edge_v1_DeviceStatusReport report =
+            iot_edge_v1_DeviceStatusReport_init_zero;
+        edge_acquisition_status(acquisition, &report);
+        if (report.devices_count == 1U &&
+            strcmp(report.devices[0].state, "connected") == 0 &&
+            report.devices[0].last_activity_at_ms > previous_activity_ms)
+            return true;
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 10);
+    }
+    return false;
+}
+
+static void verify_s7_timeout_retry_over_loopback(void) {
+    struct sockaddr_in address;
+    const int listener = open_s7_listener(&address);
+    iot_edge_v1_ConfigItem values[3];
+    edge_runtime_config config = make_s7_config(values, ntohs(address.sin_port), 1U,
+                                                false, 300U);
+    edge_acquisition *acquisition = edge_acquisition_create(count_s7_telemetry,
+                                                              command, NULL);
+    assert(acquisition != NULL);
+    s7_test_records = 0U;
+    char error[256] = {0};
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+
+    int fd = accept_s7_with_ticks(listener, acquisition, 3000U);
+    assert(fd >= 0);
+    s7_server_handshake(fd);
+    uint8_t request[1024];
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_VALID);
+    assert(wait_s7_status(acquisition, "connected", 3000U));
+    iot_edge_v1_DeviceStatusReport status =
+        iot_edge_v1_DeviceStatusReport_init_zero;
+    edge_acquisition_status(acquisition, &status);
+    const int64_t first_activity_ms = status.devices[0].last_activity_at_ms;
+
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    wait_s7_peer_close(acquisition, fd, 3000U);
+    close(fd);
+
+    fd = accept_s7_retry_session(listener, acquisition, 3000U);
+    assert(fd >= 0);
+    s7_server_handshake(fd);
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_VALID);
+    assert(wait_s7_activity_after(acquisition, first_activity_ms, 3000U));
+    assert(s7_test_records == 0U);
+    edge_acquisition_stop(acquisition);
+    close(fd);
+    close(listener);
+    edge_acquisition_destroy(acquisition);
+}
+
+static void verify_s7_invalid_response_retry_over_loopback(void) {
+    struct sockaddr_in address;
+    const int listener = open_s7_listener(&address);
+    iot_edge_v1_ConfigItem values[3];
+    edge_runtime_config config = make_s7_config(values, ntohs(address.sin_port), 1U,
+                                                false, 1U);
+    edge_acquisition *acquisition = edge_acquisition_create(count_s7_telemetry,
+                                                              command, NULL);
+    assert(acquisition != NULL);
+    s7_test_records = 0U;
+    s7_invalid_responses = 0U;
+    char error[256] = {0};
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+
+    int fd = accept_s7_with_ticks(listener, acquisition, 3000U);
+    assert(fd >= 0);
+    s7_server_handshake(fd);
+    uint8_t request[1024];
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_VALID);
+    assert(wait_s7_status(acquisition, "connected", 3000U));
+    iot_edge_v1_DeviceStatusReport status =
+        iot_edge_v1_DeviceStatusReport_init_zero;
+    edge_acquisition_status(acquisition, &status);
+    int64_t last_activity_ms = status.devices[0].last_activity_at_ms;
+    s7_test_records = 0U;
+
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_VALID);
+    assert(wait_s7_activity_after(acquisition, last_activity_ms, 3000U));
+    s7_test_records = 0U;
+
+    /* The 1-second ordinary report is due on this scan; fail the read and its retry. */
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_WRONG_TRANSPORT);
+    wait_s7_peer_close(acquisition, fd, 3000U);
+    close(fd);
+
+    fd = accept_s7_retry_session(listener, acquisition, 3000U);
+    assert(fd >= 0);
+    s7_server_handshake(fd);
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_SHORT);
+    wait_s7_peer_close(acquisition, fd, 3000U);
+    assert(wait_s7_status(acquisition, "reconnecting", 3000U));
+    assert(s7_test_records == 0U);
+    assert(s7_invalid_responses == 2U);
+    close(fd);
+
+    fd = accept_s7_with_ticks(listener, acquisition, 3000U);
+    assert(fd >= 0);
+    s7_server_handshake(fd);
+    receive_s7_request(fd, request);
+    assert(request[17] == 4U);
+    s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_VALID);
+    const uint64_t report_deadline = monotonic_ms() + 3000U;
+    while (s7_test_records == 0U && monotonic_ms() < report_deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 10);
+    }
+    assert(s7_test_records == 1U);
+    edge_acquisition_stop(acquisition);
+    close(fd);
+    close(listener);
+    edge_acquisition_destroy(acquisition);
+}
+
+static void verify_s7_full_and_invalid_scans(void) {
+    for (unsigned scenario = TEST_S7_RESPONSE_VALID;
+         scenario <= TEST_S7_RESPONSE_UNDECODABLE; ++scenario) {
+        struct sockaddr_in address;
+        const int listener = open_s7_listener(&address);
+        iot_edge_v1_ConfigItem values[TEST_S7_POINT_COUNT + 2U];
+        const bool undecodable = scenario == TEST_S7_RESPONSE_UNDECODABLE;
+        edge_runtime_config config = make_s7_config(
+            values, ntohs(address.sin_port), TEST_S7_POINT_COUNT, undecodable, 1U);
+        s7_test_records = 0U;
+        s7_invalid_responses = 0U;
+        edge_acquisition *acquisition = edge_acquisition_create(
+            scenario == TEST_S7_RESPONSE_VALID ? verify_s7_full_telemetry
+                                                : count_s7_telemetry,
+            command, NULL);
+        assert(acquisition != NULL);
+        char error[256] = {0};
+        assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                      error, sizeof(error)));
+        assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+
+        int fd = -1;
+        size_t reads_on_connection = 0U;
+        bool failed_scan_closed = false;
+        const uint64_t deadline = monotonic_ms() + 5000U;
+        while (monotonic_ms() < deadline && s7_test_records == 0U &&
+               !failed_scan_closed) {
+            edge_acquisition_tick(acquisition, monotonic_ms());
+            struct pollfd descriptors[2] = {
+                {.fd = listener, .events = POLLIN},
+                {.fd = fd, .events = POLLIN | POLLHUP},
+            };
+            const nfds_t count = fd >= 0 ? 2U : 1U;
+            const int ready_count = poll(descriptors, count, 5);
+            if (ready_count < 0 && errno == EINTR)
+                continue;
+            assert(ready_count >= 0);
+            if (fd >= 0 && (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+                uint8_t byte;
+                const ssize_t peeked = recv(fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
+                if (peeked == 0) {
+                    if (scenario != TEST_S7_RESPONSE_VALID &&
+                        reads_on_connection == TEST_S7_POINT_COUNT)
+                        failed_scan_closed = true;
+                    close(fd);
+                    fd = -1;
+                    reads_on_connection = 0U;
+                } else if (peeked > 0) {
+                    uint8_t request[1024];
+                    receive_s7_request(fd, request);
+                    assert(request[17] == 4U);
+                    const size_t point_index = reads_on_connection % TEST_S7_POINT_COUNT;
+                    ++reads_on_connection;
+                    test_s7_response_case response_case = TEST_S7_RESPONSE_VALID;
+                    if (point_index + 1U == TEST_S7_POINT_COUNT) {
+                        response_case = (test_s7_response_case)scenario;
+                        if (scenario == TEST_S7_RESPONSE_UNDECODABLE)
+                            response_case = TEST_S7_RESPONSE_VALID;
+                    }
+                    s7_send_read_response(fd, request, point_index, response_case);
+                } else {
+                    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+                }
+            }
+            if (fd < 0 && (descriptors[0].revents & POLLIN) != 0) {
+                fd = accept(listener, NULL, NULL);
+                assert(fd >= 0);
+                s7_set_timeout(fd);
+                s7_server_handshake(fd);
+                reads_on_connection = 0U;
+            }
+        }
+        if (scenario == TEST_S7_RESPONSE_VALID) {
+            assert(s7_test_records == 1U);
+        } else {
+            assert(s7_test_records == 0U);
+            assert(failed_scan_closed);
+            assert(s7_invalid_responses ==
+                   (scenario == TEST_S7_RESPONSE_UNDECODABLE ? 0U : 1U));
+        }
+        edge_acquisition_destroy(acquisition);
+        if (fd >= 0)
+            close(fd);
+        close(listener);
+    }
+}
+
 static unsigned industrial_records, industrial_commands;
 static bool industrial_telemetry(void *context, const uint8_t platform[16], const iot_edge_v1_TelemetryRecord *record) {
     (void)context; (void)platform;
@@ -563,6 +1082,7 @@ static void verify_industrial_acquisition(iot_edge_v1_Protocol protocol, bool va
     struct timeval timeout = {.tv_sec = 3}; assert(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
     uint8_t stored[4] = {0, 0x42, 0, 0};
     if (protocol != iot_edge_v1_Protocol_PROTOCOL_DLT645) { stored[0] = protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? 42 : 0; stored[1] = protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? 0 : 42; }
+    const uint8_t platform_id[16] = {0};
     unsigned writes = 0; bool queued = false;
     uint64_t deadline = monotonic_ms() + 7000;
     while (!industrial_commands && monotonic_ms() < deadline) {
@@ -606,16 +1126,212 @@ static void verify_industrial_acquisition(iot_edge_v1_Protocol protocol, bool va
             request.values_count=1;strcpy(request.values[0].element_id,"value");request.values[0].has_expected=true;
             request.values[0].expected.kind=iot_edge_v1_ValueKind_VALUE_STRING;
             request.values[0].expected.which_value=iot_edge_v1_ScalarValue_string_value_tag;
+            request.has_start_before_ms = true; request.start_before_ms = 1;
             strcpy(request.values[0].expected.value.string_value,protocol==iot_edge_v1_Protocol_PROTOCOL_DLT645?"1000000.00":"65536");
-            assert(!edge_acquisition_command(acquisition,&request,error,sizeof(error)));
+            assert(!edge_acquisition_command_for_platform_until(acquisition, platform_id, &request, monotonic_ms()+60000U, UINT64_MAX, error, sizeof(error)));
             strcpy(request.values[0].expected.value.string_value,"-18446744073709551615");
-            assert(!edge_acquisition_command(acquisition,&request,error,sizeof(error)));
+            assert(!edge_acquisition_command_for_platform_until(acquisition, platform_id, &request, monotonic_ms()+60000U, UINT64_MAX, error, sizeof(error)));
             strcpy(request.values[0].expected.value.string_value,protocol==iot_edge_v1_Protocol_PROTOCOL_DLT645?"13.25":"13");
-            assert(edge_acquisition_command(acquisition,&request,error,sizeof(error)));queued=true;
+            assert(edge_acquisition_command_for_platform_until(acquisition, platform_id, &request, monotonic_ms()+60000U, UINT64_MAX, error, sizeof(error)));queued=true;
         }
     }
     assert(industrial_records && industrial_commands==1 && writes==1);
     close(fd);edge_acquisition_destroy(acquisition);close(listener);
+}
+
+static unsigned deadline_ipc_results;
+static iot_edge_v1_CommandState deadline_ipc_state;
+static bool deadline_ipc_ack_missing;
+static bool deadline_ipc_command(void *context, const uint8_t platform[16],
+                                const iot_edge_v1_CommandResult *result) {
+    (void)context;
+    (void)platform;
+    ++deadline_ipc_results;
+    deadline_ipc_state = result->state;
+    deadline_ipc_ack_missing = result->write_ack_missing;
+    return true;
+}
+
+static void verify_stale_deadline_over_ipc(void) {
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    struct sockaddr_in address = {.sin_family = AF_INET,
+                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
+    socklen_t address_size = sizeof(address);
+    assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
+    assert(listen(listener, 1) == 0);
+
+    iot_edge_v1_ConfigItem items[3];
+    edge_runtime_config config = make_config(items);
+    items[0].item.endpoint.port = ntohs(address.sin_port);
+    items[2].item.modbus_register.writable = true;
+    deadline_ipc_results = 0U;
+    char error[256] = {0};
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry,
+                                                              deadline_ipc_command, NULL);
+    assert(acquisition != NULL);
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    struct pollfd ready = {.fd = listener, .events = POLLIN};
+    assert(poll(&ready, 1, 3000) == 1);
+    int peer = accept(listener, NULL, NULL);
+    assert(peer >= 0);
+    struct timeval timeout = {.tv_sec = 3};
+    assert(setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+    uint8_t request_frame[12];
+    receive_modbus_request(peer, request_frame);
+    assert(request_frame[7] == 3U);
+
+    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
+    const uint8_t command_id[16] = {0x71U}, device_id[16] = {2U};
+    set_id(&request.command_id, command_id);
+    set_id(&request.device_id, device_id);
+    request.values_count = 1U;
+    copy_text(request.values[0].element_id, sizeof(request.values[0].element_id),
+              "holding-1");
+    request.values[0].has_expected = true;
+    request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    request.values[0].expected.which_value =
+        iot_edge_v1_ScalarValue_string_value_tag;
+    copy_text(request.values[0].expected.value.string_value,
+              sizeof(request.values[0].expected.value.string_value), "43");
+    request.timeout_ms = 5000U;
+    char missing_error[128] = {0};
+    assert(!edge_acquisition_command_for_platform_until(
+        acquisition, (const uint8_t[16]){0}, &request,
+        monotonic_ms() + 100U, UINT64_MAX, missing_error, sizeof(missing_error)));
+    request.has_start_before_ms = true;
+    request.start_before_ms = 1700000005000LL;
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, (const uint8_t[16]){0}, &request,
+        monotonic_ms() + 100U, UINT64_MAX, error, sizeof(error)));
+    usleep(200000);
+
+    const uint64_t result_deadline = monotonic_ms() + 3000U;
+    while (deadline_ipc_results == 0U && monotonic_ms() < result_deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(deadline_ipc_results == 1U &&
+           deadline_ipc_state == iot_edge_v1_CommandState_COMMAND_STATE_REJECTED &&
+           !deadline_ipc_ack_missing);
+    ready = (struct pollfd){.fd = peer, .events = POLLIN};
+    if (poll(&ready, 1, 200) == 1) {
+        receive_modbus_request(peer, request_frame);
+        assert(request_frame[7] == 3U);
+    }
+    close(peer);
+    edge_acquisition_destroy(acquisition);
+    close(listener);
+}
+
+static void verify_pty_partial_write_is_not_replayed(void) {
+    const int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+    char path[97];
+    copy_text(path, sizeof(path), ptsname(master));
+    iot_edge_v1_ConfigItem items[3];
+    edge_runtime_config config = make_config(items);
+    make_serial_config(items, 9600U);
+    copy_text(items[0].item.endpoint.serial.channel,
+              sizeof(items[0].item.endpoint.serial.channel), path);
+    items[2].item.modbus_register.writable = true;
+    deadline_ipc_results = 0U;
+    char error[256] = {0};
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry,
+                                                              deadline_ipc_command, NULL);
+    assert(acquisition != NULL);
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+
+    struct pollfd ready = {.fd = master, .events = POLLIN};
+    assert(poll(&ready, 1, 3000) == 1);
+    uint8_t frame[4096];
+    const ssize_t initial_size = read(master, frame, sizeof(frame));
+    assert(initial_size > 0 && frame[1] == 3U);
+    int fill_fd = open(path, O_WRONLY | O_NOCTTY | O_NONBLOCK);
+    assert(fill_fd >= 0);
+    const uint8_t filler[4096] = {0x55U};
+    size_t queued = 0U;
+    bool full = false;
+    while (queued < 1024U * 1024U) {
+        const ssize_t count = write(fill_fd, filler, sizeof(filler));
+        if (count > 0) {
+            queued += (size_t)count;
+            continue;
+        }
+        assert(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+        full = true;
+        break;
+    }
+    assert(full && queued > sizeof(filler));
+    const uint8_t byte = 0x55U;
+    while (queued < 1024U * 1024U) {
+        const ssize_t count = write(fill_fd, &byte, sizeof(byte));
+        if (count == 1) {
+            ++queued;
+            continue;
+        }
+        assert(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+        break;
+    }
+
+    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
+    const uint8_t command_id[16] = {0x72U}, device_id[16] = {2U};
+    set_id(&request.command_id, command_id);
+    set_id(&request.device_id, device_id);
+    request.values_count = 1U;
+    copy_text(request.values[0].element_id, sizeof(request.values[0].element_id),
+              "holding-1");
+    request.values[0].has_expected = true;
+    request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    request.values[0].expected.which_value =
+        iot_edge_v1_ScalarValue_string_value_tag;
+    copy_text(request.values[0].expected.value.string_value,
+              sizeof(request.values[0].expected.value.string_value), "44");
+    request.timeout_ms = 5000U;
+    request.has_start_before_ms = true;
+    request.start_before_ms = 1700000006000LL;
+    const uint64_t start_before_monotonic_ms = monotonic_ms() + 2500U;
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, (const uint8_t[16]){0}, &request,
+        start_before_monotonic_ms, UINT64_MAX, error, sizeof(error)));
+
+    const uint64_t result_deadline = monotonic_ms() + 5000U;
+    while (deadline_ipc_results == 0U && monotonic_ms() < result_deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(deadline_ipc_results == 1U &&
+           monotonic_ms() >= start_before_monotonic_ms);
+    size_t transmitted = 0U;
+    for (;;) {
+        const ssize_t count = read(master, frame, sizeof(frame));
+        if (count > 0) {
+            transmitted += (size_t)count;
+            continue;
+        }
+        assert(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+        break;
+    }
+    assert(transmitted >= queued);
+    const size_t command_bytes = transmitted - queued;
+    if (deadline_ipc_state == iot_edge_v1_CommandState_COMMAND_STATE_REJECTED) {
+        assert(!deadline_ipc_ack_missing && command_bytes == 0U);
+    } else {
+        assert(deadline_ipc_state == iot_edge_v1_CommandState_COMMAND_STATE_TIMED_OUT &&
+               deadline_ipc_ack_missing && command_bytes > 0U && command_bytes <= 8U);
+    }
+    close(fill_fd);
+    edge_acquisition_destroy(acquisition);
+    close(master);
 }
 
 static unsigned priority_telemetry_records, priority_command_results;
@@ -650,6 +1366,103 @@ static void send_modbus_read_response(int fd, const uint8_t request[12], uint8_t
     response[9] = 0; response[10] = value;
     assert(send(fd, response, sizeof(response), 0) == (ssize_t)sizeof(response));
 }
+static unsigned acknowledged_readback_results;
+static bool acknowledged_readback_ack_missing;
+static iot_edge_v1_CommandState acknowledged_readback_state;
+static char acknowledged_readback_message[257];
+static bool acknowledged_readback_command(void *context, const uint8_t platform[16],
+                                           const iot_edge_v1_CommandResult *result) {
+    (void)context;
+    (void)platform;
+    ++acknowledged_readback_results;
+    acknowledged_readback_ack_missing = result->write_ack_missing;
+    acknowledged_readback_state = result->state;
+    copy_text(acknowledged_readback_message, sizeof(acknowledged_readback_message),
+              result->message);
+    return true;
+}
+
+static void verify_acknowledged_write_with_offline_readback(void) {
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    struct sockaddr_in address = {.sin_family = AF_INET,
+                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
+    socklen_t address_size = sizeof(address);
+    assert(getsockname(listener, (struct sockaddr *)&address, &address_size) == 0);
+    assert(listen(listener, 1) == 0);
+
+    iot_edge_v1_ConfigItem items[3];
+    edge_runtime_config config = make_config(items);
+    items[0].item.endpoint.port = ntohs(address.sin_port);
+    items[1].item.device.io_interval_ms = 300000U;
+    items[1].item.device.report_interval_sec = 300U;
+    items[2].item.modbus_register.writable = true;
+    acknowledged_readback_results = 0U;
+    acknowledged_readback_message[0] = '\0';
+    char error[256] = {0};
+    edge_acquisition *acquisition = edge_acquisition_create(
+        telemetry, acknowledged_readback_command, NULL);
+    assert(acquisition != NULL);
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    struct pollfd ready = {.fd = listener, .events = POLLIN};
+    assert(poll(&ready, 1, 3000) == 1);
+    const int peer = accept(listener, NULL, NULL);
+    assert(peer >= 0);
+    struct timeval timeout = {.tv_sec = 3};
+    assert(setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+    uint8_t request_frame[12];
+    receive_modbus_request(peer, request_frame);
+    assert(request_frame[7] == 3U);
+    send_modbus_read_response(peer, request_frame, 42U);
+
+    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
+    const uint8_t command_id[16] = {0x73U}, device_id[16] = {2U};
+    set_id(&request.command_id, command_id);
+    set_id(&request.device_id, device_id);
+    request.values_count = 1U;
+    copy_text(request.values[0].element_id, sizeof(request.values[0].element_id),
+              "holding-1");
+    request.values[0].has_expected = true;
+    request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    request.values[0].expected.which_value = iot_edge_v1_ScalarValue_string_value_tag;
+    copy_text(request.values[0].expected.value.string_value,
+              sizeof(request.values[0].expected.value.string_value), "43");
+    request.timeout_ms = 5000U;
+    request.has_start_before_ms = true;
+    request.start_before_ms = 1700000005000LL;
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, (const uint8_t[16]){0}, &request,
+        monotonic_ms() + 60000U, UINT64_MAX, error, sizeof(error)));
+    receive_modbus_request(peer, request_frame);
+    assert(request_frame[7] == 6U);
+    assert(send(peer, request_frame, sizeof(request_frame), 0) ==
+           (ssize_t)sizeof(request_frame));
+    receive_modbus_request(peer, request_frame);
+    assert(request_frame[7] == 3U);
+    close(peer);
+
+    const uint64_t result_deadline = monotonic_ms() + 3000U;
+    while (acknowledged_readback_results == 0U && monotonic_ms() < result_deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(acknowledged_readback_results == 1U);
+    assert(!acknowledged_readback_ack_missing);
+    assert(acknowledged_readback_state ==
+           iot_edge_v1_CommandState_COMMAND_STATE_DEVICE_OFFLINE ||
+           acknowledged_readback_state ==
+               iot_edge_v1_CommandState_COMMAND_STATE_TIMED_OUT);
+    assert(strstr(acknowledged_readback_message,
+                  "write acknowledged; readback failed or unavailable") != NULL);
+    edge_acquisition_destroy(acquisition);
+    close(listener);
+}
+
 static void verify_write_priority_across_devices(void) {
     int listener = socket(AF_INET, SOCK_STREAM, 0); assert(listener >= 0);
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
@@ -707,8 +1520,12 @@ static void verify_write_priority_across_devices(void) {
     copy_text(command_request.values[0].expected.value.string_value,
               sizeof(command_request.values[0].expected.value.string_value), "42");
     command_request.timeout_ms = 10000U;
+    command_request.has_start_before_ms = true;
+    command_request.start_before_ms = 1;
     assert(edge_acquisition_start(acquisition, error, sizeof(error)));
-    assert(edge_acquisition_command(acquisition, &command_request, error, sizeof(error)));
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, (const uint8_t[16]){0}, &command_request,
+        monotonic_ms() + 60000U, UINT64_MAX, error, sizeof(error)));
 
     struct pollfd ready = {.fd = listener, .events = POLLIN};
     assert(poll(&ready, 1, 3000) == 1);
@@ -797,6 +1614,130 @@ static iot_edge_v1_SerialDebugRequest serial_request(uint8_t id, uint64_t sequen
     strcpy(request.settings.parity, "none");
     return request;
 }
+static pid_t acquisition_child_pid(void) {
+    char path[128];
+    const int length = snprintf(path, sizeof(path), "/proc/self/task/%ld/children",
+                                (long)getpid());
+    assert(length > 0 && (size_t)length < sizeof(path));
+    FILE *children = fopen(path, "r");
+    assert(children != NULL);
+    long pid = -1;
+    (void)fscanf(children, "%ld", &pid);
+    fclose(children);
+    return pid > 0 ? (pid_t)pid : -1;
+}
+
+static pid_t wait_for_restarted_worker(edge_acquisition *acquisition,
+                                       pid_t previous_pid, uint64_t timeout_ms) {
+    const uint64_t deadline = monotonic_ms() + timeout_ms;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        const pid_t current_pid = acquisition_child_pid();
+        if (current_pid > 0 && current_pid != previous_pid)
+            return current_pid;
+        usleep(10000U);
+    }
+    return -1;
+}
+
+static void verify_restarted_worker_does_not_replay_command(int master,
+                                                             edge_acquisition *acquisition) {
+    uint8_t bytes[256];
+    size_t size = 0U;
+    const uint64_t deadline = monotonic_ms() + 1400U;
+    while (monotonic_ms() < deadline) {
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        struct pollfd ready = {.fd = master, .events = POLLIN};
+        const int result = poll(&ready, 1U, 20);
+        if (result < 0 && errno == EINTR)
+            continue;
+        assert(result >= 0);
+        if (result == 0 || (ready.revents & POLLIN) == 0)
+            continue;
+        assert(size < sizeof(bytes));
+        const ssize_t count = read(master, bytes + size, sizeof(bytes) - size);
+        if (count > 0) {
+            size += (size_t)count;
+        } else {
+            assert(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EIO));
+        }
+    }
+    assert(size >= 8U && size % 8U == 0U);
+    for (size_t offset = 0U; offset < size; offset += 8U)
+        assert(bytes[offset] == 1U && bytes[offset + 1U] == 3U);
+}
+
+static void verify_worker_kill_and_old_command_not_replayed(void) {
+    serial_event_count = 0U;
+    const int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+    char path[97];
+    copy_text(path, sizeof(path), ptsname(master));
+    iot_edge_v1_ConfigItem items[3];
+    edge_runtime_config config = make_config(items);
+    make_serial_config(items, 9600U);
+    copy_text(items[0].item.endpoint.serial.channel,
+              sizeof(items[0].item.endpoint.serial.channel), path);
+    items[2].item.modbus_register.writable = true;
+    const uint8_t platform[16] = {0U};
+    char error[256] = {0};
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry, command, NULL);
+    assert(acquisition != NULL);
+    edge_acquisition_enable_serial_debug(acquisition, path, false, serial_event);
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+
+    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
+    const uint8_t command_id[16] = {0x76U}, device_id[16] = {2U};
+    set_id(&request.command_id, command_id);
+    set_id(&request.device_id, device_id);
+    request.values_count = 1U;
+    copy_text(request.values[0].element_id, sizeof(request.values[0].element_id),
+              "holding-1");
+    request.values[0].has_expected = true;
+    request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    request.values[0].expected.which_value =
+        iot_edge_v1_ScalarValue_string_value_tag;
+    copy_text(request.values[0].expected.value.string_value,
+              sizeof(request.values[0].expected.value.string_value), "46");
+    request.timeout_ms = 10000U;
+    request.has_start_before_ms = true;
+    request.start_before_ms = 1700000008000LL;
+    const uint64_t accepted_at = monotonic_ms();
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, platform, &request, accepted_at + 30000U,
+        accepted_at + 30000U, error, sizeof(error)));
+
+    iot_edge_v1_SerialDebugRequest serial = serial_request(0x76U, 1U, "open", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &serial));
+    (void)await_serial_event(acquisition, 0x76U, 1U, "state", 0U);
+    serial = serial_request(0x76U, 2U, "manual", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &serial));
+    assert(await_serial_event(acquisition, 0x76U, 2U, "state", 0U)->manual);
+    usleep(50000U);
+    uint8_t discarded[256];
+    while (read(master, discarded, sizeof(discarded)) > 0) {
+    }
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+
+    pid_t child = acquisition_child_pid();
+    assert(child > 0);
+    const uint64_t invalidation_started = monotonic_ms();
+    edge_acquisition_invalidate_command_clock(acquisition, platform);
+    assert(monotonic_ms() - invalidation_started < 250U);
+
+    for (unsigned restart = 0U; restart < 2U; ++restart) {
+        assert(kill(child, SIGKILL) == 0);
+        const pid_t replacement = wait_for_restarted_worker(acquisition, child, 8000U);
+        assert(replacement > 0);
+        verify_restarted_worker_does_not_replay_command(master, acquisition);
+        child = replacement;
+    }
+    edge_acquisition_destroy(acquisition);
+    close(master);
+}
+
 static void verify_serial_debug(void) {
     serial_event_count = 0;
     const int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
@@ -905,8 +1846,123 @@ static void verify_serial_debug(void) {
     close(master);
 }
 
+static void verify_command_expiry_while_serial_is_paused(void) {
+    serial_event_count = 0U;
+    const int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+    char path[97];
+    copy_text(path, sizeof(path), ptsname(master));
+    iot_edge_v1_ConfigItem items[3];
+    edge_runtime_config config = make_config(items);
+    make_serial_config(items, 9600U);
+    copy_text(items[0].item.endpoint.serial.channel,
+              sizeof(items[0].item.endpoint.serial.channel), path);
+    items[2].item.modbus_register.writable = true;
+    deadline_ipc_results = 0U;
+    const uint8_t platform[16] = {0U};
+    char error[256] = {0};
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry,
+                                                              deadline_ipc_command, NULL);
+    assert(acquisition != NULL);
+    edge_acquisition_enable_serial_debug(acquisition, path, false, serial_event);
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    iot_edge_v1_SerialDebugRequest serial = serial_request(0x73U, 1U, "open", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &serial));
+    assert(!await_serial_event(acquisition, 0x73U, 1U, "state", 0U)->manual);
+    serial = serial_request(0x73U, 2U, "manual", path);
+    assert(edge_acquisition_serial_request(acquisition, platform, &serial));
+    assert(await_serial_event(acquisition, 0x73U, 2U, "state", 0U)->manual);
+    uint8_t received[256];
+    while (read(master, received, sizeof(received)) > 0) {
+    }
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+
+    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
+    const uint8_t command_id[16] = {0x73U}, device_id[16] = {2U};
+    set_id(&request.command_id, command_id);
+    set_id(&request.device_id, device_id);
+    request.values_count = 1U;
+    copy_text(request.values[0].element_id, sizeof(request.values[0].element_id),
+              "holding-1");
+    request.values[0].has_expected = true;
+    request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    request.values[0].expected.which_value =
+        iot_edge_v1_ScalarValue_string_value_tag;
+    copy_text(request.values[0].expected.value.string_value,
+              sizeof(request.values[0].expected.value.string_value), "45");
+    request.timeout_ms = 5000U;
+    request.has_start_before_ms = true;
+    request.start_before_ms = 1700000007000LL;
+    const uint64_t start_before_monotonic_ms = monotonic_ms() + 650U;
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, platform, &request, start_before_monotonic_ms,
+        UINT64_MAX, error, sizeof(error)));
+
+    const uint64_t result_deadline = monotonic_ms() + 3000U;
+    while (deadline_ipc_results == 0U && monotonic_ms() < result_deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(deadline_ipc_results == 1U &&
+           deadline_ipc_state == iot_edge_v1_CommandState_COMMAND_STATE_REJECTED &&
+           !deadline_ipc_ack_missing);
+    assert(read(master, received, sizeof(received)) < 0 &&
+           (errno == EAGAIN || errno == EWOULDBLOCK));
+
+    deadline_ipc_results = 0U;
+    const uint8_t age_limited_id[16] = {0x74U};
+    set_id(&request.command_id, age_limited_id);
+    const uint64_t age_test_now = monotonic_ms();
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, platform, &request, age_test_now + 10000U,
+        age_test_now + 350U, error, sizeof(error)));
+    const uint64_t age_result_deadline = monotonic_ms() + 3000U;
+    while (deadline_ipc_results == 0U && monotonic_ms() < age_result_deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(deadline_ipc_results == 1U &&
+           deadline_ipc_state == iot_edge_v1_CommandState_COMMAND_STATE_REJECTED &&
+           !deadline_ipc_ack_missing);
+    assert(read(master, received, sizeof(received)) < 0 &&
+           (errno == EAGAIN || errno == EWOULDBLOCK));
+
+    deadline_ipc_results = 0U;
+    const uint8_t revoked_id[16] = {0x75U};
+    set_id(&request.command_id, revoked_id);
+    const uint64_t revoke_test_now = monotonic_ms();
+    assert(edge_acquisition_command_for_platform_until(
+        acquisition, platform, &request, revoke_test_now + 10000U,
+        revoke_test_now + 10000U, error, sizeof(error)));
+    edge_acquisition_invalidate_command_clock(acquisition, platform);
+    const uint64_t revoked_result_deadline = monotonic_ms() + 3000U;
+    while (deadline_ipc_results == 0U && monotonic_ms() < revoked_result_deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(deadline_ipc_results == 1U &&
+           deadline_ipc_state == iot_edge_v1_CommandState_COMMAND_STATE_REJECTED &&
+           !deadline_ipc_ack_missing);
+    assert(read(master, received, sizeof(received)) < 0 &&
+           (errno == EAGAIN || errno == EWOULDBLOCK));
+    edge_acquisition_destroy(acquisition);
+    close(master);
+}
+
 int main(void) {
+    verify_s7_timeout_retry_over_loopback();
+    verify_s7_invalid_response_retry_over_loopback();
+    verify_s7_full_and_invalid_scans();
     verify_serial_debug();
+    verify_worker_kill_and_old_command_not_replayed();
     iot_edge_v1_ConfigItem values[3];
     edge_runtime_config config = make_config(values);
     edge_acquisition *acquisition = edge_acquisition_create(telemetry, command, NULL);
@@ -922,6 +1978,10 @@ int main(void) {
     wait_for_status(acquisition);
     edge_acquisition_destroy(acquisition);
     verify_shared_resources();
+    verify_stale_deadline_over_ipc();
+    verify_acknowledged_write_with_offline_readback();
+    verify_pty_partial_write_is_not_replayed();
+    verify_command_expiry_while_serial_is_paused();
     verify_write_priority_across_devices();
     verify_sl651_commit();
     verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, false);

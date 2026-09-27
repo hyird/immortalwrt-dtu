@@ -310,6 +310,7 @@ static void stress_device_runtime(uint64_t cycle) {
                  "device runtime initialization failed");
     edge_write_command command = {0};
     command.command_id[0] = 3U;
+    command.start_before_monotonic_ms = UINT64_MAX;
     strcpy(command.element_id, "remote-io-ao1");
     command.value[0] = 0x12U;
     command.value[1] = 0x34U;

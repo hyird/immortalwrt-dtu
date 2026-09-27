@@ -194,13 +194,14 @@ size_t edge_s7_build_write(uint16_t reference, const edge_s7_address *address,
 }
 
 edge_s7_result edge_s7_parse_read(const uint8_t *frame, size_t frame_size,
-                                  uint16_t reference, uint8_t *data,
-                                  size_t capacity, size_t *data_size,
-                                  uint8_t *return_code) {
+                                  uint16_t reference, const edge_s7_address *address,
+                                  uint8_t *data, size_t capacity,
+                                  size_t *data_size, uint8_t *return_code) {
     size_t offset = 0U;
     uint16_t parameter_length = 0U;
     uint16_t payload_length = 0U;
-    if (data_size == NULL || return_code == NULL)
+    if (address == NULL || address->size == 0U || data_size == NULL ||
+        return_code == NULL)
         return EDGE_S7_INVALID_ARGUMENT;
     *data_size = 0U;
     *return_code = 0U;
@@ -214,9 +215,24 @@ edge_s7_result edge_s7_parse_read(const uint8_t *frame, size_t frame_size,
     *return_code = frame[item];
     if (*return_code != 0xffU)
         return EDGE_S7_ACCESS_DENIED;
+
     const uint16_t encoded_bits = get_be16(frame + item + 2U);
+    const uint32_t expected_bits = address->bit_access ? 1U :
+        (uint32_t)address->size * 8U;
+    const uint8_t expected_transport = address->bit_access ? 0x03U : 0x04U;
+    if (expected_bits > UINT16_MAX || frame[item + 1U] != expected_transport ||
+        encoded_bits != expected_bits)
+        return EDGE_S7_WRONG_RESPONSE;
     const size_t bytes = (encoded_bits + 7U) / 8U;
-    if (bytes + 4U > payload_length || item + 4U + bytes > frame_size)
+    const bool exact_length = bytes + 4U == payload_length &&
+                              item + 4U + bytes == frame_size;
+    /* Preserve compatibility with a single zero alignment byte after odd-sized data.
+     * Standard single-item responses end immediately after the data bytes. */
+    const bool odd_item_padding = (bytes & 1U) != 0U &&
+                                  bytes + 5U == payload_length &&
+                                  item + 5U + bytes == frame_size &&
+                                  frame[item + 4U + bytes] == 0U;
+    if (!exact_length && !odd_item_padding)
         return EDGE_S7_WRONG_RESPONSE;
     if (capacity < bytes || (bytes != 0U && data == NULL))
         return EDGE_S7_OUTPUT_TOO_SMALL;

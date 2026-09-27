@@ -4,6 +4,13 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
+## 命令启动截止与 S7 采集修复（0.3.64）
+
+- S7 TCP 读取超时后立即重连并完成握手，在同一采集周期最多重读一次；重读失败或点集不完整时不发布该轮点集，留待下一主动读取周期。
+- `command_attempt.deadline` 原值作为启动截止，不因节点接收或排队而续期。只采用 nonce 关联且 RTT 不超过 2 秒的数据库时钟样本；样本缺失、映射满 330 秒、关联不符或观测到样本跳变即失效关闭。换算仅在样本间数据库时钟稳定（相对单调时钟速率误差不超过 1000 ppm）时成立，不能保证未观测到的时钟跳变或设备实际执行时刻。
+- 未发送且已过期或无法验证的命令拒绝（`REJECTED`）；可能已发送但无 ACK、或已获 ACK 而回读失败均记为 `UNKNOWN`，不自动重放。
+- 启用该能力前须先升级平台。保留 `0.3.44` 兼容路径，但该旧固件不提供新截止保证。
+
 ## 主动轮询与遥测调度（0.3.63）
 
 - 主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 使用 `EDGE_ACQUISITION_TICK_MS=1000ms` 为目标读取间隔；平台下发更慢的 `io_interval_ms` 不再降低读取频率。该值是调度目标，不是严格实时承诺；超时、共享物理链路和平台优先级会造成延迟。迟到调度跳过过期轮次，不补跑堆积读取。

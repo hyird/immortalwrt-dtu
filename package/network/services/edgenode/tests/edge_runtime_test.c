@@ -13,6 +13,138 @@ static void require_true(bool value, const char *message) {
     }
 }
 
+static bool enqueue_write_for_test(edge_device_runtime *runtime,
+                                   edge_write_command *command) {
+    if (command->start_before_monotonic_ms == 0U)
+        command->start_before_monotonic_ms = UINT64_MAX;
+    if (command->mapping_valid_until_monotonic_ms == 0U)
+        command->mapping_valid_until_monotonic_ms = UINT64_MAX;
+    return edge_device_runtime_enqueue_write(runtime, command);
+}
+
+static void test_command_clock_mapping(void) {
+    edge_command_clock clock;
+    edge_command_clock_reset(&clock);
+    require_true(edge_command_clock_accept_hello(&clock, 100000, 1000U, 1100U),
+                 "valid Hello database clock sample rejected");
+    uint64_t deadline = 0U, mapping_expiry = 0U;
+    require_true(edge_command_clock_deadline(&clock, 150000, 1100U, &deadline,
+                                              &mapping_expiry) &&
+                     deadline > 1100U && deadline - 1100U < 50000U &&
+                     mapping_expiry == 1100U + EDGE_COMMAND_CLOCK_MAX_AGE_MS,
+                 "database upper-bound mapping or safety expiry is incorrect");
+    const uint64_t last_allowed = deadline - 1U;
+    const uint64_t last_elapsed = last_allowed - clock.sample_sent_monotonic_ms;
+    const uint64_t last_drift =
+        (last_elapsed * EDGE_COMMAND_CLOCK_RATE_ERROR_PPM + 999999U) / 1000000U;
+    require_true((uint64_t)clock.database_time_ms + last_elapsed + last_drift + 1U <
+                     150000U,
+                 "mapped monotonic cutoff is not conservative through its final allowed tick");
+    require_true(!edge_command_clock_deadline(&clock, 100102, 1100U, &deadline,
+                                               &mapping_expiry),
+                 "deadline at the conservative DB upper bound was accepted");
+    require_true(!edge_command_clock_deadline(&clock, 200000, 1100U, &deadline,
+                                               &mapping_expiry),
+                 "deadline beyond the bounded start window was accepted");
+    const uint64_t last_mapping_tick = mapping_expiry - 1U;
+    require_true(edge_command_clock_deadline(&clock, 431000, last_mapping_tick,
+                                              &deadline, &mapping_expiry) &&
+                     deadline > last_mapping_tick && deadline > mapping_expiry,
+                 "mapping expiry was not kept separate from the command start deadline");
+    require_true(!edge_command_clock_deadline(
+                     &clock, 150000, mapping_expiry, &deadline, &mapping_expiry),
+                 "stale database clock mapping was accepted");
+
+    edge_command_clock_reset(&clock);
+    require_true(edge_command_clock_accept_hello(&clock, 1000000, 1000U, 1100U),
+                 "negative-drift clock baseline was rejected");
+    require_true(edge_command_clock_accept_hello(&clock, 1998998, 1001100U, 1001200U),
+                 "-1000ppm database drift at the lower tolerance boundary was rejected");
+    edge_command_clock_reset(&clock);
+    require_true(edge_command_clock_accept_hello(&clock, 1000000, 1000U, 1100U),
+                 "negative-drift rejection baseline was rejected");
+    require_true(!edge_command_clock_accept_hello(&clock, 1998997, 1001100U, 1001200U) &&
+                     !clock.valid,
+                 "database drift beyond the lower tolerance boundary was accepted");
+
+    edge_command_clock_reset(&clock);
+    require_true(!edge_command_clock_accept_hello(&clock, 100000, 1000U, 3001U) &&
+                     !clock.valid,
+                 "Hello sample exceeding maximum RTT was trusted");
+    require_true(!edge_command_clock_accept_hello(&clock, 0, 1000U, 1001U) &&
+                     !clock.valid,
+                 "missing/invalid database sample was trusted");
+
+    edge_command_clock_reset(&clock);
+    require_true(edge_command_clock_accept_hello(&clock, 100000, 1000U, 1100U),
+                 "heartbeat test baseline sample failed");
+    uint64_t nonce = 0U;
+    require_true(edge_command_clock_begin_heartbeat(&clock, 2000U, &nonce) && nonce != 0U,
+                 "heartbeat nonce was not created");
+    require_true(!edge_command_clock_accept_heartbeat(&clock, true, nonce + 1U,
+                                                       true, 101000, 2100U) &&
+                     !clock.valid && !clock.pending,
+                 "mismatched heartbeat nonce did not fail closed");
+    require_true(edge_command_clock_begin_heartbeat(&clock, 3000U, &nonce),
+                 "heartbeat nonce did not recover after invalidation");
+    require_true(edge_command_clock_accept_heartbeat(&clock, true, nonce,
+                                                      true, 102000, 3100U) && clock.valid,
+                 "matching heartbeat nonce/database sample was rejected");
+    uint64_t timed_out_nonce = 0U;
+    require_true(edge_command_clock_begin_heartbeat(&clock, 4000U, &timed_out_nonce),
+                 "heartbeat timeout test nonce was not created");
+    require_true(edge_command_clock_begin_heartbeat(&clock, 6001U, &nonce) &&
+                     nonce != timed_out_nonce && !clock.valid && clock.pending,
+                 "expired heartbeat probe did not invalidate its old mapping");
+    require_true(!edge_command_clock_accept_heartbeat(&clock, false, 0U,
+                                                       false, 0, 6100U) &&
+                     !clock.valid && !clock.pending,
+                 "missing heartbeat echo left the prior mapping trusted");
+
+    edge_command_clock_reset(&clock);
+    uint64_t pending_nonce = 0U, overlapping_nonce = 0U;
+    /* Initial enrollment is still pending; capable heartbeats need a nonce before approval. */
+    require_true(edge_command_clock_begin_heartbeat(&clock, 1000U, &pending_nonce) &&
+                     pending_nonce != 0U,
+                 "pre-approval heartbeat did not create its required nonce");
+    require_true(edge_command_clock_begin_heartbeat(&clock, 1500U, &overlapping_nonce) &&
+                     overlapping_nonce == pending_nonce,
+                 "overlapping heartbeat was sent without the outstanding nonce");
+    require_true(edge_command_clock_accept_heartbeat(&clock, true, pending_nonce,
+                                                      true, 100500, 1600U) && clock.valid,
+                 "pending enrollment heartbeat sample was not accepted");
+    require_true(edge_command_clock_begin_heartbeat(&clock, 1700U,
+                                                     &overlapping_nonce) &&
+                     overlapping_nonce != pending_nonce,
+                 "next heartbeat did not create a fresh pending nonce");
+    require_true(!edge_command_clock_accept_heartbeat(&clock, true, pending_nonce,
+                                                       true, 90000, 1750U) &&
+                     clock.valid && clock.pending &&
+                     clock.pending_nonce == overlapping_nonce,
+                 "completed old nonce invalidated or replaced the newer pending sample");
+    require_true(edge_command_clock_accept_heartbeat(&clock, true, overlapping_nonce,
+                                                      true, 100600, 1800U) && clock.valid,
+                 "matching fresh heartbeat sample was not accepted after a stale ACK");
+    require_true(edge_command_clock_begin_heartbeat(&clock, 1900U, &nonce),
+                 "approval heartbeat did not create a pending nonce");
+    /* Approval can replace the pending-session estimate with its correlated Hello sample. */
+    require_true(edge_command_clock_accept_hello(&clock, 100700, 1900U, 2000U) &&
+                     clock.valid && !clock.pending,
+                 "clock mapping did not survive pending-to-approved promotion");
+    require_true(!edge_command_clock_accept_heartbeat(&clock, true, pending_nonce,
+                                                       true, 1, 2100U) && clock.valid,
+                 "duplicate old heartbeat ACK changed the accepted mapping");
+
+    edge_command_clock_reset(&clock);
+    require_true(edge_command_clock_accept_hello(&clock, 100000, 1000U, 1100U),
+                 "jump detection baseline sample failed");
+    require_true(edge_command_clock_begin_heartbeat(&clock, 2000U, &nonce),
+                 "jump detection heartbeat did not start");
+    require_true(!edge_command_clock_accept_heartbeat(&clock, true, nonce,
+                                                       true, 110000, 2100U) && !clock.valid,
+                 "observed database clock jump did not invalidate the mapping");
+}
+
 static void test_modbus(void) {
     edge_modbus_request read = {.transport = EDGE_MODBUS_TCP,
                                  .transaction_id = 0x1234,
@@ -165,11 +297,76 @@ static void test_s7(void) {
     uint8_t data[8];
     size_t data_size = 0U;
     uint8_t return_code = 0U;
-    require_true(edge_s7_parse_read(read_response, sizeof(read_response), 8U, data,
-                                    sizeof(data), &data_size, &return_code) == EDGE_S7_OK,
+    require_true(edge_s7_parse_read(read_response, sizeof(read_response), 8U, &address,
+                                    data, sizeof(data), &data_size, &return_code) == EDGE_S7_OK,
                  "S7 ReadVar response parse failed");
     require_true(data_size == 2U && data[0] == 0x12U && data[1] == 0x34U,
                  "S7 ReadVar returned the wrong bytes");
+
+    uint8_t malformed[sizeof(read_response)];
+    memcpy(malformed, read_response, sizeof(malformed));
+    malformed[3] = 26U;
+    malformed[16] = 5U;
+    require_true(edge_s7_parse_read(malformed, sizeof(malformed) - 1U, 8U, &address,
+                                    data, sizeof(data), &data_size, &return_code) ==
+                     EDGE_S7_WRONG_RESPONSE,
+                 "S7 ReadVar accepted a short response for the requested byte count");
+    uint8_t oversized[sizeof(read_response) + 1U];
+    memcpy(oversized, read_response, sizeof(read_response));
+    oversized[3] = 28U;
+    oversized[16] = 7U;
+    oversized[27] = 0U;
+    require_true(edge_s7_parse_read(oversized, sizeof(oversized), 8U, &address,
+                                    data, sizeof(data), &data_size, &return_code) ==
+                     EDGE_S7_WRONG_RESPONSE,
+                 "S7 ReadVar accepted extra payload beyond the requested byte count");
+    memcpy(malformed, read_response, sizeof(malformed));
+    malformed[22] = 0x03U;
+    require_true(edge_s7_parse_read(malformed, sizeof(malformed), 8U, &address,
+                                    data, sizeof(data), &data_size, &return_code) ==
+                     EDGE_S7_WRONG_RESPONSE,
+                 "S7 ReadVar accepted a bit transport size for a byte request");
+    edge_s7_address longer_address = address;
+    longer_address.size = 4U;
+    require_true(edge_s7_parse_read(read_response, sizeof(read_response), 8U,
+                                    &longer_address, data, sizeof(data), &data_size,
+                                    &return_code) == EDGE_S7_WRONG_RESPONSE,
+                 "S7 ReadVar accepted fewer bytes than the requested length");
+    const uint8_t bit_response[] = {0x03, 0x00, 0x00, 0x1a, 0x02, 0xf0, 0x80, 0x32,
+                                    0x03, 0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 0x00,
+                                    0x05, 0x00, 0x00, 0x04, 0x01, 0xff, 0x03, 0x00,
+                                    0x01, 0x01};
+    const edge_s7_address bit_address = {.area = EDGE_S7_AREA_DB, .db_number = 1,
+                                         .size = 1, .bit_access = true};
+    require_true(edge_s7_parse_read(bit_response, sizeof(bit_response), 8U,
+                                    &bit_address, data, sizeof(data), &data_size,
+                                    &return_code) == EDGE_S7_OK && data_size == 1U &&
+                     data[0] == 1U,
+                 "S7 ReadVar rejected a valid single-bit response");
+    uint8_t odd_read_response[] = {
+        0x03, 0x00, 0x00, 0x1d, 0x02, 0xf0, 0x80, 0x32,
+        0x03, 0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00,
+        0x04, 0x01, 0xff, 0x04, 0x00, 0x18, 0x11, 0x22, 0x33, 0x00};
+    const edge_s7_address odd_address = {.area = EDGE_S7_AREA_DB, .db_number = 1,
+                                         .size = 3};
+    require_true(edge_s7_parse_read(odd_read_response, sizeof(odd_read_response), 8U,
+                                    &odd_address, data, sizeof(data), &data_size,
+                                    &return_code) == EDGE_S7_OK && data_size == 3U &&
+                     data[0] == 0x11U && data[1] == 0x22U && data[2] == 0x33U,
+                 "S7 ReadVar rejected an odd-length data item with alignment padding");
+    odd_read_response[28] = 0x7fU;
+    require_true(edge_s7_parse_read(odd_read_response, sizeof(odd_read_response), 8U,
+                                    &odd_address, data, sizeof(data), &data_size,
+                                    &return_code) == EDGE_S7_WRONG_RESPONSE,
+                 "S7 ReadVar accepted a nonzero trailing alignment byte");
+    odd_read_response[28] = 0U;
+    odd_read_response[3] = 28U;
+    odd_read_response[16] = 7U;
+    require_true(edge_s7_parse_read(odd_read_response, sizeof(odd_read_response) - 1U,
+                                    8U, &odd_address, data, sizeof(data), &data_size,
+                                    &return_code) == EDGE_S7_OK && data_size == 3U &&
+                     data[0] == 0x11U && data[1] == 0x22U && data[2] == 0x33U,
+                 "S7 ReadVar rejected an unpadded odd-length data item");
 
     const uint8_t desired[] = {0x12, 0x34};
     size = edge_s7_build_write(9U, &address, desired, sizeof(desired), frame, sizeof(frame));
@@ -204,6 +401,14 @@ typedef struct {
     unsigned debug_reads;
     unsigned silent_reads;
     unsigned silent_writes;
+    uint64_t monotonic_now_ms;
+    uint64_t connect_advance_ms;
+    uint64_t handshake_advance_ms;
+    uint64_t write_advance_ms;
+    bool mark_write_started;
+    bool mark_write_ack;
+    bool last_write_started;
+    bool last_write_ack_missing;
 } fake_device;
 
 static edge_io_result fake_connect(void *context) {
@@ -211,6 +416,7 @@ static edge_io_result fake_connect(void *context) {
     ++fake->connects;
     const edge_io_result result = fake->next_connect_result;
     fake->next_connect_result = EDGE_IO_OK;
+    fake->monotonic_now_ms += fake->connect_advance_ms;
     return result;
 }
 
@@ -219,6 +425,7 @@ static edge_io_result fake_handshake(void *context) {
     ++fake->handshakes;
     const edge_io_result result = fake->next_handshake_result;
     fake->next_handshake_result = EDGE_IO_OK;
+    fake->monotonic_now_ms += fake->handshake_advance_ms;
     return result;
 }
 
@@ -252,12 +459,21 @@ static edge_io_result fake_write(void *context, const edge_write_command *comman
     ++fake->writes;
     if (fake->runtime != NULL && fake->runtime->silent_background_read)
         ++fake->silent_writes;
+    if (fake->runtime != NULL && fake->mark_write_started)
+        fake->runtime->southbound_write_started = true;
     const edge_io_result result = fake->next_write_result;
     fake->next_write_result = EDGE_IO_OK;
+    fake->monotonic_now_ms += fake->write_advance_ms;
     if (result != EDGE_IO_OK) return result;
+    if (fake->runtime != NULL && fake->mark_write_ack)
+        fake->runtime->write_ack_received = true;
     memcpy(actual->bytes, command->value, command->value_size);
     actual->size = command->value_size;
     return EDGE_IO_OK;
+}
+
+static uint64_t fake_monotonic_ms(void *context) {
+    return ((fake_device *)context)->monotonic_now_ms;
 }
 
 static void fake_disconnect(void *context) {
@@ -285,6 +501,11 @@ static void fake_complete(void *context, const uint8_t platform_id[16],
                  "command completion readback mismatch");
     ++fake->completions;
     fake->last_command_result = result;
+    if (fake->runtime != NULL) {
+        fake->last_write_started = fake->runtime->southbound_write_started;
+        fake->last_write_ack_missing = fake->runtime->southbound_write_started &&
+                                       !fake->runtime->write_ack_received;
+    }
 }
 
 static void test_io_and_reporting(void) {
@@ -313,7 +534,7 @@ static void test_io_and_reporting(void) {
 
     edge_write_command command = {.value = {0x55U}, .value_size = 1U};
     command.command_id[0] = 3U;
-    require_true(edge_device_runtime_enqueue_write(&runtime, &command),
+    require_true(enqueue_write_for_test(&runtime, &command),
                  "write command enqueue failed");
     edge_device_runtime_tick(&runtime, 1000U, 1001000);
     edge_device_runtime_tick(&runtime, 2000U, 1002000);
@@ -333,7 +554,7 @@ static void test_io_and_reporting(void) {
     require_true(fake.disconnects == 1U && fake.connects == 2U &&
                      fake.handshakes == 2U && fake.reads == 5U &&
                      runtime.latest.bytes[0] == 5U,
-                 "S7 did not immediately reconnect, handshake and reread after timeout");
+                 "S7 did not immediately reconnect, handshake and reread after a TCP read timeout");
     edge_device_runtime_tick(&runtime, 5000U, 1005000);
     require_true(fake.connects == 2U && fake.handshakes == 2U && fake.reads == 6U,
                  "S7 did not reuse the recovered connection on the next cycle");
@@ -424,7 +645,7 @@ static void test_fast_reporting_after_write(void) {
         .fast_read_duration_sec = 12U,
         .fast_read_interval_sec = 4U,
     };
-    require_true(edge_device_runtime_enqueue_write(&runtime, &command),
+    require_true(enqueue_write_for_test(&runtime, &command),
                  "fast-report write command enqueue failed");
     edge_device_runtime_tick(&runtime, 1000U, 2001000);
     require_true(fake.reports == 0U && fake.writes == 1U && fake.completions == 1U,
@@ -467,7 +688,7 @@ static void test_configured_read_interval(void) {
         require_true(fake.reads == 32U && runtime.next_io_at_ms == 101000U,
             "late scheduling produced catch-up reads or lost the 1-second period");
         edge_write_command command = {.value = {0x55U}, .value_size = 1U};
-        require_true(edge_device_runtime_enqueue_write(&runtime, &command), "write enqueue failed");
+        require_true(enqueue_write_for_test(&runtime, &command), "write enqueue failed");
         edge_device_runtime_tick(&runtime, 101000U, 101000);
         require_true(fake.writes == 1U && runtime.next_io_at_ms == 102000U,
             "configured read interval delayed a control command or changed its 1-second schedule");
@@ -499,7 +720,7 @@ static void test_s7_immediate_retry_is_bounded(void) {
             platform_id, device_id, 1000U, 30U, 0U, &driver, &fake), "S7 init failed");
         edge_device_runtime_tick(&runtime, 0U, 0);
         edge_write_command command = {.value = {0x55U}, .value_size = 1U};
-        require_true(edge_device_runtime_enqueue_write(&runtime, &command), "enqueue failed");
+        require_true(enqueue_write_for_test(&runtime, &command), "enqueue failed");
         edge_device_runtime_tick(&runtime, 1000U, 1000);
         require_true(fake.writes == 1U && fake.completions == 1U,
             "priority write was not completed exactly once");
@@ -528,6 +749,92 @@ static void test_s7_immediate_retry_is_bounded(void) {
     }
 }
 
+static void test_s7_failed_fast_report_is_suppressed(void) {
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {
+        .connect = fake_connect, .handshake = fake_handshake,
+        .read = fake_read, .write_readback = fake_write,
+        .disconnect = fake_disconnect, .report = fake_report,
+        .command_complete = fake_complete};
+    fake_device fake = {0};
+    edge_device_runtime runtime;
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+        platform_id, device_id, EDGE_ACQUISITION_TICK_MS, 300U, 0U, &driver, &fake),
+        "S7 fast-report runtime init failed");
+    edge_device_runtime_tick(&runtime, 0U, 0);
+    edge_write_command command = {.value = {0x55U}, .value_size = 1U,
+        .fast_read_duration_sec = 10U, .fast_read_interval_sec = 1U};
+    require_true(enqueue_write_for_test(&runtime, &command),
+        "S7 fast-report write enqueue failed");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.writes == 1U && fake.completions == 1U,
+        "S7 fast-report setup write was not completed exactly once");
+
+    fake.read_protocol_errors = 2U;
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(fake.reads == 3U && fake.connects == 2U && fake.handshakes == 2U &&
+        fake.writes == 1U && fake.reports == 0U,
+        "failed S7 fast-due reads reported telemetry or replayed the write");
+    edge_device_runtime_tick(&runtime, 3000U, 3000);
+    require_true(fake.reports == 1U && fake.writes == 1U,
+        "successful S7 fast-due read did not report after a failed due read");
+    edge_device_runtime_close(&runtime);
+}
+
+static void test_s7_failed_ordinary_due_is_suppressed(void) {
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {
+        .connect = fake_connect, .handshake = fake_handshake,
+        .read = fake_read, .write_readback = fake_write,
+        .disconnect = fake_disconnect, .report = fake_report,
+        .command_complete = fake_complete};
+    fake_device fake = {0};
+    edge_device_runtime runtime;
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+        platform_id, device_id, EDGE_ACQUISITION_TICK_MS, 1U, 0U, &driver, &fake),
+        "S7 ordinary-report runtime init failed");
+    edge_device_runtime_tick(&runtime, 0U, 0);
+    fake.read_protocol_errors = 2U;
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.reads == 3U && fake.connects == 2U && fake.handshakes == 2U &&
+        fake.reports == 0U && runtime.initial_report_pending,
+        "failed S7 ordinary-due reads reported telemetry or lost the pending report");
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(fake.reports == 1U && !runtime.initial_report_pending,
+        "successful S7 ordinary-due read did not report after a failed due read");
+    edge_device_runtime_close(&runtime);
+}
+
+static void test_s7_local_connection_failures_are_not_retried(void) {
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {
+        .connect = fake_connect, .handshake = fake_handshake,
+        .read = fake_read, .write_readback = fake_write,
+        .disconnect = fake_disconnect, .report = fake_report,
+        .command_complete = fake_complete};
+    fake_device fake = {.next_connect_result = EDGE_IO_OFFLINE};
+    edge_device_runtime runtime;
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+        platform_id, device_id, EDGE_ACQUISITION_TICK_MS, 30U, 0U, &driver, &fake),
+        "S7 local-failure runtime init failed");
+    edge_device_runtime_tick(&runtime, 0U, 0);
+    require_true(fake.connects == 1U && fake.handshakes == 0U && fake.reads == 0U,
+        "local S7 connection failure was hidden by an in-cycle retry");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.connects == 2U && fake.handshakes == 1U && fake.reads == 1U,
+        "S7 did not recover from a local connection failure on the next cycle");
+    fake.next_read_result = EDGE_IO_OFFLINE;
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(fake.connects == 2U && fake.handshakes == 1U && fake.reads == 2U &&
+        fake.disconnects == 1U && !runtime.connected,
+        "local S7 read failure was hidden by an in-cycle retry");
+    edge_device_runtime_tick(&runtime, 3000U, 3000);
+    require_true(fake.connects == 3U && fake.handshakes == 2U && fake.reads == 3U &&
+        runtime.connected,
+        "S7 local read failure did not recover on the next scheduled cycle");
+    edge_device_runtime_close(&runtime);
+}
+
 static void test_s7_protocol_error_reconnects(void) {
     const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
     const edge_device_driver driver = {
@@ -552,7 +859,7 @@ static void test_s7_protocol_error_reconnects(void) {
     edge_device_runtime_tick(&runtime, 2000U, 2000);
     require_true(fake.disconnects == 2U && fake.connects == 3U &&
         fake.handshakes == 3U && fake.reads == 3U && runtime.connected,
-        "invalid S7 response did not reconnect, renegotiate and retry once");
+        "invalid S7 response did not reconnect and retry once in-cycle");
 
     fake.read_protocol_errors = 2U;
     edge_device_runtime_tick(&runtime, 3000U, 3000);
@@ -565,7 +872,7 @@ static void test_s7_protocol_error_reconnects(void) {
 
     fake.next_write_result = EDGE_IO_PROTOCOL_ERROR;
     edge_write_command command = {.value = {0x55U}, .value_size = 1U};
-    require_true(edge_device_runtime_enqueue_write(&runtime, &command), "enqueue failed");
+    require_true(enqueue_write_for_test(&runtime, &command), "enqueue failed");
     edge_device_runtime_tick(&runtime, 5000U, 5000);
     require_true(fake.writes == 1U && fake.completions == 1U &&
         fake.last_command_result == EDGE_COMMAND_FAILED && !runtime.connected,
@@ -629,7 +936,8 @@ static void test_s7_tcp_client_scan_and_report_intervals(void) {
     edge_device_runtime_tick(&runtime, 1000U, 1000);
     runtime.debug_read = false;
     edge_write_command explicit_write = {.value = {0x55U}, .value_size = 1U};
-    require_true(edge_device_runtime_enqueue_write(&runtime, &explicit_write),
+    explicit_write.command_id[0] = 1U;
+    require_true(enqueue_write_for_test(&runtime, &explicit_write),
         "S7 explicit command enqueue failed");
     edge_device_runtime_tick(&runtime, 2000U, 2000);
     require_true(explicit_command.writes == 1U && explicit_command.silent_writes == 0U &&
@@ -637,7 +945,8 @@ static void test_s7_tcp_client_scan_and_report_intervals(void) {
         "silent background-read state suppressed an explicit S7 command");
     explicit_command.next_write_result = EDGE_IO_PROTOCOL_ERROR;
     edge_write_command failed_write = {.value = {0x66U}, .value_size = 1U};
-    require_true(edge_device_runtime_enqueue_write(&runtime, &failed_write),
+    failed_write.command_id[0] = 2U;
+    require_true(enqueue_write_for_test(&runtime, &failed_write),
         "S7 failed command enqueue failed");
     edge_device_runtime_tick(&runtime, 3000U, 3000);
     require_true(explicit_command.writes == 2U && explicit_command.completions == 2U &&
@@ -702,7 +1011,7 @@ static void test_universal_scan_reporting_and_fast_due(void) {
     edge_device_runtime_tick(&runtime, 0U, 0);
     edge_write_command command = {.value = {0x44U}, .value_size = 1U,
         .fast_read_duration_sec = 10U, .fast_read_interval_sec = 4U};
-    require_true(edge_device_runtime_enqueue_write(&runtime, &command),
+    require_true(enqueue_write_for_test(&runtime, &command),
         "priority write enqueue failed");
     edge_device_runtime_tick(&runtime, 1000U, 1000);
     require_true(fake.writes == 1U && fake.completions == 1U && fake.reports == 0U &&
@@ -769,7 +1078,7 @@ static void test_universal_scan_reporting_and_fast_due(void) {
         "write-at-due runtime init failed");
     edge_device_runtime_tick(&runtime, 0U, 0);
     edge_write_command due_command = {.value = {0x44U}, .value_size = 1U};
-    require_true(edge_device_runtime_enqueue_write(&runtime, &due_command),
+    require_true(enqueue_write_for_test(&runtime, &due_command),
         "due write enqueue failed");
     edge_device_runtime_tick(&runtime, 3000U, 3000);
     require_true(fake.writes == 1U && fake.completions == 1U &&
@@ -784,13 +1093,157 @@ static void test_universal_scan_reporting_and_fast_due(void) {
     edge_device_runtime_close(&runtime);
 }
 
+static edge_device_driver deadline_test_driver(void) {
+    return (edge_device_driver){.connect = fake_connect,
+                                .handshake = fake_handshake,
+                                .read = fake_read,
+                                .write_readback = fake_write,
+                                .monotonic_ms = fake_monotonic_ms,
+                                .disconnect = fake_disconnect,
+                                .report = fake_report,
+                                .command_complete = fake_complete};
+}
+
+static void test_command_start_deadlines_and_no_replay(void) {
+    const uint8_t platform_id[16] = {0x21U}, device_id[16] = {0x22U};
+    const edge_device_driver driver = deadline_test_driver();
+    edge_device_runtime runtime;
+    fake_device fake = {.monotonic_now_ms = 1000U,
+                        .next_connect_result = EDGE_IO_OFFLINE};
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_MODBUS,
+                                          platform_id, device_id,
+                                          EDGE_ACQUISITION_TICK_MS, 30U, 0U,
+                                          &driver, &fake),
+                 "deadline runtime initialization failed");
+    fake.runtime = &runtime;
+    edge_write_command command = {.value = {0x44U}, .value_size = 1U,
+                                  .start_before_monotonic_ms = 1200U};
+    command.command_id[0] = 1U;
+    require_true(edge_device_runtime_enqueue_write(&runtime, &command),
+                 "deadline command enqueue failed");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(runtime.write_count == 1U && fake.writes == 0U &&
+                     fake.completions == 0U,
+                 "connect failure prematurely completed or wrote a queued command");
+    fake.monotonic_now_ms = 1200U;
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(runtime.write_count == 0U && fake.writes == 0U &&
+                     fake.completions == 1U &&
+                     fake.last_command_result == EDGE_COMMAND_REJECTED_START_EXPIRED,
+                 "deadline was renewed after connection recovery or equality was accepted");
+    edge_device_runtime_close(&runtime);
+
+    fake = (fake_device){.monotonic_now_ms = 1000U,
+                         .connect_advance_ms = 250U,
+                         .handshake_advance_ms = 300U};
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
+                                          platform_id, device_id,
+                                          EDGE_ACQUISITION_TICK_MS, 30U, 0U,
+                                          &driver, &fake),
+                 "slow-handshake deadline runtime initialization failed");
+    fake.runtime = &runtime;
+    command = (edge_write_command){.value = {0x55U}, .value_size = 1U,
+                                   .start_before_monotonic_ms = 1500U};
+    command.command_id[0] = 2U;
+    require_true(edge_device_runtime_enqueue_write(&runtime, &command),
+                 "slow-handshake command enqueue failed");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.connects == 1U && fake.handshakes == 1U &&
+                     fake.writes == 0U && fake.completions == 1U &&
+                     fake.last_command_result == EDGE_COMMAND_REJECTED_START_EXPIRED,
+                 "deadline crossing connect/handshake allowed the southbound write");
+    edge_device_runtime_close(&runtime);
+
+    fake = (fake_device){.monotonic_now_ms = 1000U,
+                         .mark_write_started = true,
+                         .next_write_result = EDGE_IO_NO_RESPONSE};
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_MODBUS,
+                                          platform_id, device_id,
+                                          EDGE_ACQUISITION_TICK_MS, 30U, 0U,
+                                          &driver, &fake),
+                 "uncertain-write runtime initialization failed");
+    fake.runtime = &runtime;
+    command = (edge_write_command){.value = {0x66U}, .value_size = 1U,
+                                   .start_before_monotonic_ms = 5000U};
+    command.command_id[0] = 3U;
+    require_true(edge_device_runtime_enqueue_write(&runtime, &command),
+                 "uncertain command enqueue failed");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.writes == 1U && fake.completions == 1U &&
+                     fake.last_command_result == EDGE_COMMAND_TIMED_OUT &&
+                     fake.last_write_started && fake.last_write_ack_missing,
+                 "possibly-sent write was reported as unstarted or without missing-ACK flag");
+    require_true(edge_device_runtime_enqueue_write(&runtime, &command) &&
+                     runtime.write_count == 0U,
+                 "duplicate command id was queued for a second southbound write");
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(fake.writes == 1U,
+                 "duplicate result/retry caused a second southbound write");
+    edge_device_runtime_close(&runtime);
+
+    fake = (fake_device){.monotonic_now_ms = 1000U,
+                         .mark_write_started = true,
+                         .mark_write_ack = true,
+                         .write_advance_ms = 2000U};
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_MODBUS,
+                                          platform_id, device_id,
+                                          EDGE_ACQUISITION_TICK_MS, 30U, 0U,
+                                          &driver, &fake),
+                 "in-flight completion runtime initialization failed");
+    fake.runtime = &runtime;
+    command = (edge_write_command){.value = {0x77U}, .value_size = 1U,
+                                   .start_before_monotonic_ms = 1500U};
+    command.command_id[0] = 4U;
+    require_true(edge_device_runtime_enqueue_write(&runtime, &command),
+                 "in-flight command enqueue failed");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.writes == 1U && fake.completions == 1U &&
+                     fake.last_command_result == EDGE_COMMAND_SUCCEEDED &&
+                     !fake.last_write_ack_missing,
+                 "deadline interrupted a write after southbound transmission started");
+    edge_device_runtime_close(&runtime);
+
+    fake = (fake_device){.monotonic_now_ms = 1000U};
+    require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_MODBUS,
+                                          platform_id, device_id,
+                                          EDGE_ACQUISITION_TICK_MS, 30U, 0U,
+                                          &driver, &fake),
+                 "queue-backlog deadline runtime initialization failed");
+    fake.runtime = &runtime;
+    edge_write_command first = {.value = {0x10U}, .value_size = 1U,
+                                .start_before_monotonic_ms = 1000U};
+    edge_write_command second = {.value = {0x20U}, .value_size = 1U,
+                                 .start_before_monotonic_ms = 2000U};
+    first.command_id[0] = 5U;
+    second.command_id[0] = 6U;
+    require_true(edge_device_runtime_enqueue_write(&runtime, &first) &&
+                     edge_device_runtime_enqueue_write(&runtime, &second),
+                 "backlogged commands could not be queued");
+    edge_device_runtime_tick(&runtime, 1000U, 1000);
+    require_true(fake.writes == 0U && fake.completions == 1U &&
+                     runtime.write_count == 1U,
+                 "expired head command started or queue processing ignored its cutoff");
+    fake.monotonic_now_ms = 2000U;
+    edge_device_runtime_tick(&runtime, 2000U, 2000);
+    require_true(fake.writes == 0U && fake.completions == 2U &&
+                     runtime.write_count == 0U &&
+                     fake.last_command_result == EDGE_COMMAND_REJECTED_START_EXPIRED,
+                 "queued deadline was renewed while waiting behind another command");
+    edge_device_runtime_close(&runtime);
+}
+
 int main(void) {
+    test_command_clock_mapping();
+    test_command_start_deadlines_and_no_replay();
     test_s7_tcp_client_scan_and_report_intervals();
     test_configured_read_interval();
     test_fast_reporting_after_write();
     test_initial_report_waits_for_first_success();
     test_io_and_reporting();
     test_s7_immediate_retry_is_bounded();
+    test_s7_failed_fast_report_is_suppressed();
+    test_s7_failed_ordinary_due_is_suppressed();
+    test_s7_local_connection_failures_are_not_retried();
     test_s7_protocol_error_reconnects();
     test_modbus();
     test_s7();

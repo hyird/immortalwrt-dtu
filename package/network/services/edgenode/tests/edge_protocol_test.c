@@ -37,6 +37,7 @@ static void test_hello_round_trip(void) {
         EDGENODE_PROTOCOL_VERSION;
     envelope.payload.hello.supports_firmware_update = true;
     envelope.payload.hello.supports_firmware_stream = true;
+    envelope.payload.hello.supports_command_start_before = true;
     strcpy(envelope.payload.hello.iccid, "89860012345678901234");
     envelope.payload.hello.signal_csq = 23U;
     envelope.payload.hello.signal_rssi_dbm = -67;
@@ -73,6 +74,8 @@ static void test_hello_round_trip(void) {
     require(decoded.payload.hello.supports_firmware_update &&
                 decoded.payload.hello.supports_firmware_stream,
             "firmware WS capability changed during round trip");
+    require(decoded.payload.hello.supports_command_start_before,
+            "command start deadline capability changed during round trip");
     require(decoded.message_id.size == 16U && (decoded.message_id.bytes[6] >> 4U) == 7U,
             "message id is not UUIDv7");
     require((decoded.message_id.bytes[8] & 0xc0U) == 0x80U, "bad UUID variant");
@@ -94,6 +97,8 @@ static void test_heartbeat_mobile_state_round_trip(void) {
     heartbeat->signal_percent = 74U;
     heartbeat->mobile_registered = true;
     heartbeat->mobile_registration_status = 1;
+    heartbeat->has_nonce = true;
+    heartbeat->nonce = UINT64_C(0x1020304050607080);
 
     uint8_t encoded[EDGENODE_MAX_WS_MESSAGE];
     size_t encoded_size = 0U;
@@ -113,6 +118,8 @@ static void test_heartbeat_mobile_state_round_trip(void) {
                 round_trip->signal_percent == 74U && round_trip->mobile_registered &&
                 round_trip->mobile_registration_status == 1,
             "heartbeat mobile state changed during round trip");
+    require(round_trip->has_nonce && round_trip->nonce == UINT64_C(0x1020304050607080),
+            "heartbeat clock nonce changed during round trip");
     require(!round_trip->has_tcp_traffic, "old firmware must not imply measured zero traffic");
     heartbeat->has_tcp_traffic = true;
     heartbeat->tcp_traffic.upload_bytes = UINT64_C(9007199254740993);
@@ -141,6 +148,71 @@ static void test_heartbeat_mobile_state_round_trip(void) {
             round_trip->vpn_traffic.download_bytes == 22 &&
             round_trip->vpn_traffic.sample_id == 3,
             "VPN traffic presence or interval lost");
+}
+
+static void test_command_deadline_proto_compatibility(void) {
+    const uint8_t platform_id[16] = {0x31U};
+    const uint8_t random[10] = {0x32U};
+    const uint8_t id[16] = {0x33U};
+    uint8_t encoded[EDGENODE_MAX_WS_MESSAGE];
+    size_t encoded_size = 0U;
+    const char *error = NULL;
+    iot_edge_v1_Envelope envelope;
+    require(edge_protocol_init_envelope(&envelope, platform_id, NULL, 0U, 1U,
+                                        1700000000000LL, random),
+            "legacy command envelope init failed");
+    envelope.which_payload = iot_edge_v1_Envelope_command_request_tag;
+    require(edge_protocol_set_bytes(&envelope.payload.command_request.command_id,
+                                    sizeof(envelope.payload.command_request.command_id.bytes),
+                                    id, 16U) &&
+                edge_protocol_set_bytes(&envelope.payload.command_request.device_id,
+                                        sizeof(envelope.payload.command_request.device_id.bytes),
+                                        id, 16U),
+            "legacy command identifiers setup failed");
+    envelope.payload.command_request.values_count = 1U;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error),
+            error != NULL ? error : "legacy command vector encode failed");
+    iot_edge_v1_Envelope decoded;
+    require(edge_protocol_decode(encoded, encoded_size, &decoded, &error) &&
+                decoded.which_payload == iot_edge_v1_Envelope_command_request_tag &&
+                !decoded.payload.command_request.has_start_before_ms,
+            error != NULL ? error : "0.3.44 command without deadline did not decode as absent");
+
+    envelope.payload.command_request.has_start_before_ms = true;
+    envelope.payload.command_request.start_before_ms = 1700000005000LL;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error) &&
+                edge_protocol_decode(encoded, encoded_size, &decoded, &error) &&
+                decoded.payload.command_request.has_start_before_ms &&
+                decoded.payload.command_request.start_before_ms == 1700000005000LL,
+            error != NULL ? error : "command start deadline field did not round-trip");
+
+    envelope.which_payload = iot_edge_v1_Envelope_hello_ack_tag;
+    envelope.payload.hello_ack = (iot_edge_v1_HelloAck)iot_edge_v1_HelloAck_init_zero;
+    edge_protocol_set_bytes(&envelope.payload.hello_ack.assigned_node_id,
+                            sizeof(envelope.payload.hello_ack.assigned_node_id.bytes), id, 16U);
+    envelope.payload.hello_ack.negotiated_protocol_version = EDGENODE_PROTOCOL_VERSION;
+    envelope.payload.hello_ack.session_epoch = 1U;
+    envelope.payload.hello_ack.has_database_time_ms = true;
+    envelope.payload.hello_ack.database_time_ms = 1700000000123LL;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error) &&
+                edge_protocol_decode(encoded, encoded_size, &decoded, &error) &&
+                decoded.payload.hello_ack.has_database_time_ms &&
+                decoded.payload.hello_ack.database_time_ms == 1700000000123LL,
+            error != NULL ? error : "HelloAck DB sample did not round-trip");
+
+    envelope.which_payload = iot_edge_v1_Envelope_heartbeat_ack_tag;
+    envelope.payload.heartbeat_ack = (iot_edge_v1_HeartbeatAck)iot_edge_v1_HeartbeatAck_init_zero;
+    envelope.payload.heartbeat_ack.has_nonce = true;
+    envelope.payload.heartbeat_ack.nonce = 99U;
+    envelope.payload.heartbeat_ack.has_database_time_ms = true;
+    envelope.payload.heartbeat_ack.database_time_ms = 1700000000456LL;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error) &&
+                edge_protocol_decode(encoded, encoded_size, &decoded, &error) &&
+                decoded.payload.heartbeat_ack.has_nonce &&
+                decoded.payload.heartbeat_ack.nonce == 99U &&
+                decoded.payload.heartbeat_ack.has_database_time_ms &&
+                decoded.payload.heartbeat_ack.database_time_ms == 1700000000456LL,
+            error != NULL ? error : "HeartbeatAck nonce/sample did not round-trip");
 }
 
 static void test_terminal_opened_round_trip(void) {
@@ -517,6 +589,7 @@ int main(void) {
     test_imei();
     test_hello_round_trip();
     test_heartbeat_mobile_state_round_trip();
+    test_command_deadline_proto_compatibility();
     require(EDGENODE_PROTOCOL_VERSION == 6U,
             "firmware streaming did not advance the wire protocol");
     test_terminal_opened_round_trip();

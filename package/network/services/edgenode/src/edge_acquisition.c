@@ -15,10 +15,12 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -53,6 +55,10 @@
 
 typedef struct edge_acquisition_device edge_acquisition_device;
 typedef struct edge_acquisition_link edge_acquisition_link;
+
+typedef struct {
+    _Alignas(_Atomic uint32_t) _Atomic uint32_t generation;
+} edge_command_clock_generation;
 
 typedef struct edge_acquisition_response {
     size_t references;
@@ -109,6 +115,14 @@ struct edge_acquisition_device {
     edge_sl651_session *sl651;
     uint8_t sl651_station[5];
     bool sl651_transmitter, sl651_query_active;
+    bool command_start_check, command_start_expired;
+    bool sl651_command_pending;
+    uint64_t mapping_valid_until_monotonic_ms;
+    uint32_t command_clock_generation;
+    bool southbound_command_id_valid;
+    uint8_t southbound_command_id[16];
+    uint8_t sl651_command_id[16];
+    uint64_t command_start_before_monotonic_ms;
     uint64_t sl651_token;
     bool sl651_report_encoded;
     uint32_t sl651_parts;
@@ -167,6 +181,7 @@ struct edge_acquisition {
     edge_acquisition_link *links;
     size_t link_count;
     uint8_t platform_ids[4][16];
+    edge_command_clock_generation *command_clock_generations;
     iot_edge_v1_DeviceStatusReport cached_status[4];
     size_t platform_count;
     pid_t worker_pid;
@@ -198,6 +213,9 @@ typedef struct {
     uint32_t payload_size;
     uint64_t report_token;
     uint32_t report_part;
+    uint64_t command_start_before_monotonic_ms;
+    uint64_t mapping_valid_until_monotonic_ms;
+    uint32_t command_clock_generation;
     uint8_t device_id[16];
     uint8_t platform_id[16];
     union {
@@ -221,6 +239,33 @@ static void serial_tick(edge_acquisition *acquisition, uint64_t now);
 
 static bool worker_sl651_report(edge_acquisition_device *device,
                                 const iot_edge_v1_TelemetryRecord *record, uint32_t part);
+
+static size_t command_clock_platform_index(const edge_acquisition *acquisition,
+                                          const uint8_t platform_id[16]) {
+    if (acquisition == NULL || platform_id == NULL)
+        return SIZE_MAX;
+    for (size_t index = 0U; index < acquisition->platform_count; ++index)
+        if (memcmp(acquisition->platform_ids[index], platform_id, 16U) == 0)
+            return index;
+    return SIZE_MAX;
+}
+
+static uint32_t command_clock_current_generation(const edge_acquisition *acquisition,
+                                                  const uint8_t platform_id[16]) {
+    const size_t index = command_clock_platform_index(acquisition, platform_id);
+    if (index == SIZE_MAX || acquisition->command_clock_generations == NULL)
+        return 0U;
+    const edge_command_clock_generation *generation =
+        &acquisition->command_clock_generations[index];
+    return atomic_load_explicit(&generation->generation, memory_order_seq_cst);
+}
+
+static bool command_clock_generation_is_current(const edge_acquisition *acquisition,
+                                                 const uint8_t platform_id[16],
+                                                 uint32_t generation) {
+    return generation != 0U &&
+        command_clock_current_generation(acquisition, platform_id) == generation;
+}
 
 static void set_error(char *error, size_t size, const char *message) {
     if (error != NULL && size != 0U)
@@ -524,16 +569,27 @@ static void close_on_exec(int fd) {
         (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
-static int wait_fd(int fd, short events) {
+static int wait_fd_with_timeout(int fd, short events, bool *timed_out) {
+    if (timed_out != NULL)
+        *timed_out = false;
     struct pollfd descriptor = {.fd = fd, .events = events};
     for (;;) {
         const int result = poll(&descriptor, 1U, EDGE_IO_TIMEOUT_MS);
         if (result < 0 && errno == EINTR)
             continue;
-        if (result <= 0 || (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+        if (result == 0) {
+            if (timed_out != NULL)
+                *timed_out = true;
+            return -1;
+        }
+        if (result < 0 || (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
             return -1;
         return (descriptor.revents & events) != 0 ? 0 : -1;
     }
+}
+
+static int wait_fd(int fd, short events) {
+    return wait_fd_with_timeout(fd, events, NULL);
 }
 
 static bool automatic_debug_enabled(const edge_acquisition_device *device) {
@@ -644,18 +700,60 @@ static void debug_request_begin(edge_acquisition_device *device, const uint8_t *
     debug_request_status(device, "sending", "", false);
 }
 
+static bool command_start_expired(edge_acquisition_device *device) {
+    if (!device->command_start_check || device->runtime.southbound_write_started)
+        return false;
+    const uint64_t now = monotonic_milliseconds();
+    if (now != 0U && now < device->command_start_before_monotonic_ms &&
+        now < device->mapping_valid_until_monotonic_ms &&
+        command_clock_generation_is_current(device->owner, device->platform_id,
+                                            device->command_clock_generation))
+        return false;
+    device->command_start_expired = true;
+    return true;
+}
+
+static bool command_first_write_is_valid(edge_acquisition_device *device) {
+    const uint64_t now = monotonic_milliseconds();
+    const uint32_t generation =
+        command_clock_current_generation(device->owner, device->platform_id);
+    if (device->command_clock_generation == 0U ||
+        generation != device->command_clock_generation || now == 0U ||
+        now >= device->mapping_valid_until_monotonic_ms ||
+        now >= device->command_start_before_monotonic_ms) {
+        device->command_start_expired = true;
+        return false;
+    }
+    return true;
+}
+
 static bool write_all(edge_acquisition_device *device, const uint8_t *data, size_t size) {
-    if (serial_paused(device)) return false;
     const int fd = device->link->fd;
     size_t offset = 0U;
     while (offset < size) {
-        if (wait_fd(fd, POLLOUT) != 0)
+        if (command_start_expired(device) || serial_paused(device)) return false;
+        if (wait_fd(fd, POLLOUT) != 0) {
+            (void)command_start_expired(device);
+            return false;
+        }
+        const bool guarded_first_write = device->command_start_check &&
+            !device->runtime.southbound_write_started;
+        /* This narrows (but cannot atomically close) the check-to-write race. */
+        if (guarded_first_write && !command_first_write_is_valid(device))
             return false;
         const ssize_t count = write(fd, data + offset, size - offset);
         if (count < 0 && errno == EINTR)
             continue;
         if (count <= 0)
             return false;
+        if (guarded_first_write) {
+            device->runtime.southbound_write_started = true;
+            if (device->runtime.write_count != 0U) {
+                memcpy(device->southbound_command_id,
+                       device->runtime.writes[device->runtime.write_head].command_id, 16U);
+                device->southbound_command_id_valid = true;
+            }
+        }
         if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
             serial_observe(device->owner, device->endpoint->serial.channel,
                 &device->endpoint->serial, "TX", data + offset, (size_t)count);
@@ -690,12 +788,19 @@ static bool tcp_socket_is_broken(int fd) {
     }
 }
 
-static bool read_exact(edge_acquisition_device *device, uint8_t *data, size_t size) {
+static bool read_exact_with_timeout(edge_acquisition_device *device, uint8_t *data,
+                                    size_t size, bool *timed_out) {
+    if (timed_out != NULL)
+        *timed_out = false;
     const int fd = device->link->fd;
     size_t offset = 0U;
     while (offset < size) {
-        if (wait_fd(fd, POLLIN) != 0)
+        bool wait_timed_out = false;
+        if (wait_fd_with_timeout(fd, POLLIN, &wait_timed_out) != 0) {
+            if (timed_out != NULL)
+                *timed_out = wait_timed_out;
             return false;
+        }
         const ssize_t count = read(fd, data + offset, size - offset);
         if (count < 0 && errno == EINTR)
             continue;
@@ -708,6 +813,10 @@ static bool read_exact(edge_acquisition_device *device, uint8_t *data, size_t si
         offset += (size_t)count;
     }
     return true;
+}
+
+static bool read_exact(edge_acquisition_device *device, uint8_t *data, size_t size) {
+    return read_exact_with_timeout(device, data, size, NULL);
 }
 
 static speed_t baud_rate(uint32_t value) {
@@ -1008,12 +1117,14 @@ static bool receive_modbus(edge_acquisition_device *device, uint8_t *frame,
 }
 
 static bool receive_s7(edge_acquisition_device *device, uint8_t *frame,
-                        size_t capacity, size_t *size) {
-    if (!read_exact(device, frame, 4U))
+                       size_t capacity, size_t *size, bool *timed_out) {
+    if (timed_out != NULL)
+        *timed_out = false;
+    if (!read_exact_with_timeout(device, frame, 4U, timed_out))
         return false;
     const size_t length = ((size_t)frame[2] << 8U) | frame[3];
     if (length < 7U || length > capacity ||
-        !read_exact(device, frame + 4U, length - 4U))
+        !read_exact_with_timeout(device, frame + 4U, length - 4U, timed_out))
         return false;
     *size = length;
     return true;
@@ -1048,9 +1159,13 @@ static bool modbus_tcp_response_matches_request(const uint8_t *request,
            response[7] == (uint8_t)(expected_function | 0x80U);
 }
 
-static bool exchange(edge_acquisition_device *device, const uint8_t *request,
-                     size_t request_size, uint8_t *response, size_t capacity,
-                     size_t *response_size) {
+static bool exchange_with_receive_timeout(edge_acquisition_device *device,
+                                          const uint8_t *request, size_t request_size,
+                                          uint8_t *response, size_t capacity,
+                                          size_t *response_size,
+                                          bool *receive_timed_out) {
+    if (receive_timed_out != NULL)
+        *receive_timed_out = false;
     if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&
         tcp_socket_is_broken(device->link->fd)) {
         close_fd(&device->link->fd);
@@ -1105,7 +1220,8 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
     debug_request_status(device, "waiting", "", false);
     bool received = false;
     if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
-        received = receive_s7(device, response, capacity, response_size);
+        received = receive_s7(device, response, capacity, response_size,
+                              receive_timed_out);
     } else if (edge_industrial_protocol(device->config->protocol)) {
         received = receive_industrial(device, response, capacity, response_size);
     } else {
@@ -1146,6 +1262,31 @@ static bool exchange(edge_acquisition_device *device, const uint8_t *request,
     }
     if (!received) debug_request_status(device, "failed", "response_timeout_or_connection_closed", true);
     return received;
+}
+
+static bool exchange(edge_acquisition_device *device, const uint8_t *request,
+                     size_t request_size, uint8_t *response, size_t capacity,
+                     size_t *response_size) {
+    return exchange_with_receive_timeout(device, request, request_size, response,
+                                         capacity, response_size, NULL);
+}
+
+static bool write_command_exchange(edge_acquisition_device *device,
+                                   const uint8_t *request, size_t request_size,
+                                   uint8_t *response, size_t capacity,
+                                   size_t *response_size) {
+    device->command_start_expired = false;
+    device->command_start_check = true;
+    const bool exchanged = exchange(device, request, request_size, response,
+                                    capacity, response_size);
+    device->command_start_check = false;
+    return exchanged;
+}
+
+static edge_io_result failed_command_exchange(const edge_acquisition_device *device) {
+    if (device->command_start_expired && !device->runtime.southbound_write_started)
+        return EDGE_IO_COMMAND_START_EXPIRED;
+    return device->link->fd < 0 ? EDGE_IO_OFFLINE : EDGE_IO_NO_RESPONSE;
 }
 
 static bool parse_hex16(const char *text, uint16_t *value) {
@@ -1415,12 +1556,21 @@ static edge_io_result read_s7_point(edge_acquisition_device *device,
     const size_t output_size = edge_s7_build_read(reference, &address, output, sizeof(output));
     size_t response_size = 0U;
     uint8_t return_code = 0U;
+    bool receive_timed_out = false;
     if (output_size == 0U)
-        return EDGE_IO_PROTOCOL_ERROR;
-    if (!exchange(device, output, output_size, response, sizeof(response), &response_size))
-        return device->link->fd < 0 ? EDGE_IO_OFFLINE : EDGE_IO_NO_RESPONSE;
+        return EDGE_IO_OFFLINE; /* Local request construction failed; nothing was sent. */
+    if (!exchange_with_receive_timeout(device, output, output_size, response,
+                                       sizeof(response), &response_size,
+                                       &receive_timed_out)) {
+        /* exchange sets this only after the full read request was written. */
+        if (receive_timed_out && device->endpoint->transport ==
+                                     iot_edge_v1_Transport_TRANSPORT_ETHERNET)
+            return EDGE_IO_NO_RESPONSE;
+        return EDGE_IO_OFFLINE;
+    }
     const edge_s7_result result = edge_s7_parse_read(response, response_size, reference,
-                                                     data, capacity, data_size, &return_code);
+                                                     &address, data, capacity, data_size,
+                                                     &return_code);
     debug_request_status(device, result == EDGE_S7_OK ? "success" : "failed",
         result == EDGE_S7_OK ? "" : "s7_exception_or_invalid_response", true);
     if (result != EDGE_S7_OK)
@@ -1738,6 +1888,11 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
             return result;
         }
         fill_point_value(device, point, raw, raw_size, device->read_response);
+        if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 &&
+            !point->valid) {
+            log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "read");
+            return EDGE_IO_PROTOCOL_ERROR;
+        }
         any = any || point->valid;
     }
     log_io_result(device, EDGE_IO_OK, "read");
@@ -1899,14 +2054,16 @@ static edge_io_result write_modbus(edge_acquisition_device *device,
     if (edge_modbus_build_write(&request, command->value, command->value_size,
                                 output, sizeof(output), &output_size) != EDGE_MODBUS_OK)
         return EDGE_IO_PROTOCOL_ERROR;
-    if (!exchange(device, output, output_size, response, sizeof(response), &response_size))
-        return device->link->fd < 0 ? EDGE_IO_OFFLINE : EDGE_IO_NO_RESPONSE;
+    if (!write_command_exchange(device, output, output_size, response,
+                                sizeof(response), &response_size))
+        return failed_command_exchange(device);
     if (edge_modbus_parse_response(&request, response, response_size, command->value,
                                    command->value_size, NULL, 0U, &ignored,
                                    &exception) != EDGE_MODBUS_OK) {
         debug_request_status(device, "failed", "modbus_write_exception", true);
         return EDGE_IO_PROTOCOL_ERROR;
     }
+    device->runtime.write_ack_received = true;
     debug_request_status(device, "success", "", true);
     return read_modbus_point(device, point, actual->bytes, sizeof(actual->bytes),
                               &actual->size);
@@ -1927,12 +2084,14 @@ static edge_io_result write_s7(edge_acquisition_device *device,
     uint8_t return_code = 0U;
     if (output_size == 0U)
         return EDGE_IO_PROTOCOL_ERROR;
-    if (!exchange(device, output, output_size, response, sizeof(response), &response_size))
-        return EDGE_IO_NO_RESPONSE;
+    if (!write_command_exchange(device, output, output_size, response,
+                                sizeof(response), &response_size))
+        return failed_command_exchange(device);
     if (edge_s7_parse_write(response, response_size, reference, &return_code) != EDGE_S7_OK) {
         debug_request_status(device, "failed", "s7_write_exception", true);
         return EDGE_IO_PROTOCOL_ERROR;
     }
+    device->runtime.write_ack_received = true;
     debug_request_status(device, "success", "", true);
     return read_s7_point(device, point, actual->bytes, sizeof(actual->bytes), &actual->size);
 }
@@ -1949,11 +2108,14 @@ static edge_io_result write_industrial(edge_acquisition_device *device,
         0, command->value, command->value_size, request, sizeof(request));
     size_t received = 0, ignored = 0; bool more = false;
     if (!n) return EDGE_IO_PROTOCOL_ERROR;
-    if (!exchange(device, request, n, response, sizeof(response), &received)) return EDGE_IO_NO_RESPONSE;
+    if (!write_command_exchange(device, request, n, response, sizeof(response),
+                                &received))
+        return failed_command_exchange(device);
     if (!edge_industrial_response(device->config, request, n, response, received, NULL, 0, &ignored, &more)) {
         debug_request_status(device, "failed", "industrial_write_invalid", true);
         close_fd(&device->link->fd); return EDGE_IO_OFFLINE;
     }
+    device->runtime.write_ack_received = true;
     debug_request_status(device, "success", "", true);
     return read_industrial_point(device, point, actual->bytes, sizeof(actual->bytes), &actual->size);
 }
@@ -2000,7 +2162,13 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
     debug_acquisition_state(device, "running");
     for (size_t index = 0; index < device->point_count; ++index) device->points[index].valid = false;
     const edge_io_result result = read_acquisition(context, sample);
-    update_derived_samples(device);
+    if (result != EDGE_IO_OK &&
+        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
+        for (size_t index = 0; index < device->point_count; ++index)
+            device->points[index].valid = false;
+    } else {
+        update_derived_samples(device);
+    }
     finish_debug_acquisition(device, result);
     device->acquisition_active = false;
     return result;
@@ -2011,6 +2179,11 @@ static edge_io_result device_write_readback(void *context, const edge_write_comm
     edge_acquisition_device *device = context;
     memcpy(device->acquisition_id, command->command_id, 16);
     device->acquisition_active = true;
+    device->command_start_before_monotonic_ms = command->start_before_monotonic_ms;
+    device->mapping_valid_until_monotonic_ms = command->mapping_valid_until_monotonic_ms;
+    device->command_clock_generation = command->command_clock_generation;
+    device->command_start_expired = false;
+    device->command_start_check = false;
     debug_acquisition_state(device, "running");
     for (size_t index = 0; index < device->point_count; ++index) device->points[index].valid = false;
     const edge_io_result result = write_acquisition(context, command, actual);
@@ -2060,6 +2233,12 @@ static int64_t sl651_observed(edge_acquisition_device *device, const uint8_t *bo
 static bool sl651_send(void *context, const uint8_t *bytes, size_t size,
                        const uint8_t acquisition_id[16], const uint8_t *reply_to_packet_id) {
     edge_acquisition_device *device = context;
+    const bool control_request = device->sl651_command_pending &&
+        reply_to_packet_id == NULL &&
+        memcmp(acquisition_id, device->sl651_command_id, 16U) == 0 &&
+        edge_sl651_is_control_request(bytes, size);
+    if (control_request && device->runtime.southbound_write_started)
+        return false; /* Never retransmit an already-started control request. */
     if (serial_paused(device)) return false;
     memcpy(device->acquisition_id, acquisition_id, 16);
     if (reply_to_packet_id) memcpy(device->received_packet_id, reply_to_packet_id, 16);
@@ -2070,11 +2249,21 @@ static bool sl651_send(void *context, const uint8_t *bytes, size_t size,
         return false;
     size_t offset = 0;
     while (offset < size) {
-        ssize_t n = write(device->link->fd, bytes + offset, size - offset);
+        const bool guarded_first_write = control_request &&
+            !device->runtime.southbound_write_started;
+        /* The generation can change after this check; never claim atomicity with write(). */
+        if (guarded_first_write && !command_first_write_is_valid(device))
+            return false;
+        const ssize_t n = write(device->link->fd, bytes + offset, size - offset);
         if (n < 0 && errno == EINTR)
             continue;
         if (n <= 0)
             return false;
+        if (guarded_first_write) {
+            device->runtime.southbound_write_started = true;
+            memcpy(device->southbound_command_id, device->sl651_command_id, 16U);
+            device->southbound_command_id_valid = true;
+        }
         debug_packet(device, "TX", bytes + offset, (size_t)n, true, false);
         if (device->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
             serial_observe(device->owner, device->endpoint->serial.channel,
@@ -2332,6 +2521,9 @@ static void sl651_command_result(void *context, const uint8_t id[16], bool succe
                             device->config->device_id.bytes, 16);
     device->sl651_result.state = success ? iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED
                                          : iot_edge_v1_CommandState_COMMAND_STATE_FAILED;
+    device->runtime.write_ack_received = success;
+    device->sl651_result.write_ack_missing =
+        device->runtime.southbound_write_started && !device->runtime.write_ack_received;
     device->sl651_result.completed_at_ms = current_ms();
     copy_text(device->sl651_result.message, sizeof(device->sl651_result.message), reason);
     if (!success)
@@ -2565,6 +2757,8 @@ static iot_edge_v1_CommandState command_state(edge_command_result result) {
         return iot_edge_v1_CommandState_COMMAND_STATE_DEVICE_OFFLINE;
     case EDGE_COMMAND_TIMED_OUT:
         return iot_edge_v1_CommandState_COMMAND_STATE_TIMED_OUT;
+    case EDGE_COMMAND_REJECTED_START_EXPIRED:
+        return iot_edge_v1_CommandState_COMMAND_STATE_REJECTED;
     default:
         return iot_edge_v1_CommandState_COMMAND_STATE_FAILED;
     }
@@ -2590,7 +2784,15 @@ static void device_command_complete(void *context, const uint8_t platform_id[16]
               : result == EDGE_COMMAND_READBACK_MISMATCH ? "write readback mismatch"
               : result == EDGE_COMMAND_DEVICE_OFFLINE ? "device offline"
               : result == EDGE_COMMAND_TIMED_OUT ? "device response timed out"
-                                                 : "device command failed");
+              : result == EDGE_COMMAND_REJECTED_START_EXPIRED
+                    ? "command start deadline expired before southbound write"
+                    : "device command failed");
+    output.write_ack_missing = device->runtime.southbound_write_started &&
+                               !device->runtime.write_ack_received;
+    if (device->runtime.write_ack_received &&
+        result != EDGE_COMMAND_SUCCEEDED && result != EDGE_COMMAND_READBACK_MISMATCH)
+        copy_text(output.message, sizeof(output.message),
+                  "write acknowledged; readback failed or unavailable");
     const edge_write_command *command = &device->runtime.writes[device->runtime.write_head];
     edge_acquisition_point *point = find_point(device, command->element_id);
     if (point != NULL && actual != NULL && actual->size != 0U) {
@@ -2604,11 +2806,17 @@ static void device_command_complete(void *context, const uint8_t platform_id[16]
                                  platform_id, &output);
 }
 
+static uint64_t device_monotonic_ms(void *context) {
+    (void)context;
+    return monotonic_milliseconds();
+}
+
 static const edge_device_driver kDriver = {
     .connect = device_connect,
     .handshake = device_handshake,
     .read = device_read,
     .write_readback = device_write_readback,
+    .monotonic_ms = device_monotonic_ms,
     .disconnect = device_disconnect,
     .report = device_report,
     .command_complete = device_command_complete};
@@ -2669,15 +2877,33 @@ edge_acquisition *edge_acquisition_create(
     if (telemetry == NULL || command == NULL)
         return NULL;
     edge_acquisition *value = calloc(1U, sizeof(*value));
-    if (value != NULL) {
-        value->telemetry = telemetry;
-        value->command = command;
-        value->callback_context = callback_context;
-        value->worker_fd = -1;
-        for (size_t index = 0U; index < 4U; ++index)
-            value->cached_status[index] =
-                (iot_edge_v1_DeviceStatusReport)iot_edge_v1_DeviceStatusReport_init_zero;
+    if (value == NULL)
+        return NULL;
+    value->command_clock_generations = mmap(
+        NULL, 4U * sizeof(*value->command_clock_generations),
+        PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (value->command_clock_generations == MAP_FAILED) {
+        free(value);
+        return NULL;
     }
+    for (size_t index = 0U; index < 4U; ++index) {
+        atomic_init(&value->command_clock_generations[index].generation, 1U);
+        if (!atomic_is_lock_free(&value->command_clock_generations[index].generation)) {
+            edge_log_write("error", "acquisition",
+                           "shared 32-bit command generations are not lock-free",
+                           "acquisition worker disabled");
+            (void)munmap(value->command_clock_generations,
+                         4U * sizeof(*value->command_clock_generations));
+            free(value);
+            return NULL;
+        }
+        value->cached_status[index] =
+            (iot_edge_v1_DeviceStatusReport)iot_edge_v1_DeviceStatusReport_init_zero;
+    }
+    value->telemetry = telemetry;
+    value->command = command;
+    value->callback_context = callback_context;
+    value->worker_fd = -1;
     return value;
 }
 
@@ -3126,6 +3352,9 @@ static bool writable_point(const edge_acquisition_point *point) {
 static bool build_write_command(edge_acquisition *acquisition,
                                 const uint8_t platform_id[16],
                                 const iot_edge_v1_CommandRequest *request,
+                                uint64_t start_before_monotonic_ms,
+                                uint64_t mapping_valid_until_monotonic_ms,
+                                uint32_t command_clock_generation,
                                 edge_acquisition_device **output_device,
                                 edge_write_command *output_command,
                                 char *error, size_t error_size) {
@@ -3161,6 +3390,9 @@ static bool build_write_command(edge_acquisition *acquisition,
     command.fast_read_interval_sec = request->fast_read_interval_sec != 0U
                                          ? request->fast_read_interval_sec
                                          : device->config->command_fast_read_interval_sec;
+    command.start_before_monotonic_ms = start_before_monotonic_ms;
+    command.mapping_valid_until_monotonic_ms = mapping_valid_until_monotonic_ms;
+    command.command_clock_generation = command_clock_generation;
     if (command.fast_read_duration_sec > 3600U ||
         command.fast_read_interval_sec > 3600U) {
         set_error(error, error_size, "command fast-read policy is invalid");
@@ -3234,8 +3466,15 @@ static bool sl651_encode(const iot_edge_v1_Sl651ElementConfig *element, const ch
     return true;
 }
 static bool sl651_query_request(edge_acquisition_device *device,
-                                const iot_edge_v1_CommandRequest *request, char *error,
-                                size_t error_size) {
+                                const iot_edge_v1_CommandRequest *request,
+                                uint64_t start_before_monotonic_ms,
+                                uint64_t mapping_valid_until_monotonic_ms,
+                                uint32_t command_clock_generation,
+                                char *error, size_t error_size) {
+    if (device->sl651_command_pending || device->sl651_query_active) {
+        set_error(error, error_size, "SL651 station already has a pending command");
+        return false;
+    }
     if (request->command_id.size != 16 || !request->values_count || request->values_count > 8) {
         set_error(error, error_size, "SL651 command requires configured values");
         return false;
@@ -3318,12 +3557,32 @@ static bool sl651_query_request(edge_acquisition_device *device,
     device->sl651_transmitter = true;
     uint8_t time[6];
     sl651_time(device, time);
-    if (!edge_sl651_query(device->sl651, request->command_id.bytes, (uint8_t)code, body, size,
+    device->command_start_before_monotonic_ms = start_before_monotonic_ms;
+    device->mapping_valid_until_monotonic_ms = mapping_valid_until_monotonic_ms;
+    device->command_clock_generation = command_clock_generation;
+    device->command_start_expired = false;
+    device->runtime.southbound_write_started = false;
+    device->runtime.write_ack_received = false;
+    device->sl651_command_pending = true;
+    memcpy(device->sl651_command_id, request->command_id.bytes, 16U);
+    if (monotonic_milliseconds() == 0U ||
+        monotonic_milliseconds() >= start_before_monotonic_ms ||
+        !edge_sl651_query(device->sl651, request->command_id.bytes, (uint8_t)code, body, size,
                           monotonic_milliseconds(), request->timeout_ms, time)) {
         device->sl651_transmitter = previous;
-        set_error(error, error_size,
-                  "SL651 command requires an online M2/M3/M4 station without a pending or "
-                  "timed-out query");
+        if (device->runtime.southbound_write_started) {
+            edge_sl651_quarantine(device->sl651);
+            set_error(error, error_size,
+                      "SL651 write may have started; result is uncertain and will not be resent");
+        } else {
+            device->sl651_command_pending = false;
+            set_error(error, error_size,
+                      device->command_start_expired ||
+                              monotonic_milliseconds() >= start_before_monotonic_ms
+                          ? "command start deadline expired before southbound write"
+                          : "SL651 command requires an online M2/M3/M4 station without a pending or "
+                            "timed-out query");
+        }
         return false;
     }
     for (size_t i = 0; i < device->owner->device_count; ++i) {
@@ -3339,7 +3598,29 @@ static bool sl651_query_request(edge_acquisition_device *device,
 static bool acquisition_command_local(edge_acquisition *acquisition,
                                       const uint8_t platform_id[16],
                                       const iot_edge_v1_CommandRequest *request,
+                                      uint64_t start_before_monotonic_ms,
+                                      uint64_t mapping_valid_until_monotonic_ms,
+                                      uint32_t command_clock_generation,
                                       char *error, size_t error_size) {
+    if (request != NULL && request->command_id.size == 16U &&
+        request->device_id.size == 16U) {
+        edge_acquisition_device *previous =
+            find_device(acquisition, platform_id, request->device_id.bytes);
+        if (previous != NULL && edge_device_runtime_command_id_seen(
+                                    &previous->runtime, request->command_id.bytes))
+            return true;
+    }
+    const uint64_t now = monotonic_milliseconds();
+    if (request == NULL || !request->has_start_before_ms ||
+        start_before_monotonic_ms == 0U || mapping_valid_until_monotonic_ms == 0U ||
+        command_clock_generation == 0U || now == 0U ||
+        now >= start_before_monotonic_ms || now >= mapping_valid_until_monotonic_ms ||
+        !command_clock_generation_is_current(acquisition, platform_id,
+                                            command_clock_generation)) {
+        set_error(error, error_size,
+                  "command start deadline or database-time mapping expired or was invalidated");
+        return false;
+    }
     if (request && request->device_id.size == 16) {
         edge_acquisition_device *station =
             find_device(acquisition, platform_id, request->device_id.bytes);
@@ -3347,12 +3628,24 @@ static bool acquisition_command_local(edge_acquisition *acquisition,
             set_error(error, error_size, "serial port is paused for manual debugging");
             return false;
         }
-        if (station && station->sl651)
-            return sl651_query_request(station, request, error, error_size);
+        if (station && station->sl651) {
+            if (request->command_id.size != 16U) {
+                set_error(error, error_size, "invalid SL651 command id");
+                return false;
+            }
+            if (edge_device_runtime_claim_command_id(&station->runtime,
+                                                      request->command_id.bytes))
+                return sl651_query_request(station, request, start_before_monotonic_ms,
+                                           mapping_valid_until_monotonic_ms,
+                                           command_clock_generation, error, error_size);
+            return true;
+        }
     }
     edge_acquisition_device *device = NULL;
     edge_write_command command;
-    if (!build_write_command(acquisition, platform_id, request, &device, &command,
+    if (!build_write_command(acquisition, platform_id, request,
+                             start_before_monotonic_ms, mapping_valid_until_monotonic_ms,
+                             command_clock_generation, &device, &command,
                              error, error_size))
         return false;
     if (!edge_device_runtime_enqueue_write(&device->runtime, &command)) {
@@ -3461,7 +3754,14 @@ static void worker_send_command_failure(edge_acquisition *acquisition,
     if (request->device_id.size == 16U)
         edge_protocol_set_bytes(&result.device_id, sizeof(result.device_id.bytes),
                                 request->device_id.bytes, 16U);
-    result.state = iot_edge_v1_CommandState_COMMAND_STATE_FAILED;
+    edge_acquisition_device *device = request->device_id.size == 16U
+        ? find_device(acquisition, platform_id, request->device_id.bytes) : NULL;
+    const bool write_started = device != NULL && request->command_id.size == 16U &&
+        device->runtime.southbound_write_started && device->southbound_command_id_valid &&
+        memcmp(device->southbound_command_id, request->command_id.bytes, 16U) == 0;
+    result.state = write_started ? iot_edge_v1_CommandState_COMMAND_STATE_FAILED
+                                 : iot_edge_v1_CommandState_COMMAND_STATE_REJECTED;
+    result.write_ack_missing = write_started && !device->runtime.write_ack_received;
     result.completed_at_ms = current_ms();
     copy_text(result.message, sizeof(result.message), error);
     (void)worker_command_result(acquisition, platform_id, &result);
@@ -3756,6 +4056,7 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
                 return true;
             device->sl651_result_pending = false;
             device->sl651_query_active = false;
+            device->sl651_command_pending = false;
             edge_sl651_command_committed(device->sl651, message.payload.telemetry,
                                          monotonic_milliseconds(), time);
             return true;
@@ -3800,6 +4101,9 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
     char error[256] = {0};
     if (!acquisition_command_local(acquisition, message.platform_id,
                                    &message.payload.command_request,
+                                   message.command_start_before_monotonic_ms,
+                                   message.mapping_valid_until_monotonic_ms,
+                                   message.command_clock_generation,
                                    error, sizeof(error)))
         worker_send_command_failure(acquisition, message.platform_id,
                                     &message.payload.command_request,
@@ -3914,6 +4218,22 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
             if (stop)
                 break;
 
+            /* A manual serial session suppresses device I/O, not command expiry. */
+            for (size_t candidate = 0U; candidate < acquisition->device_count; ++candidate) {
+                edge_acquisition_device *device = &acquisition->devices[candidate];
+                if (!device->sl651 && device->runtime.write_count != 0U &&
+                    serial_paused(device)) {
+                    const edge_write_command *command =
+                        &device->runtime.writes[device->runtime.write_head];
+                    if (!command_clock_generation_is_current(
+                            acquisition, device->platform_id,
+                            command->command_clock_generation))
+                        edge_device_runtime_reject_write(&device->runtime);
+                    else
+                        edge_device_runtime_expire_write(&device->runtime,
+                                                         monotonic_milliseconds());
+                }
+            }
             /* apply_multi keeps devices in platform priority order. Select queued
              * writes in that order, independent of the next background-read index. */
             size_t write_index = acquisition->device_count;
@@ -4178,31 +4498,40 @@ void edge_acquisition_status_for_platform(
         }
 }
 
-bool edge_acquisition_command(edge_acquisition *acquisition,
-                              const iot_edge_v1_CommandRequest *request,
-                              char *error, size_t error_size) {
-    const uint8_t platform_id[16] = {0};
-    return edge_acquisition_command_for_platform(acquisition, platform_id, request,
-                                                 error, error_size);
-}
-
-bool edge_acquisition_command_for_platform(
+bool edge_acquisition_command_for_platform_until(
     edge_acquisition *acquisition, const uint8_t platform_id[16],
     const iot_edge_v1_CommandRequest *request,
+    uint64_t start_before_monotonic_ms, uint64_t mapping_valid_until_monotonic_ms,
     char *error, size_t error_size) {
+    const uint64_t now = monotonic_milliseconds();
+    if (request == NULL || !request->has_start_before_ms ||
+        start_before_monotonic_ms == 0U || mapping_valid_until_monotonic_ms == 0U ||
+        now == 0U || now >= start_before_monotonic_ms ||
+        now >= mapping_valid_until_monotonic_ms) {
+        set_error(error, error_size,
+                  "command start deadline or database-time mapping is missing, invalid, or expired");
+        return false;
+    }
     if (acquisition == NULL || acquisition->worker_pid <= 0 ||
         acquisition->worker_fd < 0 || platform_id == NULL) {
         set_error(error, error_size, "acquisition worker is unavailable");
         return false;
     }
-    edge_acquisition_device *device =
-        request && request->device_id.size == 16
-            ? find_device(acquisition, platform_id, request->device_id.bytes)
-            : NULL;
+    const uint32_t command_clock_generation =
+        command_clock_current_generation(acquisition, platform_id);
+    if (command_clock_generation == 0U) {
+        set_error(error, error_size, "platform database-time mapping is unavailable");
+        return false;
+    }
+    edge_acquisition_device *device = request->device_id.size == 16
+        ? find_device(acquisition, platform_id, request->device_id.bytes) : NULL;
     if (!device || !device->sl651) {
         edge_write_command command;
-        if (!build_write_command(acquisition, platform_id, request, &device, &command, error,
-                                 error_size))
+        if (!build_write_command(acquisition, platform_id, request,
+                                 start_before_monotonic_ms,
+                                 mapping_valid_until_monotonic_ms,
+                                 command_clock_generation, &device, &command,
+                                 error, error_size))
             return false;
     } else if (request->command_id.size != 16 || !request->values_count ||
                request->values_count > 8) {
@@ -4214,6 +4543,9 @@ bool edge_acquisition_command_for_platform(
     message.magic = EDGE_ACQUISITION_MAGIC;
     message.type = EDGE_ACQUISITION_CONTROL_COMMAND;
     message.payload_size = sizeof(message.payload.command_request);
+    message.command_start_before_monotonic_ms = start_before_monotonic_ms;
+    message.mapping_valid_until_monotonic_ms = mapping_valid_until_monotonic_ms;
+    message.command_clock_generation = command_clock_generation;
     memcpy(message.platform_id, platform_id, sizeof(message.platform_id));
     message.payload.command_request = *request;
     const size_t size = acquisition_message_size(message.payload_size);
@@ -4224,6 +4556,18 @@ bool edge_acquisition_command_for_platform(
         return false;
     }
     return true;
+}
+
+void edge_acquisition_invalidate_command_clock(
+    edge_acquisition *acquisition, const uint8_t platform_id[16]) {
+    const size_t index = command_clock_platform_index(acquisition, platform_id);
+    if (index == SIZE_MAX || acquisition->command_clock_generations == NULL)
+        return;
+    /* Zero is reserved: wrapping UINT32_MAX disables this mapping permanently. */
+    _Atomic uint32_t *generation =
+        &acquisition->command_clock_generations[index].generation;
+    if (atomic_load_explicit(generation, memory_order_seq_cst) != 0U)
+        (void)atomic_fetch_add_explicit(generation, 1U, memory_order_seq_cst);
 }
 
 bool edge_acquisition_serial_request(edge_acquisition *acquisition, const uint8_t platform_id[16],
@@ -4285,6 +4629,9 @@ void edge_acquisition_destroy(edge_acquisition *acquisition) {
     edge_acquisition_stop(acquisition);
     free_devices(acquisition->devices, acquisition->device_count);
     free_links(acquisition->links, acquisition->link_count);
+    if (acquisition->command_clock_generations != NULL)
+        (void)munmap(acquisition->command_clock_generations,
+                     4U * sizeof(*acquisition->command_clock_generations));
     free(acquisition);
 }
 

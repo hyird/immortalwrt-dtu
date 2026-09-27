@@ -51,9 +51,9 @@ size_t edge_s7_build_write(uint16_t reference, const edge_s7_address *address,
                            uint8_t *output, size_t capacity);
 
 edge_s7_result edge_s7_parse_read(const uint8_t *frame, size_t frame_size,
-                                  uint16_t reference, uint8_t *data,
-                                  size_t capacity, size_t *data_size,
-                                  uint8_t *return_code);
+                                  uint16_t reference, const edge_s7_address *address,
+                                  uint8_t *data, size_t capacity,
+                                  size_t *data_size, uint8_t *return_code);
 edge_s7_result edge_s7_parse_write(const uint8_t *frame, size_t frame_size,
                                    uint16_t reference, uint8_t *return_code);
 

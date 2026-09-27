@@ -73,13 +73,13 @@ void edge_acquisition_status_for_platform(
     edge_acquisition *acquisition, const uint8_t platform_id[16],
     iot_edge_v1_DeviceStatusReport *report);
 
-bool edge_acquisition_command(edge_acquisition *acquisition,
-                              const iot_edge_v1_CommandRequest *request,
-                              char *error, size_t error_size);
-bool edge_acquisition_command_for_platform(
+bool edge_acquisition_command_for_platform_until(
     edge_acquisition *acquisition, const uint8_t platform_id[16],
     const iot_edge_v1_CommandRequest *request,
+    uint64_t start_before_monotonic_ms, uint64_t mapping_valid_until_monotonic_ms,
     char *error, size_t error_size);
+void edge_acquisition_invalidate_command_clock(
+    edge_acquisition *acquisition, const uint8_t platform_id[16]);
 
 size_t edge_acquisition_device_count(const edge_acquisition *acquisition);
 size_t edge_acquisition_resource_count(const edge_acquisition *acquisition);

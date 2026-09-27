@@ -8,6 +8,7 @@
 
 #include "edge_config.h"
 #include "edge_acquisition.h"
+#include "edge_device_runtime.h"
 #include "edge_protocol.h"
 #include "edge_retry.h"
 #include "edge_report.h"
@@ -63,6 +64,8 @@ typedef struct {
     uint64_t last_heartbeat_ms;
     uint64_t last_inbound_ms;
     uint64_t last_liveness_probe_ms;
+    uint64_t hello_sent_monotonic_ms;
+    edge_command_clock command_clock;
     uint64_t terminal_output_sequence;
     uint64_t terminal_output_acked_sequence;
     uint64_t terminal_output_deadline_ms;
