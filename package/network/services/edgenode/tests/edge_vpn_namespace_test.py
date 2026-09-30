@@ -42,7 +42,7 @@ def main():
             run('ip', 'link', 'set', 'lan-root', 'up')
             inside('lan', 'ip', 'addr', 'add', '192.168.1.42/24', 'dev', 'lan-peer')
             inside('lan', 'ip', 'link', 'set', 'lan-peer', 'up')
-            run('nft', '-f', '-', input='table ip transit { chain srcnat { type nat hook postrouting priority srcnat; policy accept; ip saddr 169.254.240.0/28 masquerade\n } }')
+            run('nft', '-f', '-', input='table ip transit {\n chain srcnat {\n type nat hook postrouting priority srcnat; policy accept;\n ip saddr 169.254.240.0/28 masquerade\n }\n}\n')
             for slot, name in enumerate(['A', 'B']):
                 node, hub = 'node'+name, 'hub'+name
                 root_ip, hub_ip = f'198.18.0.{slot*4+1}', f'198.18.0.{slot*4+2}'
