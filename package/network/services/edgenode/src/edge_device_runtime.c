@@ -422,22 +422,16 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
     const bool expired_before_io =
         reject_expired_write(runtime, runtime_now(runtime, schedule_ms));
     bool sampled_this_cycle = false;
-    const bool fast_report_due = runtime->fast_report_until_ms != 0U &&
-        runtime->next_fast_report_at_ms <= runtime->fast_report_until_ms &&
-        schedule_ms >= runtime->next_fast_report_at_ms;
     const bool fast_window_active = runtime->fast_report_until_ms != 0U &&
         schedule_ms <= runtime->fast_report_until_ms;
-    bool report_due = fast_report_due;
-    if (fast_report_due)
-        runtime->next_fast_report_at_ms = advance_deadline(
-            runtime->next_fast_report_at_ms,
-            (uint64_t)runtime->fast_report_interval_sec * 1000U, schedule_ms);
-    if (schedule_ms >= runtime->next_report_at_ms) {
+    const bool fast_report_due = fast_window_active &&
+        runtime->next_fast_report_at_ms <= runtime->fast_report_until_ms &&
+        schedule_ms >= runtime->next_fast_report_at_ms;
+    const bool regular_report_due = schedule_ms >= runtime->next_report_at_ms;
+    const bool report_due = fast_report_due || (regular_report_due && !fast_window_active);
+    if (regular_report_due && fast_window_active)
         runtime->next_report_at_ms = advance_deadline(runtime->next_report_at_ms,
             (uint64_t)runtime->report_interval_sec * 1000U, schedule_ms);
-        if (!fast_window_active)
-            report_due = true;
-    }
     if (runtime->fast_report_until_ms != 0U && schedule_ms >= runtime->fast_report_until_ms) {
         runtime->fast_report_until_ms = 0U;
         runtime->next_fast_report_at_ms = 0U;
@@ -534,11 +528,18 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         runtime->silent_background_read = false;
     }
 
-    if (runtime->initial_report_pending && report_due && sampled_this_cycle)
-        runtime->initial_report_pending = false;
-    if (report_due && sampled_this_cycle)
+    if (report_due && sampled_this_cycle &&
         runtime->driver.report(runtime->driver_context, runtime->platform_id,
-                               runtime->device_id, &runtime->latest);
+                               runtime->device_id, &runtime->latest)) {
+        const uint64_t reported_at_ms = runtime_now(runtime, schedule_ms);
+        if (regular_report_due && !fast_window_active)
+            runtime->next_report_at_ms = deadline_after_seconds(
+                reported_at_ms, runtime->report_interval_sec);
+        if (fast_report_due && runtime->fast_report_until_ms != 0U)
+            runtime->next_fast_report_at_ms = deadline_after_seconds(
+                reported_at_ms, runtime->fast_report_interval_sec);
+        runtime->initial_report_pending = false;
+    }
 }
 
 void edge_device_runtime_close(edge_device_runtime *runtime) {

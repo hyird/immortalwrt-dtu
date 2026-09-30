@@ -4,6 +4,12 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
+## 到期报告持续尝试（0.3.66）
+
+- 主动采集到达普通上报期限后，只有本轮读到完整新点集并成功写入节点上报队列，才上报一次并从该成功时刻重新计算 `report_interval_sec`；本轮读取失败、写任务占用或入队失败时保留到期状态，下一采集轮继续尝试，不发送残缺或缓存的旧点集，不累积补报次数。
+- 快读窗口内的到期轮同样只在完整新点集成功入队后从成功时刻计下一次快读间隔；窗口结束后不继续补发过期快读。持续无法读取或入队时无法承诺定时成功上报，需结合节点故障与队列状态排查。
+- 节点上报队列的成功入队不等于平台已经确认：断线后的持久化、重发与确认仍按原 outbox 协议执行；写指令优先、不重放写及已部署固件的兼容协议不变。旧 0.3.65 仍可能在到期读失败后跳过当轮上报，必须使用本版本固件才能获得新调度行为。
+
 ## 命令启动截止与 S7 采集修复（0.3.64）
 
 - S7 TCP 读取超时后立即重连并完成握手，在同一采集周期最多重读一次；重读失败或点集不完整时不发布该轮点集，留待下一主动读取周期。

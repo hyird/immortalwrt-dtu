@@ -99,13 +99,14 @@ static void fake_disconnect(void *context) {
     ++state->disconnects;
 }
 
-static void fake_report(void *context, const uint8_t platform_id[16],
+static bool fake_report(void *context, const uint8_t platform_id[16],
                         const uint8_t device_id[16],
                         const edge_device_sample *sample) {
     fake_driver_state *state = context;
     require_true(platform_id[0] == 1U && device_id[0] == 2U && sample->size == 8U,
                  "device report content changed");
     ++state->reports;
+    return true;
 }
 
 static void fake_command_complete(void *context, const uint8_t platform_id[16],

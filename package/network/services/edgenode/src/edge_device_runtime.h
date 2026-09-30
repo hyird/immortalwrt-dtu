@@ -105,7 +105,7 @@ typedef struct {
                                      edge_device_sample *actual);
     uint64_t (*monotonic_ms)(void *context);
     void (*disconnect)(void *context);
-    void (*report)(void *context, const uint8_t platform_id[16],
+    bool (*report)(void *context, const uint8_t platform_id[16],
                    const uint8_t device_id[16], const edge_device_sample *sample);
     void (*command_complete)(void *context, const uint8_t platform_id[16],
                              const uint8_t device_id[16], const uint8_t command_id[16],

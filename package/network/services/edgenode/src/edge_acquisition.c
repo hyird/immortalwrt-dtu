@@ -2712,9 +2712,10 @@ static bool publish_derived_expiry(edge_acquisition_device *device) {
     return true;
 }
 
-static void device_report(void *context, const uint8_t platform_id[16],
+static bool device_report(void *context, const uint8_t platform_id[16],
                           const uint8_t device_id[16], const edge_device_sample *sample) {
     edge_acquisition_device *device = context;
+    bool queued = false;
     (void)sample;
     iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
     const size_t capacity = device->point_count;
@@ -2723,7 +2724,7 @@ static void device_report(void *context, const uint8_t platform_id[16],
         if (device->points[index].valid)
             for (const edge_acquisition_response *part = device->points[index].response; part; part = part->previous)
                 ++raw_capacity;
-    if (raw_capacity > 512) { syslog(LOG_ERR, "acquisition cycle exceeds raw packet limit"); return; }
+    if (raw_capacity > 512) { syslog(LOG_ERR, "acquisition cycle exceeds raw packet limit"); return false; }
     if (!device->raw_telemetry)
         record.values = calloc(capacity + edge_derived_count(device->derived), sizeof(*record.values));
     record.raw_payloads = calloc(raw_capacity, sizeof(*record.raw_payloads));
@@ -2792,7 +2793,8 @@ static void device_report(void *context, const uint8_t platform_id[16],
         edge_derived_values(device->derived, record.values + record.values_count);
         record.values_count += (pb_size_t)edge_derived_count(device->derived);
     }
-    if (!publish_acquisition_cycle(device, platform_id, &record))
+    queued = publish_acquisition_cycle(device, platform_id, &record);
+    if (!queued)
         syslog(LOG_ERR, "cannot queue complete acquisition cycle");
 cleanup:
     for (size_t index = 0; index < raw_capacity; ++index) {
@@ -2801,6 +2803,7 @@ cleanup:
         if (record.raw_packet_ids) free(record.raw_packet_ids[index]);
     }
     free(responses); free(record.raw_payloads); free(record.raw_requests); free(record.raw_packet_ids); free(record.values);
+    return queued;
 }
 
 static iot_edge_v1_CommandState command_state(edge_command_result result) {
