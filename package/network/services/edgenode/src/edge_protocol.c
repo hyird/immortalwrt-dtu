@@ -33,6 +33,55 @@ edge_config_replay edge_protocol_config_replay(const iot_edge_v1_Envelope *envel
         ? EDGE_CONFIG_REPLAY_ACK : EDGE_CONFIG_REPLAY_IGNORE;
 }
 
+bool edge_protocol_telemetry_slice(const iot_edge_v1_TelemetryRecord *record,
+    size_t value_offset, size_t raw_offset, size_t byte_limit,
+    iot_edge_v1_TelemetryRecord *part) {
+    if (!record || !part || record == part || record->record_id.size != 16U ||
+        value_offset > record->values_count || raw_offset > record->raw_payloads_count ||
+        (record->values_count && !record->values) ||
+        (record->raw_payloads_count && !record->raw_payloads) ||
+        (record->raw_requests_count && (!record->raw_requests ||
+            record->raw_requests_count != record->raw_payloads_count || record->values_count)) ||
+        (record->raw_packet_ids_count && (!record->raw_packet_ids ||
+            record->raw_packet_ids_count != record->raw_payloads_count)))
+        return false;
+    *part = *record;
+    edge_protocol_set_bytes(&part->report_id, sizeof(part->report_id.bytes),
+                            record->record_id.bytes, 16U);
+    part->part_index = 255U;
+    part->part_count = 256U;
+    part->values_count = part->raw_payloads_count = part->raw_packet_ids_count = 0;
+    part->raw_requests_count = 0;
+    part->raw_requests = record->raw_requests_count && raw_offset < record->raw_payloads_count
+        ? record->raw_requests + raw_offset : NULL;
+    part->values = value_offset < record->values_count ? record->values + value_offset : NULL;
+    part->raw_payloads = raw_offset < record->raw_payloads_count
+        ? record->raw_payloads + raw_offset : NULL;
+    part->raw_packet_ids = record->raw_packet_ids_count && raw_offset < record->raw_payloads_count
+        ? record->raw_packet_ids + raw_offset : NULL;
+    size_t encoded;
+    if (!pb_get_encoded_size(&encoded, iot_edge_v1_TelemetryRecord_fields, part) ||
+        encoded > byte_limit) return false;
+    while (value_offset + part->values_count < record->values_count) {
+        ++part->values_count;
+        if (!pb_get_encoded_size(&encoded, iot_edge_v1_TelemetryRecord_fields, part)) return false;
+        if (encoded > byte_limit) { --part->values_count; break; }
+    }
+    while (raw_offset + part->raw_payloads_count < record->raw_payloads_count) {
+        ++part->raw_payloads_count;
+        if (record->raw_requests_count) ++part->raw_requests_count;
+        if (record->raw_packet_ids_count) ++part->raw_packet_ids_count;
+        if (!pb_get_encoded_size(&encoded, iot_edge_v1_TelemetryRecord_fields, part)) return false;
+        if (encoded > byte_limit) {
+            --part->raw_payloads_count;
+            if (record->raw_requests_count) --part->raw_requests_count;
+            if (record->raw_packet_ids_count) --part->raw_packet_ids_count;
+            break;
+        }
+    }
+    return part->values_count != 0 || part->raw_payloads_count != 0;
+}
+
 void edge_protocol_release(iot_edge_v1_Envelope *envelope) {
     pb_release(iot_edge_v1_Envelope_fields, envelope);
     *envelope = (iot_edge_v1_Envelope)iot_edge_v1_Envelope_init_zero;

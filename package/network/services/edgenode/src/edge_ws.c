@@ -482,6 +482,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_status_reporting = true;
     hello->supports_command_start_before = true;
     hello->supports_device_config = true;
+    hello->supports_raw_telemetry = true;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
     safe_copy(hello->log_level, sizeof(hello->log_level), edge_log_level());
@@ -776,6 +777,7 @@ static size_t build_acquisition_sources(
         sources[index].platform_id = session->config->id;
         sources[index].priority = session->config->priority;
         sources[index].bootstrap = session->config->bootstrap;
+        sources[index].raw_telemetry = session->raw_telemetry;
         sources[index].config = session == replacement_session
                                     ? replacement_config
                                     : &session->runtime_config;
@@ -1542,6 +1544,12 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         memcpy(session->node_id, ack->assigned_node_id.bytes, 16U);
         session->session_epoch = ack->session_epoch;
         session->enrolled = true;
+        session->raw_telemetry = ack->raw_telemetry;
+        if (!edge_acquisition_set_raw_telemetry(session->app->acquisition,
+                                               session->config->id, session->raw_telemetry)) {
+            edge_ws_transport_close(&session->transport, 1002, "cannot activate telemetry format");
+            return;
+        }
         syslog(LOG_INFO, "platform %s enrollment approved on existing WebSocket",
                session->config->name);
         const unsigned heartbeat = ack->heartbeat_interval_sec != 0U

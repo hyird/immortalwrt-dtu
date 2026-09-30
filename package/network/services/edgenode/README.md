@@ -83,6 +83,14 @@ libev 开发文件及 Python 3；交叉编译固件不能替代运行该测试�
 压缩分片重组、穿插 Ping/Pong、Close 不压缩和外部事件循环销毁边界。
 测试不访问生产平台，不刷机；WS 线帧通过不代表 WSS、应用 ACK/outbox 或实机验收完成。
 
+## 采集上报按编码大小分片
+
+- 普通采集报告不超过 14,000 字节时仍整条发送；超过后按实际 Protobuf 编码大小装入分片，不再固定每 8 个点或每 2 条原始帧拆包。每片不超过 14,000 字节，保留 Envelope 的传输空间，最多 256 片。
+- 先预检整个报告，再开始入队；单项无法装入或分片数量超限时失败，不截断。所有点值、名称、单位、原始帧、帧身份及各自顺序保留；不改变采集周期、存储策略、ACK、outbox 和重传语义。
+- 使用原有 `report_id`、`part_index`、`part_count` 重组契约，不新增协议字段，不改旧固件路径。分片只借用原报告内存，编码入队后释放的职责不变。
+- 合成测试：96 个字符串点值与 32 条原始帧，共 30,079 字节，从旧算法 28 片减少到 3 片；新分片记录共 30,283 字节（不含 Envelope、ACK、WS/TCP 等开销）。这不是线上总流量节省比例，也不代表当前小报告会减少流量。
+- Windows Release 主机测试 17/17 通过，覆盖分片编解码、逐项无损比较、边界、旧记录无帧 ID、超大单项拒绝。MIPS 对象检查：协议文件通过 `-Wall -Wextra -Werror`；采集文件在未改动的 `NLMSG_OK` 处触发符号比较警告，禁用该项警告后对象编译通过。完整 OpenWrt 镜像、平台实际重组、断线回放及真实网络节流效果仍待验证；尚未发布。
+
 ## 全链路冗余抑制
 
 - `edge_report.c` 只缓存能力、设备状态及不含 trace 的 DTU 状态，比较实际 Protobuf 内容，不因 Envelope 的 UUID、时间、序号变化重复发送；不使用结构体 `memcmp` 或有碰撞风险的摘要替代内容比较。
@@ -317,3 +325,9 @@ repeatedly writing flash.
 
 The resulting package must be cross-compiled and installed on the actual target. A host
 binary is not an OpenWrt deliverable.
+
+## 原始业务报文上报
+
+新平台通过 HelloAck.raw_telemetry 启用原文格式后，采集遥测只包含时间、设备 ID 与成对的业务请求和响应，不上传测点解析值和派生值。raw_requests 与 raw_payloads 按下标对应；SL651 主动上报的请求为空，查询响应保留实际业务请求。握手、注册、心跳和异常包仅在调试开启后使用 RawPacket 上报。Modbus、S7、MC、FINS、DLT645 的正常轮询跳过数值转换，协议匹配和校验继续在节点执行。旧平台未启用新格式时，保持原有上报；不同平台独立协商。
+
+推送前已合并最新 `origin/main`，保留命令时限、状态上报、libwebsockets 与平台 VPN 隔离实现。Windows Release 主机测试 17/17、Linux 六项协议与采集相关测试 6/6 通过；`edge_protocol.c`、`edge_acquisition.c`、`edge_ws.c` 使用指定 MIPS 工具链完成对象编译。对象检查沿用包的 `-Wno-strict-aliasing`，另抑制既有 `NLMSG_OK` 符号比较与升级状态日志格式截断警告；完整镜像、刷机及真实硬件联调仍未覆盖。

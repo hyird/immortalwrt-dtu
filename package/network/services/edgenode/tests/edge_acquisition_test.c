@@ -35,6 +35,8 @@ static void copy_text(char *output, size_t capacity, const char *input) {
 
 static void receive_modbus_request(int fd, uint8_t request[12]);
 
+static bool raw_fixture;
+
 static bool telemetry(void *context, const uint8_t platform_id[16],
                       const iot_edge_v1_TelemetryRecord *record) {
     (void)context;
@@ -186,9 +188,20 @@ static unsigned sl651_raw_frames;
 static bool sl651_store_report(void *context, const uint8_t platform[16], const iot_edge_v1_TelemetryRecord *record) {
     (void)context; (void)platform;
     assert(record->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651);
-    assert(record->report_id.size == 16 && record->part_count >= 2 && record->part_index < record->part_count);
+    assert(record->report_id.size == 16 && record->part_count >= (raw_fixture ? 1U : 2U) && record->part_index < record->part_count);
     if (record->raw_payloads_count) {
         assert(record->values_count == 0);
+        if (raw_fixture) {
+            assert(record->raw_requests_count == record->raw_payloads_count);
+            for (pb_size_t i = 0; i < record->raw_requests_count; ++i) {
+                const pb_bytes_array_t *request = record->raw_requests[i];
+                if (!strcmp(record->function_code, "4C") && i == 0) {
+                    assert(request->size == 27 && request->bytes[10] == 0x4C && request->bytes[24] == 5);
+                } else assert(request->size == 0);
+            }
+            if (!strcmp(record->function_code, "36")) ++sl651_images;
+            else ++sl651_reports;
+        }
         for (pb_size_t index = 0; index < record->raw_payloads_count; ++index) {
             edge_sl651_frame frame;
             assert(edge_sl651_parse(record->raw_payloads[index]->bytes,
@@ -239,6 +252,8 @@ static void sl651_send_report(int fd, uint8_t function, uint8_t serial, uint8_t 
     assert(write(fd, bytes, sizeof(bytes)) == (ssize_t)sizeof(bytes));
 }
 static void verify_sl651_commit(void) {
+    sl651_allow_report = sl651_allow_command = false;
+    sl651_reports = sl651_results = sl651_images = sl651_raw_frames = 0;
     int reservation = socket(AF_INET, SOCK_STREAM, 0); assert(reservation >= 0);
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     assert(bind(reservation, (struct sockaddr *)&address, sizeof(address)) == 0);
@@ -270,6 +285,8 @@ static void verify_sl651_commit(void) {
     config.item_count = 5;
     edge_acquisition *acquisition = edge_acquisition_create(sl651_store_report, sl651_store_command, NULL); assert(acquisition);
     char error[256] = {0}; assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
+    const uint8_t platform[16] = {0};
+    assert(edge_acquisition_set_raw_telemetry(acquisition, platform, raw_fixture));
     close(reservation); assert(edge_acquisition_start(acquisition, error, sizeof(error)));
     int fd = -1;
     for (unsigned attempt = 0; attempt < 60; ++attempt) {
@@ -380,7 +397,8 @@ static bool store_response_record(void *context, const uint8_t platform_id[16],
     assert(response_records++ == 0U);
     assert(record->protocol == (s7_responses ? iot_edge_v1_Protocol_PROTOCOL_S7
                                             : iot_edge_v1_Protocol_PROTOCOL_MODBUS));
-    assert(record->values_count == (s7_responses ? 2U : 3U));
+    assert(record->values_count == (raw_fixture ? 0U : s7_responses ? 2U : 3U));
+    if (!raw_fixture) {
     assert(strcmp(record->values[0].element_id, "holding-1") == 0);
     assert(record->values[0].value.value.double_value == 100.0);
     assert(strcmp(record->values[1].element_id, "holding-2") == 0);
@@ -389,11 +407,19 @@ static bool store_response_record(void *context, const uint8_t platform_id[16],
         assert(strcmp(record->values[2].element_id, "holding-copy") == 0);
         assert(record->values[2].value.value.double_value == 100.0);
     }
+    }
     assert(record->raw_payloads_count == 2 && record->raw_packet_ids_count == 2);
+    assert(record->raw_requests_count == (raw_fixture ? 2U : 0U));
     for (unsigned index = 0; index < 2; ++index) {
         assert(record->raw_payloads[index]->size == expected_response_size);
         assert(memcmp(record->raw_payloads[index]->bytes, expected_responses[index], expected_response_size) == 0);
         assert(record->raw_packet_ids[index]->size == 16);
+        if (raw_fixture) {
+            const pb_bytes_array_t *request = record->raw_requests[index];
+            assert(request->size == (s7_responses ? 31U : 12U));
+            assert(request->bytes[s7_responses ? 17 : 7] == (s7_responses ? 4U : 3U));
+            assert(request->bytes[s7_responses ? 30 : 9] == (index ? s7_responses ? 80U : 100U : 0U));
+        }
     }
     assert(memcmp(record->raw_packet_ids[0]->bytes, record->raw_packet_ids[1]->bytes, 16) != 0);
     assert(record->observed_at_ms > 0);
@@ -495,6 +521,8 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     assert(acquisition != NULL);
     char error[256] = {0};
     assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
+    const uint8_t platform[16] = {0};
+    assert(edge_acquisition_set_raw_telemetry(acquisition, platform, raw_fixture));
     assert(edge_acquisition_start(acquisition, error, sizeof(error)));
     struct pollfd connection = {.fd = listener, .events = POLLIN};
     assert(poll(&connection, 1, 3000) == 1);
@@ -546,7 +574,7 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
         edge_acquisition_tick(acquisition, monotonic_ms());
     }
     assert(response_records == 1);
-    if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); assert(debug_values == (s7 ? 2U : 3U)); }
+    if (link_debug || device_debug) { assert(debug_rx >= expected_response_size * 2 && debug_tx > 0); assert(debug_success >= 2); assert(debug_values == (raw_fixture ? 0U : s7 ? 2U : 3U)); }
     else { assert(debug_rx == 0 && debug_tx == 0 && debug_values == 0); }
     if (s7) {
         iot_edge_v1_DeviceStatusReport status = iot_edge_v1_DeviceStatusReport_init_zero;
@@ -1030,7 +1058,11 @@ static void verify_s7_full_and_invalid_scans(void) {
 static unsigned industrial_records, industrial_commands;
 static bool industrial_telemetry(void *context, const uint8_t platform[16], const iot_edge_v1_TelemetryRecord *record) {
     (void)context; (void)platform;
-    assert(record->values_count == 1 && record->raw_payloads_count == 1);
+    assert(record->values_count == (raw_fixture ? 0U : 1U) && record->raw_payloads_count == 1);
+    if (raw_fixture) {
+        assert(record->raw_requests_count == 1 && record->raw_requests[0]->size > 0);
+        ++industrial_records; return true;
+    }
     const iot_edge_v1_ScalarValue *value = &record->values[0].value;
     if (record->protocol == iot_edge_v1_Protocol_PROTOCOL_DLT645) {
         assert(value->which_value == iot_edge_v1_ScalarValue_decimal_value_tag);
@@ -1076,6 +1108,8 @@ static void verify_industrial_acquisition(iot_edge_v1_Protocol protocol, bool va
     edge_acquisition *acquisition = edge_acquisition_create(industrial_telemetry, industrial_command, NULL);
     char error[256] = {0}; assert(acquisition);
     assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
+    const uint8_t platform[16] = {0};
+    assert(edge_acquisition_set_raw_telemetry(acquisition, platform, raw_fixture));
     assert(edge_acquisition_start(acquisition, error, sizeof(error)));
     struct pollfd ready = {.fd = listener, .events = POLLIN}; assert(poll(&ready, 1, 3000) == 1);
     int fd = accept(listener, NULL, NULL); assert(fd >= 0);
@@ -1983,6 +2017,17 @@ int main(void) {
     verify_pty_partial_write_is_not_replayed();
     verify_command_expiry_while_serial_is_paused();
     verify_write_priority_across_devices();
+    verify_sl651_commit();
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, false);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, true);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_FINS, false);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_DLT645, false);
+    verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_DLT645, true);
+    for (unsigned flags = 0; flags < 4; ++flags) {
+        verify_complete_acquisition_record(false, (flags & 1) != 0, (flags & 2) != 0);
+        verify_complete_acquisition_record(true, (flags & 1) != 0, (flags & 2) != 0);
+    }
+    raw_fixture = true;
     verify_sl651_commit();
     verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, false);
     verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, true);

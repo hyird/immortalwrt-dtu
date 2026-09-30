@@ -34,6 +34,7 @@ typedef struct {
     const uint8_t *platform_id;
     uint16_t priority;
     bool bootstrap;
+    bool raw_telemetry;
     const edge_runtime_config *config;
 } edge_acquisition_source;
 
@@ -63,6 +64,8 @@ bool edge_acquisition_start(edge_acquisition *acquisition,
                             char *error, size_t error_size);
 void edge_acquisition_stop(edge_acquisition *acquisition);
 int edge_acquisition_event_fd(const edge_acquisition *acquisition);
+bool edge_acquisition_set_raw_telemetry(edge_acquisition *acquisition,
+                                       const uint8_t platform_id[16], bool enabled);
 
 /* Drains worker events and restarts a failed worker; it performs no device I/O. */
 void edge_acquisition_tick(edge_acquisition *acquisition, uint64_t now_ms);

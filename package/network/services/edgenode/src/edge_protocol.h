@@ -19,6 +19,13 @@ typedef enum {
 edge_config_replay edge_protocol_config_replay(const iot_edge_v1_Envelope *envelope,
     uint64_t active_revision, const uint8_t active_digest[32]);
 
+/* Borrow ordered values/frames into a bounded fragment. Reserve the largest
+ * supported fragment index/count; callers assign final IDs and numbering.
+ * The output borrows record storage and must not be passed to pb_release. */
+bool edge_protocol_telemetry_slice(const iot_edge_v1_TelemetryRecord *record,
+    size_t value_offset, size_t raw_offset, size_t byte_limit,
+    iot_edge_v1_TelemetryRecord *part);
+
 void edge_protocol_release(iot_edge_v1_Envelope *envelope);
 
 bool edge_protocol_validate_imei(const char *imei);

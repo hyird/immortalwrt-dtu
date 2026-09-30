@@ -134,6 +134,8 @@ enum PlatformConfigOperation {
 message Empty {}
 
 message Hello {
+  // Enables paired raw business requests/responses; field absent in deployed firmware.
+  bool supports_raw_telemetry = 38;
   reserved 7;
   reserved "enrollment_token";
   string imei = 1 [(nanopb).max_length = 15];
@@ -178,6 +180,8 @@ message Hello {
 }
 
 message HelloAck {
+  // Negotiated only with a node advertising supports_raw_telemetry.
+  bool raw_telemetry = 8;
   bytes assigned_node_id = 1 [(nanopb).max_size = 16];
   uint64 session_epoch = 2;
   uint32 negotiated_protocol_version = 3;
@@ -629,6 +633,9 @@ message TelemetryValue {
 }
 
 message TelemetryRecord {
+  // Paired with raw_payloads (responses), including an empty request for unsolicited reports.
+  // Presence selects platform parsing; values must be absent. Handshakes/debug are excluded.
+  repeated bytes raw_requests = 20 [(nanopb).type = FT_POINTER];
   bool derived_update = 19;
   // One immutable receive ID per original frame; absent in legacy firmware.
   repeated bytes raw_packet_ids = 18 [(nanopb).type = FT_POINTER];

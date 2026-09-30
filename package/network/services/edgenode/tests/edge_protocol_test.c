@@ -583,7 +583,176 @@ static void test_config_replay(void) {
             "empty commit digest must not acknowledge active configuration");
 }
 
+static void test_telemetry_size_packing(void) {
+    enum { VALUES = 96, FRAMES = 32 };
+    iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
+    record.record_id.size = record.device_id.size = record.endpoint_id.size = 16;
+    record.record_id.bytes[0] = 42;
+    record.observed_at_ms = 1790000000000LL;
+    record.protocol = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
+    record.values_count = VALUES;
+    record.values = calloc(VALUES, sizeof(*record.values));
+    record.raw_payloads_count = record.raw_packet_ids_count = FRAMES;
+    record.raw_payloads = calloc(FRAMES, sizeof(*record.raw_payloads));
+    record.raw_packet_ids = calloc(FRAMES, sizeof(*record.raw_packet_ids));
+    require(record.values && record.raw_payloads && record.raw_packet_ids, "fixture allocation");
+    for (size_t i = 0; i < VALUES; ++i) {
+        iot_edge_v1_TelemetryValue *value = &record.values[i];
+        snprintf(value->element_id, sizeof(value->element_id), "00000000-0000-0000-0000-%012u", (unsigned)i);
+        memset(value->name, 'n', sizeof(value->name) - 1);
+        value->has_value = true;
+        value->value.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+        value->value.which_value = iot_edge_v1_ScalarValue_string_value_tag;
+        memset(value->value.value.string_value, 'a' + (int)(i % 26),
+               sizeof(value->value.value.string_value) - 1);
+    }
+    for (size_t i = 0; i < FRAMES; ++i) {
+        record.raw_payloads[i] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(80));
+        record.raw_packet_ids[i] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(16));
+        require(record.raw_payloads[i] && record.raw_packet_ids[i], "frame allocation");
+        record.raw_payloads[i]->size = 80;
+        memset(record.raw_payloads[i]->bytes, (int)i, 80);
+        record.raw_packet_ids[i]->size = 16;
+        memset(record.raw_packet_ids[i]->bytes, (int)i, 16);
+    }
+    size_t original_size;
+    require(pb_get_encoded_size(&original_size, iot_edge_v1_TelemetryRecord_fields, &record) &&
+            original_size > 14000, "fixture must exercise fragmented reports");
+    size_t values = 0, raw = 0, parts = 0, wire_bytes = 0;
+    while (values < VALUES || raw < FRAMES) {
+        iot_edge_v1_Envelope envelope = iot_edge_v1_Envelope_init_zero;
+        const uint8_t platform[16] = {1}, random[10] = {2};
+        require(edge_protocol_init_envelope(&envelope, platform, record.device_id.bytes,
+                1, parts + 1, record.observed_at_ms, random), "fragment envelope");
+        envelope.which_payload = iot_edge_v1_Envelope_telemetry_batch_tag;
+        envelope.payload.telemetry_batch.records_count = 1;
+        iot_edge_v1_TelemetryRecord *part = &envelope.payload.telemetry_batch.records[0];
+        require(edge_protocol_telemetry_slice(&record, values, raw, 14000, part), "pack fragment");
+        size_t size;
+        require(pb_get_encoded_size(&size, iot_edge_v1_TelemetryRecord_fields, part) && size <= 14000,
+                "fragment exceeds limit");
+        wire_bytes += size;
+        uint8_t wire[EDGENODE_MAX_WS_MESSAGE];
+        const char *error = NULL;
+        require(edge_protocol_encode(&envelope, wire, sizeof(wire), &size, &error), "encode fragment");
+        iot_edge_v1_Envelope decoded;
+        require(edge_protocol_decode(wire, size, &decoded, &error), "decode fragment");
+        const iot_edge_v1_TelemetryRecord *copy = &decoded.payload.telemetry_batch.records[0];
+        require(copy->report_id.size == 16 && !memcmp(copy->report_id.bytes, record.record_id.bytes, 16) &&
+                copy->observed_at_ms == record.observed_at_ms, "report identity changed");
+        require(copy->values_count == part->values_count && copy->raw_payloads_count == part->raw_payloads_count &&
+                copy->raw_packet_ids_count == part->raw_packet_ids_count, "fragment counts changed");
+        for (size_t i = 0; i < copy->values_count; ++i) {
+            uint8_t a[1024], b[1024];
+            pb_ostream_t left = pb_ostream_from_buffer(a, sizeof(a));
+            pb_ostream_t right = pb_ostream_from_buffer(b, sizeof(b));
+            require(pb_encode(&left, iot_edge_v1_TelemetryValue_fields, &record.values[values + i]) &&
+                    pb_encode(&right, iot_edge_v1_TelemetryValue_fields, &copy->values[i]) &&
+                    left.bytes_written == right.bytes_written && !memcmp(a, b, left.bytes_written),
+                    "point changed or reordered");
+        }
+        for (size_t i = 0; i < copy->raw_payloads_count; ++i) {
+            require(copy->raw_payloads[i]->size == 80 &&
+                    !memcmp(copy->raw_payloads[i]->bytes, record.raw_payloads[raw + i]->bytes, 80),
+                    "raw frame changed or reordered");
+            require(copy->raw_packet_ids[i]->size == 16 &&
+                    !memcmp(copy->raw_packet_ids[i]->bytes, record.raw_packet_ids[raw + i]->bytes, 16),
+                    "raw frame identity changed");
+        }
+        values += copy->values_count;
+        raw += copy->raw_payloads_count;
+        ++parts;
+        edge_protocol_release(&decoded);
+    }
+    const size_t old_parts = (VALUES + 7U) / 8U + (FRAMES + 1U) / 2U;
+    require(parts < old_parts && parts <= 3, "size packing did not reduce fragment count");
+    printf("telemetry packing: %zu bytes, %zu -> %zu fragments, %zu packed record bytes\n",
+           original_size, old_parts, parts, wire_bytes);
+    iot_edge_v1_TelemetryRecord part;
+    require(!edge_protocol_telemetry_slice(&record, VALUES, FRAMES, 14000, &part), "empty tail accepted");
+    require(!edge_protocol_telemetry_slice(&record, VALUES + 1, 0, 14000, &part), "invalid offset accepted");
+    require(!edge_protocol_telemetry_slice(&record, 0, 0, 1, &part), "impossible size accepted");
+    --record.raw_packet_ids_count;
+    require(!edge_protocol_telemetry_slice(&record, 0, 0, 14000, &part), "misaligned frame IDs accepted");
+    record.raw_packet_ids_count = 0;
+    require(edge_protocol_telemetry_slice(&record, VALUES, 0, 14000, &part) &&
+            part.raw_packet_ids_count == 0 && part.raw_payloads_count == FRAMES,
+            "legacy frames without IDs rejected");
+    record.raw_packet_ids_count = FRAMES;
+    require(edge_protocol_telemetry_slice(&record, 0, FRAMES, 14000, &part), "pack boundary fixture");
+    size_t exact;
+    require(pb_get_encoded_size(&exact, iot_edge_v1_TelemetryRecord_fields, &part), "boundary size");
+    const pb_size_t count = part.values_count;
+    require(edge_protocol_telemetry_slice(&record, 0, FRAMES, exact, &part) && part.values_count == count,
+            "exact boundary rejected");
+    require(edge_protocol_telemetry_slice(&record, 0, FRAMES, exact - 1, &part) && part.values_count < count,
+            "over-boundary point accepted");
+    record.raw_payloads[FRAMES - 1] = realloc(record.raw_payloads[FRAMES - 1], PB_BYTES_ARRAY_T_ALLOCSIZE(14001));
+    require(record.raw_payloads[FRAMES - 1] != NULL, "oversized frame allocation");
+    record.raw_payloads[FRAMES - 1]->size = 14001;
+    require(!edge_protocol_telemetry_slice(&record, VALUES, FRAMES - 1, 14000, &part),
+            "indivisible oversized frame accepted");
+    record.raw_payloads[FRAMES - 1]->size = 4112;
+    memset(record.raw_payloads[FRAMES - 1]->bytes, 0, 4112);
+    require(edge_protocol_telemetry_slice(&record, VALUES, FRAMES - 1, 14000, &part) &&
+            part.raw_payloads_count == 1 && part.raw_packet_ids_count == 1,
+            "maximum supported raw frame rejected");
+    for (size_t i = 0; i < FRAMES; ++i) { free(record.raw_payloads[i]); free(record.raw_packet_ids[i]); }
+    free(record.values); free(record.raw_payloads); free(record.raw_packet_ids);
+}
+
+static void test_raw_exchange_packing(void) {
+    enum { FRAMES = 9 };
+    iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
+    record.record_id.size = 16;
+    record.raw_payloads_count = record.raw_requests_count = FRAMES;
+    record.raw_payloads = calloc(FRAMES, sizeof(*record.raw_payloads));
+    record.raw_requests = calloc(FRAMES, sizeof(*record.raw_requests));
+    require(record.raw_payloads && record.raw_requests, "exchange fixture");
+    for (unsigned i = 0; i < FRAMES; ++i) {
+        record.raw_payloads[i] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(3000));
+        record.raw_requests[i] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(i ? 31 : 0));
+        require(record.raw_payloads[i] && record.raw_requests[i], "exchange allocation");
+        record.raw_payloads[i]->size=3000; memset(record.raw_payloads[i]->bytes, (int)i, 3000);
+        record.raw_requests[i]->size=(pb_size_t)(i ? 31 : 0);
+        if (i) memset(record.raw_requests[i]->bytes, (int)i, 31);
+    }
+    for (size_t offset = 0; offset < FRAMES;) {
+        iot_edge_v1_TelemetryRecord part;
+        require(edge_protocol_telemetry_slice(&record, 0, offset, 14000, &part), "slice raw exchanges");
+        require(part.raw_requests_count == part.raw_payloads_count && part.values_count == 0, "exchange association lost");
+        iot_edge_v1_Envelope envelope, decoded;
+        const uint8_t platform[16] = {1}, random[10] = {2};
+        require(edge_protocol_init_envelope(&envelope,platform,NULL,1,1,1,random), "raw envelope");
+        envelope.which_payload = iot_edge_v1_Envelope_telemetry_batch_tag;
+        envelope.payload.telemetry_batch.records_count = 1;
+        envelope.payload.telemetry_batch.records[0] = part;
+        uint8_t wire[EDGENODE_MAX_WS_MESSAGE]; size_t size; const char *error = NULL;
+        require(edge_protocol_encode(&envelope,wire,sizeof(wire),&size,&error), "encode paired raw exchange");
+        require(edge_protocol_decode(wire,size,&decoded,&error), "decode paired raw exchange");
+        const iot_edge_v1_TelemetryRecord *copy = &decoded.payload.telemetry_batch.records[0];
+        require(copy->raw_requests_count == part.raw_requests_count, "empty request disappeared on wire");
+        for (unsigned i=0; i<part.raw_payloads_count; ++i) {
+            require(part.raw_payloads[i]->bytes[0]==offset+i, "response order changed");
+            require(part.raw_requests[i]->size == (offset+i ? 31U : 0U), "unsolicited request changed");
+            if (part.raw_requests[i]->size) require(part.raw_requests[i]->bytes[0]==offset+i, "request paired with wrong response");
+            require(copy->raw_requests[i]->size == part.raw_requests[i]->size, "request length changed on wire");
+        }
+        edge_protocol_release(&decoded);
+        offset += part.raw_payloads_count;
+    }
+    iot_edge_v1_TelemetryRecord part;
+    --record.raw_requests_count;
+    require(!edge_protocol_telemetry_slice(&record,0,0,14000,&part), "unpaired acquisition accepted");
+    record.raw_requests_count=FRAMES; record.values_count=1;
+    require(!edge_protocol_telemetry_slice(&record,0,0,14000,&part), "raw acquisition mixed with parsed values");
+    for (unsigned i=0; i<FRAMES; ++i) { free(record.raw_payloads[i]); free(record.raw_requests[i]); }
+    free(record.raw_payloads); free(record.raw_requests);
+}
+
 int main(void) {
+    test_raw_exchange_packing();
+    test_telemetry_size_packing();
     test_config_replay();
     test_complete_telemetry();
     test_imei();
