@@ -68,7 +68,7 @@ def main():
                 inside(node, 'ip', 'link', 'set', 'transport'+name, 'name', 'wg')
                 inside(hub, 'ip', 'link', 'add', 'wg', 'type', 'wireguard')
                 inside(hub, 'wg', 'set', 'wg', 'private-key', str(work/('hub'+name+'.key')), 'listen-port', '55133',
-                       'peer', node_public, 'allowed-ips', '100.96.0.2/32,172.24.1.0/24')
+                       'peer', node_public, 'allowed-ips', '100.96.0.2/32,172.16.0.0/12')
                 inside(hub, 'ip', 'addr', 'add', '100.96.0.8/32', 'dev', 'wg')
                 inside(hub, 'ip', 'link', 'set', 'wg', 'up')
                 inside(hub, 'ip', 'route', 'add', '172.16.0.0/12', 'dev', 'wg')
@@ -100,11 +100,9 @@ def main():
                 assert list(executor.map(probe, ['A','B'])) == ['PASS A','PASS B']
             # Both flows have identical inner source IP/port, destination IP/port.
             assert inside('nodeA','wg','show','wg','transfer') != inside('nodeB','wg','show','wg','transfer')
-            try:
-                probe('B', '172.24.2.42')
-                raise AssertionError('unmapped subnet unexpectedly reachable')
-            except subprocess.CalledProcessError:
-                pass
+            blocked = subprocess.run(['ip','netns','exec','hubB',sys.executable,'-c',client,'B','172.24.2.42'],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            assert blocked.returncode != 0, 'unmapped subnet unexpectedly reachable'
             run('ip','netns','delete','nodeA')
             assert probe('B') == 'PASS B'
             print('PASS identical addresses and flow tuples remain isolated; disabling A preserves B; unmapped destinations blocked')
