@@ -15,14 +15,16 @@
 #include "edge_traffic.h"
 #include "edge_runtime_config.h"
 #include "edge_spool.h"
+#include "edge_vpn.h"
 
 typedef struct edge_ws_app edge_ws_app;
 
 typedef struct {
+    edge_vpn_session vpn;
     edge_ws_transport transport;
     struct ev_timer reconnect_timer;
     struct ev_timer liveness_timer;
-    struct ev_timer heartbeat_timer;
+    struct ev_timer status_report_timer;
     struct ev_timer firmware_timer;
     struct ev_timer modem_timer;
     struct ev_io modem_io;
@@ -61,9 +63,8 @@ typedef struct {
     edge_spool spool;
     edge_runtime_config runtime_config;
     uint64_t sequence;
-    uint64_t last_heartbeat_ms;
+    uint64_t last_report_ms;
     uint64_t last_inbound_ms;
-    uint64_t last_liveness_probe_ms;
     uint64_t hello_sent_monotonic_ms;
     edge_command_clock command_clock;
     uint64_t terminal_output_sequence;
@@ -72,7 +73,7 @@ typedef struct {
     uint64_t terminal_input_ack_sequence;
     size_t terminal_output_size;
     edge_retry retry;
-    uint16_t heartbeat_interval_sec;
+    uint16_t report_interval_sec;
     bool client_active;
     bool websocket_open;
     bool enrolled;

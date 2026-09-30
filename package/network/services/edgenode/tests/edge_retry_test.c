@@ -12,36 +12,18 @@ static void require_true(bool value, const char *message) {
 }
 
 static void test_liveness(void) {
-    const uint32_t timeouts[] = {15000U, 90000U, 900000U};
-    for (unsigned i = 0; i < sizeof(timeouts) / sizeof(timeouts[0]); ++i) {
-        const uint32_t timeout = timeouts[i];
-        edge_retry idle;
-        require_true(edge_retry_init(&idle, 5000U, 30000U), "idle init");
-        edge_retry_application_ready(&idle, 0U, timeout);
-        uint64_t last_reply = 0U, last_probe = 0U;
-        unsigned probes = 0;
-        for (uint64_t tick = 1000U; tick <= 1800000U; tick += 1000U) {
-            require_true(!edge_retry_application_timed_out(&idle, tick),
-                         "healthy session reconnected between heartbeats");
-            if (edge_retry_probe_due(tick, last_reply, last_probe, timeout)) {
-                last_probe = last_reply = tick;
-                ++probes;
-                edge_retry_application_alive(&idle, tick, timeout);
-            }
-        }
-        if (timeout == 900000U)
-            require_true(probes == 6U, "five-minute probes sent extra packets");
-        require_true(edge_retry_application_timed_out(&idle, last_reply + timeout),
-                     "missing replies did not time out");
-        require_true(!edge_retry_probe_due(last_probe + 1, last_reply, last_probe, timeout),
-                     "probe rate was not bounded");
-    }
-    require_true(!edge_retry_probe_due(299999U, 0U, 0U, 900000U), "early probe");
-    require_true(edge_retry_probe_due(300000U, 0U, 0U, 900000U), "missing idle probe");
-    require_true(!edge_retry_probe_due(300000U, 299000U, 0U, 900000U), "business reply did not suppress probe");
-    require_true(!edge_retry_probe_due(300000U, 0U, 300000U, 900000U), "heartbeat did not suppress duplicate probe");
+    edge_retry idle;
+    require_true(edge_retry_init(&idle, 5000U, 30000U), "idle init");
+    edge_retry_application_ready(&idle, 0U);
+    // Idle time and missing status reports never determine transport liveness.
+    require_true(!edge_retry_application_timed_out(&idle, 900000U), "report interval closed session");
+    require_true(!edge_retry_application_timed_out(&idle, UINT64_MAX), "idle WS closed by application timer");
+    require_true(!edge_retry_should_start(&idle, UINT64_MAX), "idle WS scheduled another connection");
+    // A real transport close still schedules bounded reconnect.
+    edge_retry_failed(&idle, 1800000U);
+    require_true(!edge_retry_should_start(&idle, 1804999U), "early transport retry");
+    require_true(edge_retry_should_start(&idle, 1805000U), "transport close failed to reconnect");
 }
-
 static void test_backoff(void) {
     edge_retry retry;
     require_true(edge_retry_init(&retry, 5000U, 30000U), "retry init");
@@ -62,14 +44,12 @@ static void test_backoff(void) {
         require_true(edge_retry_should_start(&retry, now), "retry stopped");
     }
     edge_retry_attempt_started(&retry, now);
-    edge_retry_application_ready(&retry, now, 900000U);
-    edge_retry_application_alive(&retry, now + 1000U, 900000U);
+    edge_retry_application_ready(&retry, now);
     edge_retry_failed(&retry, now + 1001U);
     require_true(edge_retry_delay_ms(&retry, now + 1001U) == 300000U, "flapping reset backoff");
     now += 301001U;
     edge_retry_attempt_started(&retry, now);
-    edge_retry_application_ready(&retry, now, 900000U);
-    edge_retry_application_alive(&retry, now + 300000U, 900000U);
+    edge_retry_application_ready(&retry, now);
     edge_retry_failed(&retry, now + 300001U);
     require_true(edge_retry_delay_ms(&retry, now + 300001U) == 5000U, "stable connection did not reset backoff");
 
@@ -90,14 +70,12 @@ static void test_handshake(void) {
     require_true(!edge_retry_should_start(&retry, UINT64_MAX), "duplicate connection scheduled");
     require_true(!edge_retry_application_timed_out(&retry, 29999U), "early handshake timeout");
     require_true(edge_retry_application_timed_out(&retry, 30000U), "missing handshake timeout");
-    edge_retry_application_alive(&retry, 10000U, 900000U);
     require_true(edge_retry_application_timed_out(&retry, 30000U), "unvalidated traffic extended handshake");
-    // HelloAck and EnrollmentPending establish liveness; subsequent heartbeats renew it.
-    edge_retry_application_ready(&retry, 20000U, 900000U);
+    // HelloAck and EnrollmentPending complete negotiation; WS owns subsequent liveness.
+    edge_retry_application_ready(&retry, 20000U);
     require_true(!edge_retry_application_timed_out(&retry, 319999U), "five-minute heartbeat disconnected");
-    edge_retry_application_alive(&retry, 320000U, 900000U);
     require_true(!edge_retry_application_timed_out(&retry, 1219999U), "reply failed to renew watchdog");
-    require_true(edge_retry_application_timed_out(&retry, 1220000U), "silent connection never expired");
+    require_true(!edge_retry_application_timed_out(&retry, UINT64_MAX), "report inactivity expired WS session");
 }
 
 int main(void) {

@@ -35,8 +35,6 @@
 #define EDGE_OUTBOX_WINDOW 16U
 #define EDGE_CONNECT_TIMEOUT_SEC 30U
 #define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
-#define EDGE_APPLICATION_MIN_TIMEOUT_MS 15000U
-#define EDGE_APPLICATION_MAX_TIMEOUT_MS 900000U
 #define EDGE_OUTBOX_ACK_TIMEOUT_MS 60000U
 #define EDGE_LIVENESS_CHECK_INTERVAL_SEC 1.0
 #define EDGE_TERMINAL_OUTPUT_POLL_INTERVAL 0.01
@@ -79,8 +77,8 @@ static edge_ws_session *session_from_liveness(struct ev_timer *timer) {
     return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, liveness_timer));
 }
 
-static edge_ws_session *session_from_heartbeat(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, heartbeat_timer));
+static edge_ws_session *session_from_status_report(struct ev_timer *timer) {
+    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, status_report_timer));
 }
 
 static edge_ws_session *session_from_firmware(struct ev_timer *timer) {
@@ -231,18 +229,6 @@ static uint64_t monotonic_ms(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
         return 0U;
     return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
-}
-
-static uint32_t application_timeout_ms(const edge_ws_session *session) {
-    const uint32_t heartbeat = session->heartbeat_interval_sec != 0U
-                                   ? session->heartbeat_interval_sec
-                                   : session->app->config->heartbeat_interval_sec;
-    uint64_t timeout = (uint64_t)heartbeat * 3000U;
-    if (timeout < EDGE_APPLICATION_MIN_TIMEOUT_MS)
-        timeout = EDGE_APPLICATION_MIN_TIMEOUT_MS;
-    if (timeout > EDGE_APPLICATION_MAX_TIMEOUT_MS)
-        timeout = EDGE_APPLICATION_MAX_TIMEOUT_MS;
-    return (uint32_t)timeout;
 }
 
 static bool random_bytes(uint8_t *output, size_t size) {
@@ -493,6 +479,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_firmware_update = true;
     hello->supports_firmware_stream = true;
     hello->supports_sparse_heartbeat = true;
+    hello->supports_status_reporting = true;
     hello->supports_command_start_before = true;
     hello->supports_device_config = true;
     hello->network_config_version = 3U;
@@ -549,7 +536,7 @@ static bool send_capability_report(edge_ws_session *session, bool force) {
     report->supported_protocols[4] = iot_edge_v1_Protocol_PROTOCOL_FINS;
     report->supported_protocols[5] = iot_edge_v1_Protocol_PROTOCOL_DLT645;
     (void)edge_capability_collect_network(report, session->app->config->wan_interface);
-    report->has_vpn = edge_vpn_collect_capability(&report->vpn);
+    report->has_vpn = edge_vpn_collect_capability(&session->vpn, &report->vpn);
     if (session->app->config->serial_port[0] != '\0') {
         report->serial_ports_count = 1U;
         iot_edge_v1_SerialCapability *serial = &report->serial_ports[0];
@@ -634,19 +621,20 @@ static void arm_reconnect_timer(edge_ws_session *session) {
 }
 
 static void schedule_reconnect(edge_ws_session *session) {
+    edge_vpn_shutdown(&session->vpn);
     clear_report_snapshots(session);
     close_serial_debug(session, "platform connection closed");
     edge_spool_outbox_reset(&session->spool);
     session->websocket_open = false;
     session->enrolled = false;
     session->session_epoch = 0U;
-    session->last_heartbeat_ms = 0U;
+    session->last_report_ms = 0U;
     session->client_active = false;
     session->network_probe_nonce = 0U;
     session->hello_sent_monotonic_ms = 0U;
     invalidate_command_clock(session);
     ev_timer_stop(session->app->loop, &session->liveness_timer);
-    ev_timer_stop(session->app->loop, &session->heartbeat_timer);
+    ev_timer_stop(session->app->loop, &session->status_report_timer);
     ev_timer_stop(session->app->loop, &session->network_timer);
     ev_timer_stop(session->app->loop, &session->terminal_timer);
     if (session->terminal_open) {
@@ -667,7 +655,6 @@ static void websocket_open(void *user) {
     session->hello_sent_monotonic_ms = 0U;
     invalidate_command_clock(session);
     edge_command_clock_reset(&session->command_clock);
-    session->last_liveness_probe_ms = monotonic_ms();
     edge_retry_transport_connected(&session->retry, monotonic_ms(),
                                    EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS);
     ev_timer_stop(session->app->loop, &session->reconnect_timer);
@@ -679,7 +666,7 @@ static void websocket_open(void *user) {
         edge_ws_transport_close(&session->transport, 1011, "hello failed");
         return;
     }
-    session->heartbeat_interval_sec = session->app->config->heartbeat_interval_sec;
+    session->report_interval_sec = session->app->config->heartbeat_interval_sec;
     syslog(LOG_INFO, "platform %s WebSocket connected", session->config->name);
     char detail[96];
     snprintf(detail, sizeof(detail), "platform=%s", session->config->name);
@@ -1057,7 +1044,7 @@ static void handle_vpn_config(edge_ws_session *session,
         if (request->request_id.size == sizeof(request_id))
             memcpy(request_id, request->request_id.bytes, sizeof(request_id));
     }
-    const bool applied = edge_vpn_apply(request, error, sizeof(error));
+    const bool applied = edge_vpn_apply(&session->vpn, request, error, sizeof(error));
     send_vpn_result(session, request_id, config_version, applied,
                     applied ? "" : error);
     char detail[320];
@@ -1200,7 +1187,7 @@ static void handle_network_config(edge_ws_session *session,
     }
 }
 
-static bool send_heartbeat(edge_ws_session *session) {
+static bool send_status_report(edge_ws_session *session) {
     const uint64_t probe_sent_ms = monotonic_ms();
     const bool mapping_was_valid = session->command_clock.valid;
     uint64_t clock_nonce = 0U;
@@ -1224,7 +1211,7 @@ static bool send_heartbeat(edge_ws_session *session) {
         (size_t)(session - session->app->sessions), monotonic_ms(), &heartbeat->tcp_traffic);
     heartbeat->has_tcp_traffic = heartbeat->tcp_traffic.sample_id != 0U;
     heartbeat->has_vpn_traffic =
-        edge_vpn_sample(monotonic_ms(), &heartbeat->vpn_traffic);
+        edge_vpn_sample(&session->vpn, monotonic_ms(), &heartbeat->vpn_traffic);
     heartbeat->signal_csq = 99U;
     heartbeat->signal_rssi_dbm = -1;
     heartbeat->mobile_registration_status = -1;
@@ -1265,7 +1252,7 @@ static bool send_heartbeat(edge_ws_session *session) {
         invalidate_command_clock(session);
         return false;
     }
-    session->last_heartbeat_ms = monotonic_ms();
+    session->last_report_ms = monotonic_ms();
     send_outbox_window(session);
     report_network_rollback(session->app);
     return true;
@@ -1316,7 +1303,7 @@ static void handle_firmware_chunk(edge_ws_session *session,
     if (result == EDGE_FIRMWARE_CHUNK_COMPLETE) {
         session->firmware_traffic_flush_pending = true;
         session->firmware_traffic_flush_followup = true;
-        if (!send_heartbeat(session)) {
+        if (!send_status_report(session)) {
             edge_firmware_mark_traffic_flushed();
             session->firmware_traffic_flush_pending = false;
             session->firmware_traffic_flush_followup = false;
@@ -1529,8 +1516,6 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         return;
     }
     session->last_inbound_ms = monotonic_ms();
-    edge_retry_application_alive(&session->retry, session->last_inbound_ms,
-                                 application_timeout_ms(session));
 
     switch (envelope->which_payload) {
     case iot_edge_v1_Envelope_hello_ack_tag: {
@@ -1562,12 +1547,11 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         const unsigned heartbeat = ack->heartbeat_interval_sec != 0U
                                        ? ack->heartbeat_interval_sec
                                        : session->app->config->heartbeat_interval_sec;
-        session->heartbeat_interval_sec = (uint16_t)heartbeat;
-        edge_retry_application_ready(&session->retry, monotonic_ms(),
-                                     application_timeout_ms(session));
-        ev_timer_stop(session->app->loop, &session->heartbeat_timer);
-        ev_timer_set(&session->heartbeat_timer, (ev_tstamp)heartbeat, (ev_tstamp)heartbeat);
-        ev_timer_start(session->app->loop, &session->heartbeat_timer);
+        session->report_interval_sec = (uint16_t)heartbeat;
+        edge_retry_application_ready(&session->retry, monotonic_ms());
+        ev_timer_stop(session->app->loop, &session->status_report_timer);
+        ev_timer_set(&session->status_report_timer, (ev_tstamp)heartbeat, (ev_tstamp)heartbeat);
+        ev_timer_start(session->app->loop, &session->status_report_timer);
         clear_report_snapshots(session);
         send_capability_report(session, true);
         send_device_status(session, true);
@@ -1594,7 +1578,7 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         edge_traffic_ack(&session->app->traffic,
             (size_t)(session - session->app->sessions),
             envelope->payload.heartbeat_ack.traffic_sample_id);
-        edge_vpn_ack(envelope->payload.heartbeat_ack.vpn_traffic_sample_id);
+        edge_vpn_ack(&session->vpn, envelope->payload.heartbeat_ack.vpn_traffic_sample_id);
         const bool request_capability =
             envelope->payload.heartbeat_ack.request_capability_report;
         const bool request_device_status =
@@ -1606,7 +1590,7 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         if (session->firmware_traffic_flush_pending) {
             if (session->firmware_traffic_flush_followup) {
                 session->firmware_traffic_flush_followup = false;
-                if (!send_heartbeat(session)) {
+                if (!send_status_report(session)) {
                     edge_firmware_mark_traffic_flushed();
                     session->firmware_traffic_flush_pending = false;
                 }
@@ -1788,12 +1772,11 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
     case iot_edge_v1_Envelope_enrollment_pending_tag:
         syslog(LOG_INFO, "platform %s enrollment pending", session->config->name);
         // 待审批是有效应用响应，不应每 30 秒重连。仅发送心跳等待原连接获批。
-        session->heartbeat_interval_sec = 300U;
-        edge_retry_application_ready(&session->retry, monotonic_ms(),
-                                     application_timeout_ms(session));
-        ev_timer_stop(session->app->loop, &session->heartbeat_timer);
-        ev_timer_set(&session->heartbeat_timer, 300.0, 300.0);
-        ev_timer_start(session->app->loop, &session->heartbeat_timer);
+        session->report_interval_sec = 300U;
+        edge_retry_application_ready(&session->retry, monotonic_ms());
+        ev_timer_stop(session->app->loop, &session->status_report_timer);
+        ev_timer_set(&session->status_report_timer, 300.0, 300.0);
+        ev_timer_start(session->app->loop, &session->status_report_timer);
         break;
     case iot_edge_v1_Envelope_enrollment_rejected_tag:
         syslog(LOG_WARNING, "platform %s enrollment rejected", session->config->name);
@@ -1805,10 +1788,10 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
     }
 }
 
-static void heartbeat_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
+static void status_report_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
     (void)loop;
     (void)events;
-    (void)send_heartbeat(session_from_heartbeat(timer));
+    (void)send_status_report(session_from_status_report(timer));
 }
 
 static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
@@ -1825,9 +1808,9 @@ static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int event
             .staging_config = &session->spool.staging_config,
             .outbox = &session->spool.outbox,
             .phase = session->retry.phase,
-            .last_heartbeat_ms = session->last_heartbeat_ms,
+            .last_heartbeat_ms = session->last_report_ms,
             .last_inbound_ms = session->last_inbound_ms,
-            .heartbeat_interval_sec = session->heartbeat_interval_sec,
+            .heartbeat_interval_sec = session->report_interval_sec,
             .websocket_open = session->websocket_open,
             .enrolled = session->enrolled,
         };
@@ -2145,25 +2128,10 @@ static void liveness_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
             send_outbox_window(session);
         }
     }
-    if (!application_stalled && !acknowledgement_stalled) {
-        // 应用心跳已提供探活，不在同一周期额外发送 Ping。
-        const uint64_t last_probe = session->last_heartbeat_ms > session->last_liveness_probe_ms
-                                        ? session->last_heartbeat_ms : session->last_liveness_probe_ms;
-        if (session->enrolled && !ev_is_active(&session->heartbeat_timer) && edge_retry_probe_due(
-                current_ms, session->last_inbound_ms, last_probe,
-                application_timeout_ms(session))) {
-            iot_edge_v1_Envelope *probe = &session->app->envelope;
-            if (init_envelope(session, probe)) {
-                probe->which_payload = iot_edge_v1_Envelope_ping_tag;
-                probe->payload.ping.nonce = current_ms;
-                (void)send_envelope(session, probe);
-            }
-            session->last_liveness_probe_ms = current_ms;
-        }
+    if (!application_stalled && !acknowledgement_stalled)
         return;
-    }
     const char *reason = application_stalled
-                             ? "application heartbeat timed out"
+                             ? "application handshake timed out"
                              : "outbox acknowledgement timed out";
     syslog(LOG_WARNING, "platform %s %s; reconnecting",
            session->config->name, reason);
@@ -2185,10 +2153,12 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
     app->loop = loop;
     app->config = config;
     app->traffic.event_fd = app->traffic.query_fd = -1;
+    if (!edge_vpn_recover_resources()) return false;
     for (size_t index = 0; index < config->platform_count; ++index) {
         edge_ws_session *session = &app->sessions[index];
         session->app = app;
         session->config = &config->platforms[index];
+        if (!edge_vpn_init(&session->vpn, session->config->id, index)) return false;
         session->modem_worker_fd = -1;
         if (!edge_spool_init(&session->spool, session->config->id,
                              session->config->outbox_max_bytes)) {
@@ -2224,7 +2194,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
             return false;
         }
         ev_timer_init(&session->liveness_timer, liveness_timer, 0.0, 0.0);
-        ev_timer_init(&session->heartbeat_timer, heartbeat_timer, 0.0, 0.0);
+        ev_timer_init(&session->status_report_timer, status_report_timer, 0.0, 0.0);
         ev_timer_init(&session->firmware_timer, firmware_timer, 0.0, 0.0);
         ev_timer_init(&session->modem_timer, modem_timer, 0.0, 0.0);
         ev_io_init(&session->modem_io, modem_io, 0, EV_READ);
@@ -2303,9 +2273,10 @@ void edge_ws_app_stop(edge_ws_app *app) {
     for (size_t index = 0; index < app->config->platform_count; ++index) {
         edge_ws_session *session = &app->sessions[index];
         clear_report_snapshots(session);
+        edge_vpn_shutdown(&session->vpn);
         ev_timer_stop(app->loop, &session->reconnect_timer);
         ev_timer_stop(app->loop, &session->liveness_timer);
-        ev_timer_stop(app->loop, &session->heartbeat_timer);
+        ev_timer_stop(app->loop, &session->status_report_timer);
         ev_timer_stop(app->loop, &session->firmware_timer);
         ev_timer_stop(app->loop, &session->modem_timer);
         ev_timer_stop(app->loop, &session->network_timer);

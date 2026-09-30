@@ -47,7 +47,7 @@ static void test_command_clock_mapping(void) {
                                                &mapping_expiry),
                  "deadline beyond the bounded start window was accepted");
     const uint64_t last_mapping_tick = mapping_expiry - 1U;
-    require_true(edge_command_clock_deadline(&clock, 431000, last_mapping_tick,
+    require_true(edge_command_clock_deadline(&clock, 1033000, last_mapping_tick,
                                               &deadline, &mapping_expiry) &&
                      deadline > last_mapping_tick && deadline > mapping_expiry,
                  "mapping expiry was not kept separate from the command start deadline");

@@ -128,10 +128,17 @@ add_executable(edge_firmware_policy_test edge_firmware_policy_test.c)
 target_include_directories(edge_firmware_policy_test PRIVATE "${EDGENODE_ROOT}/src")
 add_test(NAME edge_firmware_policy COMMAND edge_firmware_policy_test)
 
-add_executable(edge_vpn_config_test edge_vpn_config_test.c)
-target_compile_definitions(edge_vpn_config_test PRIVATE
-    EDGENODE_VPN_SOURCE="${EDGENODE_ROOT}/src/edge_vpn.c")
+add_executable(edge_vpn_config_test edge_vpn_config_test.c "${EDGENODE_ROOT}/src/edge_vpn_plan.c")
+target_include_directories(edge_vpn_config_test PRIVATE "${EDGENODE_ROOT}/src")
+target_link_libraries(edge_vpn_config_test PRIVATE edgenode_nanopb)
 add_test(NAME edge_vpn_config COMMAND edge_vpn_config_test)
+option(EDGENODE_VPN_NAMESPACE_TESTS "验证实际 WireGuard、多平台重叠网段及独立停机，运行需要 root" OFF)
+if(EDGENODE_VPN_NAMESPACE_TESTS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME edge_vpn_namespace COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_LIST_DIR}/edge_vpn_namespace_test.py" "$<TARGET_FILE:edge_vpn_config_test>")
+    set_tests_properties(edge_vpn_namespace PROPERTIES TIMEOUT 60)
+endif()
 
 add_executable(edge_firmware_stream_test
     edge_firmware_stream_test.c

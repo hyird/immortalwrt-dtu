@@ -9,15 +9,6 @@ static uint64_t add_delay(uint64_t now_ms, uint32_t delay_ms) {
     return now_ms + delay_ms;
 }
 
-bool edge_retry_probe_due(uint64_t now_ms, uint64_t last_inbound_ms,
-                          uint64_t last_probe_ms, uint32_t timeout_ms) {
-    uint32_t interval = timeout_ms / 3U;
-    if (interval == 0U) interval = 1U;
-    if (interval > 300000U) interval = 300000U;
-    const uint64_t last = last_inbound_ms > last_probe_ms ? last_inbound_ms : last_probe_ms;
-    return now_ms >= last && now_ms - last >= interval;
-}
-
 bool edge_retry_init(edge_retry *retry, uint32_t retry_delay_ms,
                      uint32_t connect_timeout_ms) {
     if (retry == NULL || retry_delay_ms == 0U || connect_timeout_ms == 0U)
@@ -52,29 +43,21 @@ void edge_retry_transport_connected(edge_retry *retry, uint64_t now_ms,
     retry->deadline_ms = add_delay(now_ms, application_timeout_ms);
 }
 
-void edge_retry_application_alive(edge_retry *retry, uint64_t now_ms,
-                                  uint32_t application_timeout_ms) {
-    if (retry == NULL || application_timeout_ms == 0U ||
-        retry->phase != EDGE_RETRY_CONNECTED)
-        return;
-    // Reset only after stable application traffic, not a brief successful handshake.
-    if (now_ms >= retry->connected_at_ms && now_ms - retry->connected_at_ms >= 300000U)
-        retry->next_retry_delay_ms = retry->retry_delay_ms;
-    retry->deadline_ms = add_delay(now_ms, application_timeout_ms);
-}
-
-void edge_retry_application_ready(edge_retry *retry, uint64_t now_ms,
-                                  uint32_t application_timeout_ms) {
-    if (retry == NULL || application_timeout_ms == 0U)
+void edge_retry_application_ready(edge_retry *retry, uint64_t now_ms) {
+    if (retry == NULL)
         return;
     retry->phase = EDGE_RETRY_CONNECTED;
     retry->connected_at_ms = now_ms;
-    retry->deadline_ms = add_delay(now_ms, application_timeout_ms);
+    retry->deadline_ms = 0U;
 }
 
 void edge_retry_failed(edge_retry *retry, uint64_t now_ms) {
     if (retry == NULL || retry->phase == EDGE_RETRY_WAITING)
         return;
+    // A stable WS connection resets backoff without requiring application reports.
+    if (retry->phase == EDGE_RETRY_CONNECTED && now_ms >= retry->connected_at_ms &&
+        now_ms - retry->connected_at_ms >= 300000U)
+        retry->next_retry_delay_ms = retry->retry_delay_ms;
     const uint32_t maximum = retry->retry_delay_ms > 300000U
                                  ? retry->retry_delay_ms : 300000U;
     const uint32_t delay = retry->next_retry_delay_ms;
@@ -90,8 +73,7 @@ bool edge_retry_attempt_timed_out(const edge_retry *retry, uint64_t now_ms) {
 
 bool edge_retry_application_timed_out(const edge_retry *retry, uint64_t now_ms) {
     return retry != NULL &&
-           (retry->phase == EDGE_RETRY_AWAITING_APPLICATION ||
-            retry->phase == EDGE_RETRY_CONNECTED) &&
+           retry->phase == EDGE_RETRY_AWAITING_APPLICATION &&
            now_ms >= retry->deadline_ms;
 }
 

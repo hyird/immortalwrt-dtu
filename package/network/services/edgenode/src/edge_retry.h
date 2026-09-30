@@ -26,13 +26,8 @@ bool edge_retry_should_start(const edge_retry *retry, uint64_t now_ms);
 void edge_retry_attempt_started(edge_retry *retry, uint64_t now_ms);
 void edge_retry_transport_connected(edge_retry *retry, uint64_t now_ms,
                                     uint32_t application_timeout_ms);
-void edge_retry_application_alive(edge_retry *retry, uint64_t now_ms,
-                                  uint32_t application_timeout_ms);
-void edge_retry_application_ready(edge_retry *retry, uint64_t now_ms,
-                                  uint32_t application_timeout_ms);
+void edge_retry_application_ready(edge_retry *retry, uint64_t now_ms);
 void edge_retry_failed(edge_retry *retry, uint64_t now_ms);
 bool edge_retry_attempt_timed_out(const edge_retry *retry, uint64_t now_ms);
 bool edge_retry_application_timed_out(const edge_retry *retry, uint64_t now_ms);
 uint32_t edge_retry_delay_ms(const edge_retry *retry, uint64_t now_ms);
-bool edge_retry_probe_due(uint64_t now_ms, uint64_t last_inbound_ms,
-                          uint64_t last_probe_ms, uint32_t timeout_ms);

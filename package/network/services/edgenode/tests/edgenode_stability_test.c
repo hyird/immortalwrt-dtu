@@ -223,14 +223,12 @@ static void stress_retry(uint64_t cycle) {
                      edge_retry_attempt_timed_out(&retry, started + 30000U),
                  "transport timeout boundary changed");
     edge_retry_transport_connected(&retry, started + 10U, 30000U);
-    edge_retry_application_alive(&retry, started + 100U, 30000U);
     require_true(edge_retry_application_timed_out(&retry, started + 30010U),
                  "pre-Hello traffic bypassed the handshake watchdog");
-    edge_retry_application_ready(&retry, started + 30011U, 60000U);
-    edge_retry_application_alive(&retry, started + 40000U, 60000U);
+    edge_retry_application_ready(&retry, started + 30011U);
     require_true(!edge_retry_application_timed_out(&retry, started + 99999U) &&
-                     edge_retry_application_timed_out(&retry, started + 100000U),
-                 "application liveness deadline changed");
+                     !edge_retry_application_timed_out(&retry, started + 100000U),
+                 "idle reports triggered an application watchdog");
     edge_retry_failed(&retry, started + 100000U);
     require_true(!edge_retry_should_start(&retry, started + 104999U) &&
                      edge_retry_should_start(&retry, started + 105000U),

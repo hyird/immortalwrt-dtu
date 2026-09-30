@@ -33,15 +33,22 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 ## 平台连接节流
 
-- libwebsockets 使用显式零空闲策略关闭周期 WS Ping，应用心跳遵守平台协商值，本平台协商为 300 秒。
-  保留握手超时及对端 Ping 的 Pong，不使用库默认的 40 秒 Ping。
-  应用看门狗上限为 900 秒，正常心跳计时器运行时不另发应用 Ping。平台仍保留空闲时才触发的 WS 探活。
-- Hello 的可选 `supports_sparse_heartbeat` 声明新时序；服务端对未声明能力的旧固件
-  保留原看门狗兼容时序。协议版本及既有字段编号不变，不能仅升级服务端便停掉旧节点保活。
+- 0.3.65 通过 Hello 的 `supports_status_reporting` 声明只定时上报状态和流量，新平台协商周期为 900 秒。
+  没有应用 Ping 或连接后的应用心跳超时；现有 Heartbeat/HeartbeatAck 字段保留为报告与确认，兼容旧平台。
+- libwebsockets 原生 WS Ping/Pong 在空闲 300 秒后探活，360 秒内没有有效流量则断开。
+  首次 Hello 握手仍有截止时间；未声明新能力的旧固件保留服务端原有保活时序。
 - 连续失败指数退避至 300 秒（若配置初始间隔更长则保留），稳定通信 300 秒后复位。
   待审批响应结束初始握手等待，后续按五分钟心跳等待原连接获批。
 - WG `persistent_keepalive` 为 120 秒，重新应用 VPN 配置后生效；移动 NAT 的空闲入站
   可达性需要现场验证。采样、原始报文、单记录 ACK 和必要失败重传保持不变。
+
+## VPN 按需启用及平台隔离（0.3.65）
+
+- 平台 Web 开启的是 VPN 能力：提前分配节点地址和虚拟网段。只有已授权的 Windows 客户端开启 VPN 并选中节点，平台才下发启用任务；最后一个客户端停止使用后下发关闭任务，分配结果保留。
+- 每个平台拥有独立 network namespace、WireGuard 密钥、配置版本、路由、nftables/conntrack 及流量确认状态，允许不同平台使用相同的 Overlay 和虚拟网段。平台 UUID 使用完整 128 位标识，最多四个平台。
+- WireGuard UDP socket 在物理网络 namespace 创建后把接口移入所属平台，以共享物理 WAN；通过独立 veth /30 和平台专属源地址连接 LAN。命名空间内先做虚拟网段映射，再做中转 SNAT，物理网络最终使用 LAN 接口地址访问设备，避免多个平台的相同客户端地址混淆返回路径。
+- 关闭或失去平台连接只回收所属平台的隧道和防火墙配置，保留密钥。进程启动清理自身遗留 namespace/veth，并迁移旧的受管共享 wg 配置；旧密钥保留用于回退。需要内核 NET_NS、kmod-veth 和 ip-full，必须使用完整新固件镜像。
+- 中转 SNAT 对 NAT 和 routed 两种映射均生效；routed 不做网段前缀转换。LAN 设备看到的是节点 LAN 地址，无法直接区分平台客户端。
 
 ## WebSocket 压缩
 

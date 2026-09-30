@@ -1,76 +1,51 @@
+#include "edge_vpn_plan.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static void require(int condition, const char *message) {
-    if (!condition) {
-        fprintf(stderr, "edge vpn config test failed: %s\n", message);
-        exit(EXIT_FAILURE);
+static void require(bool condition, const char *message) {
+    if (!condition) { fprintf(stderr, "VPN plan: %s\n", message); exit(EXIT_FAILURE); }
+}
+
+int main(int argc, char **argv) {
+    const uint8_t a[16] = {1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 1};
+    const uint8_t b[16] = {1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 2};
+    edge_vpn_plan first, second;
+    require(edge_vpn_plan_init(&first, a, 0U), "first platform");
+    require(edge_vpn_plan_init(&second, b, 1U), "second platform");
+    require(strcmp(first.namespace_name, second.namespace_name) != 0, "full UUID avoids prefix collision");
+    require(strcmp(first.key_path, second.key_path) != 0, "separate keys");
+    require(strcmp(first.peer_host, second.peer_host) != 0, "distinct LAN transit sources");
+    require(strcmp(first.root_rules_path, second.root_rules_path) != 0, "separate firewall lifecycle");
+    const uint8_t zero[16] = {0}; edge_vpn_plan invalid;
+    require(!edge_vpn_plan_init(&invalid, zero, 0U), "zero identity rejected");
+    require(!edge_vpn_plan_init(&invalid, a, 4U), "platform count bounded");
+    iot_edge_v1_VpnConfigRequest request = iot_edge_v1_VpnConfigRequest_init_zero;
+    strcpy(request.edge_address, "100.96.0.2/32"); request.routes_count = 1;
+    iot_edge_v1_VpnRoute *route = &request.routes[0];
+    route->enabled = true; strcpy(route->mode, "nat"); strcpy(route->nat_mode, "masquerade");
+    strcpy(route->virtual_cidr, "172.24.1.0/24"); strcpy(route->target_cidr, "192.168.1.0/24");
+    char rules[8192], error[128];
+    require(edge_vpn_plan_rules(&first, &request, rules, sizeof(rules), error, sizeof(error)), "valid NAT mapping");
+    require(strstr(rules, "172.24.1.0/24 : 192.168.1.0/24") != NULL, "host bits preserved");
+    if (argc >= 2 && strcmp(argv[1], "--rules") == 0) {
+        if (argc == 3 && strcmp(argv[2], "second") == 0)
+            require(edge_vpn_plan_rules(&second, &request, rules, sizeof(rules), error, sizeof(error)), "second platform rules");
+        fputs(rules, stdout); return EXIT_SUCCESS;
     }
-}
-
-static char *read_source(void) {
-    FILE *file = fopen(EDGENODE_VPN_SOURCE, "rb");
-    require(file != NULL, "cannot open edge_vpn.c");
-    require(fseek(file, 0, SEEK_END) == 0, "cannot seek edge_vpn.c");
-    const long length = ftell(file);
-    require(length > 0, "edge_vpn.c is empty");
-    rewind(file);
-    char *source = malloc((size_t)length + 1U);
-    require(source != NULL, "cannot allocate source buffer");
-    require(fread(source, 1U, (size_t)length, file) == (size_t)length,
-            "cannot read edge_vpn.c");
-    source[length] = '\0';
-    fclose(file);
-    return source;
-}
-
-int main(void) {
-    char *source = read_source();
-    require(strstr(source, "\"persistent_keepalive\", \"120\"") != NULL,
-            "WireGuard keepalive is not 120 seconds");
-    require(strstr(source, "\"mtu\", \"1280\"") != NULL,
-            "WireGuard MTU is not 1280");
-    require(strstr(source, "#define EDGE_VPN_INTERFACE \"wg\"") != NULL,
-            "managed interface is not named wg");
-    require(strstr(source,
-                   "#define EDGE_VPN_VIRTUAL_POOL_NETWORK 0xAC100000U") != NULL &&
-                strstr(source,
-                       "#define EDGE_VPN_VIRTUAL_POOL_MASK 0xFFF00000U") != NULL,
-            "virtual LAN pool is not 172.16.0.0/12");
-    require(strstr(source,
-                   "#define EDGE_VPN_VIRTUAL_POOL_CIDR \"172.16.0.0/12\"") != NULL,
-            "virtual LAN route is not the complete RFC1918 pool");
-    require(strstr(source, "\"proto\", \"wireguard\"") != NULL,
-            "wg is not managed by the native netifd WireGuard protocol");
-    require(strstr(source, "\"wireguard_\" EDGE_VPN_INTERFACE") != NULL,
-            "native netifd peer section is missing");
-    require(strstr(source, "\"description\",\n"
-                           "                                 EDGE_VPN_PEER_DESCRIPTION") != NULL,
-            "native netifd peer description is missing");
-    require(strstr(source, "configure_firewall_uci(true)") != NULL,
-            "wg and VPN rules are not managed through firewall UCI");
-    require(strstr(source, "\"type\", \"nftables\"") != NULL &&
-                strstr(source, "\"position\", \"chain-prepend\"") != NULL &&
-                strstr(source, "\"chain\"") != NULL,
-            "VPN mapping is not registered as firewall4 UCI includes");
-    require(strstr(source, "EDGE_VPN_FIREWALL_DIRECTORY \"/vpn-dstnat.nft\"") != NULL &&
-                strstr(source, "EDGE_VPN_FIREWALL_DIRECTORY \"/vpn-forward.nft\"") != NULL &&
-                strstr(source, "EDGE_VPN_FIREWALL_DIRECTORY \"/vpn-srcnat.nft\"") != NULL,
-            "VPN firewall include paths are not runtime-managed");
-    require(strstr(source, "dnat ip prefix to ip daddr map") != NULL,
-            "VPN NAT does not preserve host bits across mapped prefixes");
-    require(strstr(source, "snat ip prefix to ip saddr map") != NULL,
-            "LAN egress NAT does not preserve host bits across mapped prefixes");
-    require(strstr(source, "ip daddr \"\n"
-                           "                             EDGE_VPN_VIRTUAL_POOL_CIDR") != NULL,
-            "LAN egress is not limited to the virtual LAN pool");
-    require(strstr(source, "add_uci_list(context, package, peer, \"allowed_ips\",\n"
-                           "                               EDGE_VPN_VIRTUAL_POOL_CIDR)") != NULL,
-            "WireGuard does not route the virtual LAN pool through the Hub");
-    require(strstr(source, "ip\", \"link\", \"add") == NULL &&
-                strstr(source, "WG_CMD_SET_DEVICE") == NULL,
-            "edge still configures WireGuard outside netifd");
-    free(source);
+    require(edge_vpn_plan_rules(&second, &request, rules, sizeof(rules), error, sizeof(error)), "same VPN addresses accepted on another platform");
+    require(strstr(rules, "snat to 169.254.240.6") != NULL, "second platform transit identity");
+    strcpy(route->target_cidr, "172.18.1.0/24");
+    require(edge_vpn_plan_rules(&first, &request, rules, sizeof(rules), error, sizeof(error)), "physical LAN can overlap virtual pool");
+    request.routes_count = 2; request.routes[1] = *route;
+    require(!edge_vpn_plan_rules(&first, &request, rules, sizeof(rules), error, sizeof(error)), "overlapping mappings in one platform rejected");
+    request.routes_count = 1; strcpy(route->virtual_cidr, "172.24.1.1/24");
+    require(!edge_vpn_plan_rules(&first, &request, rules, sizeof(rules), error, sizeof(error)), "non-network CIDR rejected");
+    strcpy(route->virtual_cidr, "172.24.1.0/24"); strcpy(route->target_cidr, "8.8.8.0/24");
+    require(!edge_vpn_plan_rules(&first, &request, rules, sizeof(rules), error, sizeof(error)), "public LAN target rejected");
+    strcpy(route->target_cidr, "192.168.1.0/24"); strcpy(route->mode, "routed"); strcpy(route->nat_mode, "none");
+    require(edge_vpn_plan_rules(&first, &request, rules, sizeof(rules), error, sizeof(error)), "routed mapping supported");
+    require(strstr(rules, "prefix to") == NULL, "routed mapping is not prefix translated");
+    require(!edge_vpn_plan_rules(&first, &request, rules, 16U, error, sizeof(error)), "output capacity bounded");
     return EXIT_SUCCESS;
 }

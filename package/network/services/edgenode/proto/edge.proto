@@ -173,6 +173,8 @@ message Hello {
   bool supports_sparse_heartbeat = 35;
   // Enables start_before_ms only when correlated database-time samples are usable; otherwise fail closed.
   bool supports_command_start_before = 36;
+  // Reports status on a schedule; connection liveness is maintained only by WebSocket Ping/Pong.
+  bool supports_status_reporting = 37;
 }
 
 message HelloAck {

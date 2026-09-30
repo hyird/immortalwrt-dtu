@@ -8,7 +8,7 @@
 #define EDGE_DEVICE_VALUE_MAX 512U
 #define EDGE_DEVICE_WRITE_QUEUE 4U
 #define EDGE_COMMAND_CLOCK_MAX_RTT_MS 2000U
-#define EDGE_COMMAND_CLOCK_MAX_AGE_MS 330000U
+#define EDGE_COMMAND_CLOCK_MAX_AGE_MS 930000U
 #define EDGE_COMMAND_CLOCK_MAX_START_WINDOW_MS 60000U
 #define EDGE_COMMAND_CLOCK_RATE_ERROR_PPM 1000U
 #define EDGE_COMMAND_CLOCK_ISSUED_NONCES 16U
@@ -56,7 +56,7 @@ typedef struct {
     int64_t sampled_at_ms;
 } edge_device_sample;
 
-/* Samples allow at most 2s RTT and 330s age (the 300s sparse-heartbeat
+/* Samples allow at most 2s RTT and 930s age (the 900s status-report
  * interval plus 30s scheduling margin). A 1000ppm drift bound and millisecond
  * truncation are included in both sample-stability bounds and the conservative
  * deadline upper bound. Observed adjacent-sample jumps invalidate the mapping,

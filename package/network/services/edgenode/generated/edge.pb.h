@@ -181,6 +181,8 @@ typedef struct _iot_edge_v1_Hello {
     bool supports_sparse_heartbeat;
     /* Enables start_before_ms only when correlated database-time samples are usable; otherwise fail closed. */
     bool supports_command_start_before;
+    /* Reports status on a schedule; connection liveness is maintained only by WebSocket Ping/Pong. */
+    bool supports_status_reporting;
 } iot_edge_v1_Hello;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_HelloAck_assigned_node_id_t;
@@ -1318,7 +1320,7 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define iot_edge_v1_Empty_init_default           {0}
-#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0}
+#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0}
 #define iot_edge_v1_HelloAck_init_default        {{0, {0}}, 0, 0, 0, 0, 0, false, 0}
 #define iot_edge_v1_EnrollmentStatus_init_default {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_default {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1397,7 +1399,7 @@ extern "C" {
 #define iot_edge_v1_Error_init_default           {"", "", 0}
 #define iot_edge_v1_Envelope_init_default        {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, 0, {iot_edge_v1_Hello_init_default}}
 #define iot_edge_v1_Empty_init_zero              {0}
-#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0}
+#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0}
 #define iot_edge_v1_HelloAck_init_zero           {{0, {0}}, 0, 0, 0, 0, 0, false, 0}
 #define iot_edge_v1_EnrollmentStatus_init_zero   {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_zero {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1512,6 +1514,7 @@ extern "C" {
 #define iot_edge_v1_Hello_supports_firmware_stream_tag 34
 #define iot_edge_v1_Hello_supports_sparse_heartbeat_tag 35
 #define iot_edge_v1_Hello_supports_command_start_before_tag 36
+#define iot_edge_v1_Hello_supports_status_reporting_tag 37
 #define iot_edge_v1_HelloAck_assigned_node_id_tag 1
 #define iot_edge_v1_HelloAck_session_epoch_tag   2
 #define iot_edge_v1_HelloAck_negotiated_protocol_version_tag 3
@@ -2125,7 +2128,8 @@ X(a, STATIC,   SINGULAR, BOOL,     supports_logs,    32) \
 X(a, STATIC,   SINGULAR, STRING,   log_level,        33) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_firmware_stream,  34) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_sparse_heartbeat,  35) \
-X(a, STATIC,   SINGULAR, BOOL,     supports_command_start_before,  36)
+X(a, STATIC,   SINGULAR, BOOL,     supports_command_start_before,  36) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_status_reporting,  37)
 #define iot_edge_v1_Hello_CALLBACK NULL
 #define iot_edge_v1_Hello_DEFAULT NULL
 
@@ -3294,7 +3298,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_HeartbeatAck_size            59
 #define iot_edge_v1_Heartbeat_size               461
 #define iot_edge_v1_HelloAck_size                69
-#define iot_edge_v1_Hello_size                   721
+#define iot_edge_v1_Hello_size                   724
 #define iot_edge_v1_IndustrialConnectionConfig_size 93
 #define iot_edge_v1_IndustrialPointConfig_size   346
 #define iot_edge_v1_InterfaceCapability_size     424

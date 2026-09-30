@@ -97,8 +97,11 @@ static const struct lws_protocols protocols[] = {
     { .name = NULL }
 };
 
-/* 由应用 Heartbeat/ACK 看门狗负责保活，不使用 LWS 默认 40 秒 Ping。 */
-static const lws_retry_bo_t idle_policy = {0};
+/* WS 原生 Ping/Pong 负责连接存活；应用状态上报不续期连接看门狗。 */
+static const lws_retry_bo_t idle_policy = {
+    .secs_since_valid_ping = 300,
+    .secs_since_valid_hangup = 360,
+};
 
 static const struct lws_extension extensions[] = {
     { "permessage-deflate", lws_extension_callback_pm_deflate, "permessage-deflate" },
