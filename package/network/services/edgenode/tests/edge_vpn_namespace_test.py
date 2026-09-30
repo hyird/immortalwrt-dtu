@@ -80,6 +80,9 @@ def main():
                 inside(node, 'ip', 'addr', 'add', peer_ip+'/30', 'dev', 'uplink')
                 inside(node, 'ip', 'link', 'set', 'uplink', 'up')
                 inside(node, 'ip', 'addr', 'add', '100.96.0.2/32', 'dev', 'wg')
+                rules = run(str(fixture), '--rules', *(['second'] if slot else []))
+                inside(node, 'nft', '-f', '-', input=rules)
+                inside(node, 'ip', 'link', 'set', 'wg', 'up')
                 inside(node, 'ip', 'route', 'add', 'default', 'via', host_ip, 'dev', 'uplink')
                 inside(node, 'ip', 'route', 'add', '100.96.0.0/11', 'dev', 'wg')
                 inside(node, 'ip', 'route', 'add', '172.16.0.0/12', 'dev', 'wg')
@@ -87,9 +90,6 @@ def main():
                 inside(node, 'ip', 'rule', 'add', 'priority', '100', 'iif', 'wg', 'lookup', '200')
                 inside(node, 'sysctl', '-q', '-w', 'net.ipv4.ip_forward=1', 'net.ipv4.conf.all.rp_filter=0',
                        'net.ipv4.conf.uplink.rp_filter=0', 'net.ipv4.conf.wg.rp_filter=0')
-                rules = run(str(fixture), '--rules', *(['second'] if slot else []))
-                inside(node, 'nft', '-f', '-', input=rules)
-                inside(node, 'ip', 'link', 'set', 'wg', 'up')
             echo = 'import socket\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("192.168.1.42",45000))\nwhile True:\n data,addr=s.recvfrom(100);s.sendto(data+str(addr[0]).encode(),addr)\n'
             processes.append(subprocess.Popen(['ip','netns','exec','lan',sys.executable,'-u','-c',echo]))
             time.sleep(2)

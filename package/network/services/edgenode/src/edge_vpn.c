@@ -540,12 +540,14 @@ bool edge_vpn_apply(edge_vpn_session *session, const iot_edge_v1_VpnConfigReques
     success = success && run(wg_move) == 0 && run_namespace(session, wg_rename, -1) == 0 && run(links) == 0 && run(peer_move) == 0 &&
         run_namespace(session, peer_rename, -1) == 0 && run(host_address) == 0 && run(host_up) == 0 && run_namespace(session, peer_address, -1) == 0 &&
         run_namespace(session, peer_up, -1) == 0 && run_namespace(session, wg_address, -1) == 0 && run_namespace(session, loopback, -1) == 0 &&
-        run_namespace(session, default_route, -1) == 0 && run_namespace(session, overlay, -1) == 0 && run_namespace(session, virtual_routes, -1) == 0 &&
-        run_namespace(session, lan_route, -1) == 0 && run_namespace(session, lan_rule, -1) == 0 && run_namespace(session, forwarding, -1) == 0 &&
+        run_namespace(session, default_route, -1) == 0 &&
         write_atomic(session->plan.rules_path, rules) && run_namespace(session, nft, -1) == 0;
     char root_rules[256]; snprintf(root_rules, sizeof(root_rules), "iifname \"%s\" ip saddr %s masquerade\n", session->plan.host_link, session->plan.peer_host);
     // Install restrictions and root return-path translation before allowing WG traffic.
-    success = success && write_atomic(session->plan.root_rules_path, root_rules) && firewall_resource(session, true) && run_namespace(session, wg_up, -1) == 0;
+    success = success && write_atomic(session->plan.root_rules_path, root_rules) && firewall_resource(session, true) &&
+        run_namespace(session, wg_up, -1) == 0 && run_namespace(session, overlay, -1) == 0 &&
+        run_namespace(session, virtual_routes, -1) == 0 && run_namespace(session, lan_route, -1) == 0 &&
+        run_namespace(session, lan_rule, -1) == 0 && run_namespace(session, forwarding, -1) == 0;
     if (!success) { edge_vpn_shutdown(session); set_error(error, error_size, "cannot apply platform-isolated VPN"); return false; }
     session->enabled = true; session->applied_version = request->config_version; session->traffic.primed = false;
     (void)collect_transfer(session);
