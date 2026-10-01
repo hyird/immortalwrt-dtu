@@ -148,6 +148,7 @@ struct edge_acquisition_device {
     bool local_io_seen[6];
     int64_t last_sample_failure_log_ms;
     int64_t last_queue_failure_log_ms;
+    int64_t last_report_success_log_ms;
     char last_error[128];
     bool has_last_io_result;
     bool s7_handshake_logged;
@@ -2842,13 +2843,22 @@ static bool publish_derived_expiry(edge_acquisition_device *device) {
 static void log_report_result(edge_acquisition_device *device,
                               edge_local_report_result result, size_t frames) {
     const int64_t now = current_ms();
-    if (result == EDGE_LOCAL_REPORT_QUEUED ||
-        device->last_queue_failure_log_ms == 0 ||
-        now - device->last_queue_failure_log_ms >= EDGE_IO_LOG_REPEAT_MS) {
+    if (result == EDGE_LOCAL_REPORT_QUEUED) {
+        if (device->last_queue_failure_log_ms != 0 ||
+            device->last_report_success_log_ms == 0 ||
+            now - device->last_report_success_log_ms >= EDGE_IO_LOG_REPEAT_MS) {
+            edge_log_local_report(device->platform_id, device->config->device_id.bytes,
+                                  (unsigned)device->config->protocol, result,
+                                  (unsigned)device->point_count, (unsigned)frames);
+            device->last_report_success_log_ms = now;
+        }
+        device->last_queue_failure_log_ms = 0;
+    } else if (device->last_queue_failure_log_ms == 0 ||
+               now - device->last_queue_failure_log_ms >= EDGE_IO_LOG_REPEAT_MS) {
         edge_log_local_report(device->platform_id, device->config->device_id.bytes,
                               (unsigned)device->config->protocol, result,
                               (unsigned)device->point_count, (unsigned)frames);
-        device->last_queue_failure_log_ms = result == EDGE_LOCAL_REPORT_QUEUED ? 0 : now;
+        device->last_queue_failure_log_ms = now;
     }
 }
 
