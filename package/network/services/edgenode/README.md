@@ -4,11 +4,12 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
-## 本地采集诊断（0.3.67）
+## 本地故障诊断（0.3.68）
 
-- 节点默认在 `/tmp/edgenode/logs/acquisition.log` 常驻记录配置应用、采集连接、S7 握手、读取状态变化及失败的最多每分钟一次摘要，以及完整上报成功入队和入队失败的摘要。不依赖临时日志级别，不发送这些记录到平台，也不由节点日志 API 读取。
-- TSV 字段依次为毫秒时间戳、平台 UUID、设备 UUID、固定事件、结果编号、点数、帧数。`io-*` 结果编号为 0 正常、1 无响应、2 离线、3 协议错误、4 指令开始超时；`report-*` 结果编号为 0 已入队、1 帧数超限、2 内存分配失败、3 空记录、4 入队失败；`config-applied` 的后三列改为扫描间隔（毫秒）、上报间隔（秒）、0。记录不含 PLC 原始报文、测点值、地址、设备名、连接端点或凭据。单文件不超过 256 KiB，轮转最多四份，`/tmp` 空间余量不足时停止写入，不占满设备内存。
-- 日志记录的“入队成功”不代表平台已确认或持久化；节点离线、应用 ACK 和平台数据库故障仍需分别对照 outbox 和平台历史数据。日志在 tmpfs，设备重启会清空；当前已部署 0.3.65 的历史空档无法事后补出故障原因。
+- `/tmp/edgenode/logs/acquisition.log` 默认记录全部六种采集协议：SL651、Modbus RTU/TCP、S7、MC、FINS、DLT645。记录配置应用、连接和握手、帧解析、测点不完整、读错误、报告构造和 Worker IPC、父进程 outbox 入队／发送及 ACK 超时；写命令失败仅记录结果及“已开始／已确认”标志，不把超时记成确定未执行。被动 SL651 收帧损坏、缓冲区溢出、拼包与发送失败也记脱敏原因码。DTU、VPN、固件升级、蜂窝模块及网络配置的可观测操作失败另有固定事件码。不会为了记日志增加 PLC 请求、自动重发写或更改协议行为。
+- TSV 字段依次为毫秒时间戳、平台 UUID、设备 UUID、协议码（0=非设备事件，1=SL651，2=Modbus，3=S7，4=MC，5=FINS，6=DLT645）、固定事件、原因码、点数、帧数。`io-*` 原因码为 0 正常、1 无响应、2 离线、3 协议错误、4 写命令开始超时；`report-*` 原因码为 0 Worker 已入队、1 帧数超限、2 内存分配失败、3 空记录、4 入队失败、5 无法解码；`config-applied` 的后三列为扫描间隔（毫秒）、上报间隔（秒）、传输码（1=以太网，2=串口）；Modbus 可据此区分 TCP 与 RTU。`parent-outbox` 原因码 0 表示节点本地 outbox 已接收，1/2/3 分别为无效遥测、封装失败、落盘入队失败，4/5/6 分别为命令结果无效、封装失败、落盘入队失败；它不代表平台已持久化或已 ACK。`sample-incomplete` 的原因码是缺失点数；`protocol-decode` 对 Modbus/S7 读响应保留 `(解析结果 << 8) | 异常码`，工业协议 1/2 表示无效响应／长度超限，3 为 Modbus 点提取失败，4/5 为 S7 COTP／握手响应无效，7 为写点不存在。`capture-failed` 的 1/2 为帧长度超限／内存不足。
+- `sl651-frame`、`sl651-buffer`、`sl651-report` 的原因码为 1 帧无效、2 缓冲区溢出、3 分配失败、4 报文内容无效、5 发送失败、6 等待超时。`network-failed` 的 1/2/3 为平台连接／应用握手／ACK 超时，4 为 SL651 链路断开，5/6 为采集 Worker 异常退出／看门狗重启，8 为串口配置失败；WebSocket 关闭则记录标准关闭码。`outbox-send` 的 1 为发送失败、2 为 ACK 超时，`outbox-corrupt` 的 1 为本地消息无法解码，`outbox-evicted` 的 1 为容量上限下丢弃旧消息。`command-failed` 的原因码高位为内部写结果编号、低两位分别表示是否已发起南向写和是否收到写 ACK，**不能**由超时推断 PLC 未执行。
+- 仅写节点本地日志，不自动上传，也不由节点日志 API 读取。记录不含 PLC 原始报文、测点值、地址、设备名、网络端点或凭据。同一设备和原因的持续失败最多每分钟记一次（合并重复事件，不保证逐次计数）；单文件不超过 256 KiB、最多四份。`/tmp` 余量不足时停止写入，重启会清空，因此无法承诺记录内核故障、异常断电或设备尚未升级前的历史错误。节点已入队、平台收到和数据库确认须分别以本地 outbox 和平台证据验证。
 
 ## 到期报告持续尝试（0.3.66）
 

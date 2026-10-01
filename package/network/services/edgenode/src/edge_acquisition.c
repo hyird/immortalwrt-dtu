@@ -143,6 +143,10 @@ struct edge_acquisition_device {
     int64_t last_activity_at_ms;
     edge_io_result last_io_result;
     int64_t last_io_log_ms;
+    int64_t local_io_log_ms[6];
+    edge_io_result local_io_result[6];
+    bool local_io_seen[6];
+    int64_t last_sample_failure_log_ms;
     int64_t last_queue_failure_log_ms;
     char last_error[128];
     bool has_last_io_result;
@@ -408,6 +412,18 @@ static void device_detail(const edge_acquisition_device *device, const char *ope
 static void log_io_result(edge_acquisition_device *device, edge_io_result result,
                           const char *operation) {
     const int64_t now = current_ms();
+    const unsigned stage = !strcmp(operation, "connect") ? 1U :
+        !strcmp(operation, "s7-cotp") ? 2U :
+        !strcmp(operation, "s7-setup") ? 3U :
+        !strcmp(operation, "handshake") ? 4U : 5U;
+    if (!device->local_io_seen[stage] || device->local_io_result[stage] != result ||
+        (result != EDGE_IO_OK && now - device->local_io_log_ms[stage] >= EDGE_IO_LOG_REPEAT_MS)) {
+        edge_log_local_io(device->platform_id, device->config->device_id.bytes,
+                          (unsigned)device->config->protocol, operation, (unsigned)result);
+        device->local_io_seen[stage] = true;
+        device->local_io_result[stage] = result;
+        device->local_io_log_ms[stage] = now;
+    }
     const bool repeat_failure =
         result != EDGE_IO_OK && device->last_io_log_ms > 0 &&
         now - device->last_io_log_ms >= EDGE_IO_LOG_REPEAT_MS;
@@ -427,11 +443,27 @@ static void log_io_result(edge_acquisition_device *device, edge_io_result result
              result == EDGE_IO_OK ? "ready" : "failed", io_result_name(result));
     edge_log_write(result == EDGE_IO_OK ? "info" : "warn", log_source(device),
                    message, detail);
-    edge_log_local_io(device->platform_id, device->config->device_id.bytes,
-                      operation, (unsigned)result);
     device->last_io_result = result;
     device->last_io_log_ms = now;
     device->has_last_io_result = true;
+}
+
+static void log_incomplete_sample(edge_acquisition_device *device) {
+    unsigned invalid = 0U;
+    for (size_t index = 0U; index < device->point_count; ++index)
+        invalid += !device->points[index].valid;
+    if (invalid == 0U) {
+        device->last_sample_failure_log_ms = 0;
+        return;
+    }
+    const int64_t now = current_ms();
+    if (device->last_sample_failure_log_ms == 0 ||
+        now - device->last_sample_failure_log_ms >= EDGE_IO_LOG_REPEAT_MS) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_SAMPLE_INCOMPLETE, invalid);
+        device->last_sample_failure_log_ms = now;
+    }
 }
 
 static void close_fd(int *fd) {
@@ -543,6 +575,9 @@ static void handle_link_state(edge_acquisition *acquisition, const char *name, b
             device->has_last_io_result = true;
             device->last_io_log_ms = current_ms();
             edge_log_write("warn", "network", "device network link down", detail);
+            edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                                 (unsigned)device->config->protocol,
+                                 EDGE_LOCAL_FAULT_NETWORK, 1U);
         } else {
             device->last_error[0] = '\0';
             device->has_last_io_result = false;
@@ -1360,6 +1395,9 @@ static edge_io_result handshake_acquisition(void *context) {
         return EDGE_IO_NO_RESPONSE;
     }
     if (edge_s7_parse_cotp_confirm(response, response_size) != EDGE_S7_OK) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 4U);
         debug_request_status(device, "failed", "s7_cotp_invalid", true);
         log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "s7-cotp");
         return EDGE_IO_PROTOCOL_ERROR;
@@ -1375,6 +1413,9 @@ static edge_io_result handshake_acquisition(void *context) {
     }
     if (edge_s7_parse_setup(response, response_size, reference,
                             &device->s7_pdu_length) != EDGE_S7_OK) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 5U);
         debug_request_status(device, "failed", "s7_setup_invalid", true);
         log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "s7-setup");
         return EDGE_IO_PROTOCOL_ERROR;
@@ -1398,6 +1439,8 @@ static edge_io_result device_handshake(void *context) {
         debug_acquisition_state(device, "running");
     }
     const edge_io_result result = handshake_acquisition(context);
+    if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_FINS)
+        log_io_result(device, result, "handshake");
     if (standalone) {
         finish_debug_acquisition(device, result);
         device->acquisition_active = false;
@@ -1457,11 +1500,19 @@ static void release_response(edge_acquisition_response *response) {
 static bool retain_read_response(edge_acquisition_device *device,
                                  const uint8_t *request, size_t request_size,
                                  const uint8_t *bytes, size_t size) {
-    if (size == 0U || size > 8192U || request_size > 4096U)
+    if (size == 0U || size > 8192U || request_size > 4096U) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_CAPTURE, 1U);
         return false;
+    }
     edge_acquisition_response *response = malloc(sizeof(*response) + size + request_size);
-    if (response == NULL)
+    if (response == NULL) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_CAPTURE, 2U);
         return false;
+    }
     response->references = 1U;
     response->previous = NULL;
     response->sequence = ++device->response_sequence;
@@ -1491,8 +1542,13 @@ static edge_io_result read_industrial_point(edge_acquisition_device *device,
         size_t response_size = 0, count = 0; bool more = false;
         if (!request_size) return EDGE_IO_PROTOCOL_ERROR;
         if (!exchange(device, request, request_size, response, sizeof(response), &response_size)) return EDGE_IO_NO_RESPONSE;
-        if (!edge_industrial_response(device->config, request, request_size, response, response_size,
-                data + total, capacity - total, &count, &more) || response_size > 4096 - wire_size) {
+        const bool decoded = edge_industrial_response(
+            device->config, request, request_size, response, response_size,
+            data + total, capacity - total, &count, &more);
+        if (!decoded || response_size > 4096 - wire_size) {
+            edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                                 (unsigned)device->config->protocol,
+                                 EDGE_LOCAL_FAULT_PROTOCOL_DECODE, decoded ? 2U : 1U);
             debug_request_status(device, "failed", "industrial_read_invalid", true);
             close_fd(&device->link->fd); return EDGE_IO_OFFLINE;
         }
@@ -1538,8 +1594,13 @@ static edge_io_result read_modbus_range(edge_acquisition_device *device,
         &request, response, response_size, NULL, 0U, data, capacity, data_size, &exception);
     debug_request_status(device, parsed == EDGE_MODBUS_OK ? "success" : "failed",
         parsed == EDGE_MODBUS_OK ? "" : "modbus_exception_or_invalid_response", true);
-    if (parsed != EDGE_MODBUS_OK)
+    if (parsed != EDGE_MODBUS_OK) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE,
+                             ((unsigned)parsed << 8U) | exception);
         return EDGE_IO_PROTOCOL_ERROR;
+    }
     if (!retain_read_response(device, output, output_size, response, response_size))
         return EDGE_IO_PROTOCOL_ERROR;
     return EDGE_IO_OK;
@@ -1586,8 +1647,13 @@ static edge_io_result read_s7_point(edge_acquisition_device *device,
                                                      &return_code);
     debug_request_status(device, result == EDGE_S7_OK ? "success" : "failed",
         result == EDGE_S7_OK ? "" : "s7_exception_or_invalid_response", true);
-    if (result != EDGE_S7_OK)
+    if (result != EDGE_S7_OK) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE,
+                             ((unsigned)result << 8U) | return_code);
         return EDGE_IO_PROTOCOL_ERROR;
+    }
     if (!retain_read_response(device, output, output_size, response, response_size))
         return EDGE_IO_PROTOCOL_ERROR;
     if (address.bit_access && *data_size != 0U) {
@@ -1848,8 +1914,10 @@ static void fill_point_value(edge_acquisition_device *device, edge_acquisition_p
 
 static edge_io_result read_acquisition(void *context, edge_device_sample *sample) {
     edge_acquisition_device *device = context;
-    if (!prepare_serial_task(device))
+    if (!prepare_serial_task(device)) {
+        log_io_result(device, EDGE_IO_OFFLINE, "read");
         return EDGE_IO_OFFLINE;
+    }
     bool any = false;
     for (size_t index = 0U; index < device->point_count; ++index)
         device->points[index].valid = false;
@@ -1882,13 +1950,18 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
                 uint8_t raw[EDGE_DEVICE_VALUE_MAX];
                 size_t raw_size = 0U;
                 if (!edge_modbus_extract_point(group, planned, grouped, grouped_size,
-                                                raw, sizeof(raw), &raw_size))
+                                                raw, sizeof(raw), &raw_size)) {
+                    edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                                         (unsigned)device->config->protocol,
+                                         EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 3U);
                     continue;
+                }
                 edge_acquisition_point *point = &device->points[planned->point_index];
                 fill_point_value(device, point, raw, raw_size, device->read_response);
                 any = any || point->valid;
             }
         }
+        log_incomplete_sample(device);
         log_io_result(device, EDGE_IO_OK, "read");
         sample->bytes[0] = any || device->point_count == 0U ? 1U : 0U;
         sample->size = 1U;
@@ -1908,11 +1981,13 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
         fill_point_value(device, point, raw, raw_size, device->read_response);
         if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 &&
             !point->valid) {
+            log_incomplete_sample(device);
             log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "read");
             return EDGE_IO_PROTOCOL_ERROR;
         }
         any = any || point->valid;
     }
+    log_incomplete_sample(device);
     log_io_result(device, EDGE_IO_OK, "read");
     sample->bytes[0] = any || device->point_count == 0U ? 1U : 0U;
     sample->size = 1U;
@@ -2142,11 +2217,19 @@ static edge_io_result write_acquisition(void *context,
                                              const edge_write_command *command,
                                              edge_device_sample *actual) {
     edge_acquisition_device *device = context;
-    if (!prepare_serial_task(device))
+    if (!prepare_serial_task(device)) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_NETWORK, 8U);
         return EDGE_IO_OFFLINE;
+    }
     edge_acquisition_point *point = find_point(device, command->element_id);
-    if (point == NULL)
+    if (point == NULL) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 7U);
         return EDGE_IO_PROTOCOL_ERROR;
+    }
     const edge_io_result result = point->item->which_item ==
                                           iot_edge_v1_ConfigItem_modbus_register_tag
                                       ? write_modbus(device,
@@ -2164,7 +2247,13 @@ static edge_io_result write_acquisition(void *context,
 static void update_derived_samples(edge_acquisition_device *device) {
     if (device->raw_telemetry || !device->derived) return;
     iot_edge_v1_TelemetryValue *values = calloc(device->point_count ? device->point_count : 1, sizeof(*values));
-    if (!values) { syslog(LOG_ERR, "cannot allocate derived input snapshot"); return; }
+    if (!values) {
+        syslog(LOG_ERR, "cannot allocate derived input snapshot");
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_CAPTURE, 3U);
+        return;
+    }
     size_t count = 0;
     for (size_t i = 0; i < device->point_count; ++i) if (device->points[i].valid) values[count++] = device->points[i].value;
     const int64_t now = current_ms();
@@ -2347,6 +2436,18 @@ static bool sl651_value(const iot_edge_v1_Sl651ElementConfig *element, const uin
     text[size * 2] = 0;
     return true;
 }
+static void log_report_result(edge_acquisition_device *device,
+                              edge_local_report_result result, size_t frames);
+
+static void sl651_diagnostic(void *context, edge_sl651_fault_reason reason) {
+    edge_acquisition_device *device = context;
+    edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                         (unsigned)device->config->protocol,
+                         reason == EDGE_SL651_FAULT_FRAME ? EDGE_LOCAL_FAULT_SL651_FRAME :
+                         reason == EDGE_SL651_FAULT_OVERFLOW ? EDGE_LOCAL_FAULT_SL651_BUFFER :
+                         EDGE_LOCAL_FAULT_SL651_REPORT, (unsigned)reason);
+}
+
 static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *frame) {
     edge_acquisition_device *device = context;
     if (device->sl651_token != token) {
@@ -2374,8 +2475,10 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     }
     iot_edge_v1_TelemetryValue *values =
         calloc((device->point_count ? device->point_count : 1) + edge_derived_count(device->derived), sizeof(*values));
-    if (!values)
+    if (!values) {
+        log_report_result(device, EDGE_LOCAL_REPORT_ALLOCATION, 0U);
         return false;
+    }
     size_t count = 0, binary_size = 0;
     if (!raw_report) {
     for (size_t i = 0; i < device->point_count; ++i) {
@@ -2411,6 +2514,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             free(values);
             copy_text(device->last_error, sizeof(device->last_error),
                       "SL651 value exceeds telemetry encoding or is invalid");
+            log_report_result(device, EDGE_LOCAL_REPORT_INVALID, 0U);
             return false;
         }
         copy_text(value->element_id, sizeof(value->element_id), element->element_id);
@@ -2437,6 +2541,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             for (size_t j = 0; j < count; ++j)
                 free(values[j].encoded_value);
             free(values);
+            log_report_result(device, EDGE_LOCAL_REPORT_FRAME_LIMIT, 0U);
             return false;
         }
         starts[parts++] = index;
@@ -2458,6 +2563,8 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     pb_bytes_array_t **raw_requests = raw_report
         ? calloc(frame_count, sizeof(*raw_requests)) : NULL;
     bool queued = false;
+    edge_local_report_result result = frame_count == 0U
+        ? EDGE_LOCAL_REPORT_EMPTY : EDGE_LOCAL_REPORT_ALLOCATION;
     size_t raw_starts[257] = {0}, raw_parts = 0;
     if (frame_count == 0 || raw_frames == NULL || raw_ids == NULL ||
         (raw_report && !raw_requests))
@@ -2466,16 +2573,20 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     for (size_t index = 0; index < frame_count; ++index) {
         const uint8_t *bytes;
         size_t size;
-        if (!edge_sl651_report_frame(device->sl651, index, &bytes, &size))
+        if (!edge_sl651_report_frame(device->sl651, index, &bytes, &size)) {
+            result = EDGE_LOCAL_REPORT_INVALID;
             goto report_cleanup;
+        }
         const size_t request_size = raw_report && index == 0 && device->sl651_query_active
             ? device->sl651_request_size : 0;
         if (raw_bytes && raw_bytes + size + request_size + 32 > 12000) {
             raw_starts[++raw_parts] = index;
             raw_bytes = 0;
         }
-        if (raw_parts + value_parts >= 256)
+        if (raw_parts + value_parts >= 256) {
+            result = EDGE_LOCAL_REPORT_FRAME_LIMIT;
             goto report_cleanup;
+        }
         raw_frames[index] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(size));
         if (raw_frames[index] == NULL)
             goto report_cleanup;
@@ -2504,6 +2615,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     }
     device->sl651_report_encoded = true;
     queued = true;
+    result = EDGE_LOCAL_REPORT_QUEUED;
     device->observed_at_ms = sl651_observed(device, frame->body);
     device->last_activity_at_ms = current_ms();
     for (size_t part = 0; part < parts; ++part) {
@@ -2538,8 +2650,10 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             }
             record.raw_payloads_count = (pb_size_t)(raw_starts[raw_part + 1] - raw_starts[raw_part]);
         }
-        if (!worker_sl651_report(device, &record, (uint32_t)part))
+        if (!worker_sl651_report(device, &record, (uint32_t)part)) {
             queued = false;
+            result = EDGE_LOCAL_REPORT_ENQUEUE;
+        }
     }
 report_cleanup:
     if (raw_requests) { for (size_t i = 0; i < frame_count; ++i) free(raw_requests[i]); free(raw_requests); }
@@ -2556,6 +2670,7 @@ report_cleanup:
         memcpy(device->acquisition_id, frame->acquisition_id, 16);
         finish_debug_acquisition(device, EDGE_IO_OK);
     }
+    log_report_result(device, result, frame_count);
     return queued;
 }
 static void sl651_command_result(void *context, const uint8_t id[16], bool success,
@@ -2574,6 +2689,12 @@ static void sl651_command_result(void *context, const uint8_t id[16], bool succe
         device->runtime.southbound_write_started && !device->runtime.write_ack_received;
     device->sl651_result.completed_at_ms = current_ms();
     copy_text(device->sl651_result.message, sizeof(device->sl651_result.message), reason);
+    if (!success)
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_COMMAND,
+                             (device->runtime.southbound_write_started ? 2U : 0U) |
+                             (device->runtime.write_ack_received ? 1U : 0U));
     if (!success)
         for (size_t i = 0; i < device->owner->device_count; ++i) {
             edge_acquisition_device *other = &device->owner->devices[i];
@@ -2615,6 +2736,9 @@ static void sl651_poll(edge_acquisition_device *device, uint64_t now) {
         serial_observe(device->owner, device->endpoint->serial.channel,
             &device->endpoint->serial, "RX", bytes, (size_t)n);
     if (n <= 0) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_NETWORK, 4U);
         close_fd(&device->link->fd);
         for (size_t i = 0; i < device->owner->device_count; ++i)
             if (device->owner->devices[i].sl651 && device->owner->devices[i].link == device->link)
@@ -2722,7 +2846,8 @@ static void log_report_result(edge_acquisition_device *device,
         device->last_queue_failure_log_ms == 0 ||
         now - device->last_queue_failure_log_ms >= EDGE_IO_LOG_REPEAT_MS) {
         edge_log_local_report(device->platform_id, device->config->device_id.bytes,
-                              result, (unsigned)device->point_count, (unsigned)frames);
+                              (unsigned)device->config->protocol, result,
+                              (unsigned)device->point_count, (unsigned)frames);
         device->last_queue_failure_log_ms = result == EDGE_LOCAL_REPORT_QUEUED ? 0 : now;
     }
 }
@@ -2877,6 +3002,13 @@ static void device_command_complete(void *context, const uint8_t platform_id[16]
                     : "device command failed");
     output.write_ack_missing = device->runtime.southbound_write_started &&
                                !device->runtime.write_ack_received;
+    if (result != EDGE_COMMAND_SUCCEEDED)
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_COMMAND,
+                             ((unsigned)result << 2U) |
+                             (device->runtime.southbound_write_started ? 2U : 0U) |
+                             (device->runtime.write_ack_received ? 1U : 0U));
     if (device->runtime.write_ack_received &&
         result != EDGE_COMMAND_SUCCEEDED && result != EDGE_COMMAND_READBACK_MISMATCH)
         copy_text(output.message, sizeof(output.message),
@@ -2981,6 +3113,8 @@ edge_acquisition *edge_acquisition_create(
             edge_log_write("error", "acquisition",
                            "shared 32-bit command generations are not lock-free",
                            "acquisition worker disabled");
+            edge_log_local_fault(NULL, NULL, 0U,
+                                 EDGE_LOCAL_FAULT_CONFIG, 12U);
             (void)munmap(value->command_clock_generations,
                          4U * sizeof(*value->command_clock_generations));
             free(value);
@@ -3272,7 +3406,9 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                     }
                 for (size_t i = 0; i < 5; ++i)
                     station[i] = (uint8_t)((padded[i * 2] - '0') * 16 + padded[i * 2 + 1] - '0');
-                edge_sl651_callbacks callbacks = {sl651_send, sl651_report, sl651_command_result, sl651_trace};
+                edge_sl651_callbacks callbacks = {sl651_send, sl651_report,
+                                                  sl651_command_result, sl651_trace,
+                                                  sl651_diagnostic};
                 runtime->sl651 =
                     edge_sl651_create(device->sl651_response_mode, station, callbacks, runtime);
                 if (!runtime->sl651) {
@@ -3372,6 +3508,8 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
     for (size_t index = 0U; index < output; ++index)
         edge_log_local_config(devices[index].platform_id,
                               devices[index].config->device_id.bytes,
+                              (unsigned)devices[index].config->protocol,
+                              (unsigned)devices[index].endpoint->transport,
                               devices[index].runtime.io_interval_ms,
                               devices[index].config->report_interval_sec);
     return true;
@@ -3791,12 +3929,21 @@ static bool worker_sl651_report(edge_acquisition_device *device,
     message.report_part = part;
     pb_ostream_t stream =
         pb_ostream_from_buffer(message.payload.telemetry, sizeof(message.payload.telemetry));
-    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, record))
+    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, record)) {
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_WORKER_ENCODE, 1U);
         return false;
+    }
     message.payload_size = (uint32_t)stream.bytes_written;
     const size_t size = acquisition_message_size(message.payload_size);
-    return send(device->owner->worker_fd, &message, size, MSG_DONTWAIT | MSG_NOSIGNAL) ==
-           (ssize_t)size;
+    const bool sent = send(device->owner->worker_fd, &message, size,
+                           MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)size;
+    if (!sent)
+        edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
+                             (unsigned)device->config->protocol,
+                             EDGE_LOCAL_FAULT_WORKER_SEND, 1U);
+    return sent;
 }
 
 static void worker_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
@@ -3809,12 +3956,17 @@ static void worker_debug(void *context, const uint8_t platform_id[16], const iot
     pb_ostream_t stream = pb_ostream_from_buffer(message.payload.telemetry, sizeof(message.payload.telemetry));
     if (!pb_encode(&stream, iot_edge_v1_RawPacket_fields, packet)) {
         syslog(LOG_WARNING, "debug packet dropped: worker encoding limit");
+        edge_log_local_fault(platform_id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_WORKER_ENCODE, 2U);
         return;
     }
     message.payload_size = (uint32_t)stream.bytes_written;
     const size_t size = acquisition_message_size(message.payload_size);
-    if (send(acquisition->worker_fd, &message, size, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)size)
+    if (send(acquisition->worker_fd, &message, size, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)size) {
         syslog(LOG_WARNING, "debug packet dropped: acquisition worker backpressure");
+        edge_log_local_fault(platform_id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_WORKER_SEND, 3U);
+    }
 }
 
 static bool worker_telemetry(void *context,
@@ -3824,18 +3976,37 @@ static bool worker_telemetry(void *context,
     pb_ostream_t stream = pb_ostream_from_buffer(wire, sizeof(wire));
     if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, record)) {
         syslog(LOG_ERR, "cannot encode complete telemetry record: %s", PB_GET_ERROR(&stream));
+        edge_log_local_fault(platform_id,
+                             record->device_id.size == 16U ? record->device_id.bytes : NULL,
+                             (unsigned)record->protocol, EDGE_LOCAL_FAULT_WORKER_ENCODE, 1U);
         return false;
     }
     // Pointers are process-local. Transfer serialized values, never the C struct.
-    return worker_send(context, EDGE_ACQUISITION_EVENT_TELEMETRY, platform_id,
-                       wire, (uint32_t)stream.bytes_written);
+    const bool sent = worker_send(context, EDGE_ACQUISITION_EVENT_TELEMETRY,
+                                  platform_id, wire, (uint32_t)stream.bytes_written);
+    if (!sent)
+        edge_log_local_fault(platform_id,
+                             record->device_id.size == 16U ? record->device_id.bytes : NULL,
+                             (unsigned)record->protocol, EDGE_LOCAL_FAULT_WORKER_SEND, 1U);
+    return sent;
 }
 
 static bool worker_command_result(void *context,
                                   const uint8_t platform_id[16],
                                   const iot_edge_v1_CommandResult *result) {
-    return worker_send(context, EDGE_ACQUISITION_EVENT_COMMAND_RESULT, platform_id,
-                       result, sizeof(*result));
+    const bool sent = worker_send(context, EDGE_ACQUISITION_EVENT_COMMAND_RESULT,
+                                  platform_id, result, sizeof(*result));
+    if (!sent) {
+        edge_acquisition *acquisition = context;
+        const uint8_t *device_id = result->device_id.size == 16U
+            ? result->device_id.bytes : NULL;
+        edge_acquisition_device *device = device_id != NULL
+            ? find_device(acquisition, platform_id, device_id) : NULL;
+        edge_log_local_fault(platform_id, device_id,
+                             device != NULL ? (unsigned)device->config->protocol : 0U,
+                             EDGE_LOCAL_FAULT_WORKER_SEND, 2U);
+    }
+    return sent;
 }
 
 static void worker_send_command_failure(edge_acquisition *acquisition,
@@ -3859,6 +4030,11 @@ static void worker_send_command_failure(edge_acquisition *acquisition,
     result.write_ack_missing = write_started && !device->runtime.write_ack_received;
     result.completed_at_ms = current_ms();
     copy_text(result.message, sizeof(result.message), error);
+    edge_log_local_fault(platform_id,
+                         request->device_id.size == 16U ? request->device_id.bytes : NULL,
+                         device != NULL ? (unsigned)device->config->protocol : 0U,
+                         EDGE_LOCAL_FAULT_COMMAND,
+                         write_started ? 2U : 0U);
     (void)worker_command_result(acquisition, platform_id, &result);
 }
 
@@ -4252,8 +4428,12 @@ static bool worker_dtu_status(void *context, const iot_edge_v1_DtuStatus *status
     memcpy(message.platform_id, report->platform_id, 16);
     message.payload.dtu_status = *status;
     const size_t size = acquisition_message_size(sizeof(*status));
-    return send(report->acquisition->worker_fd, &message, size,
-                MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)size;
+    const bool sent = send(report->acquisition->worker_fd, &message, size,
+                           MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)size;
+    if (!sent)
+        edge_log_local_fault(report->platform_id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_DTU, 2U);
+    return sent;
 }
 
 static void dtu_supervise(edge_acquisition *acquisition, uint64_t now) {
@@ -4262,6 +4442,8 @@ static void dtu_supervise(edge_acquisition *acquisition, uint64_t now) {
         if (channel->pid > 0) {
             pid_t result = waitpid(channel->pid, NULL, WNOHANG);
             if (result == channel->pid || (result < 0 && errno == ECHILD)) {
+                edge_log_local_fault(channel->platform_id, NULL, 0U,
+                                     EDGE_LOCAL_FAULT_DTU, 3U);
                 channel->pid = 0;
                 channel->retry_at = now + 1000;
             }
@@ -4277,7 +4459,12 @@ static void dtu_supervise(edge_acquisition *acquisition, uint64_t now) {
             edge_dtu_run(&channel->config, worker_dtu_status, &report);
             _exit(1);
         }
-        if (channel->pid < 0) { channel->pid = 0; channel->retry_at = now + 1000; }
+        if (channel->pid < 0) {
+            edge_log_local_fault(channel->platform_id, NULL, 0U,
+                                 EDGE_LOCAL_FAULT_DTU, 4U);
+            channel->pid = 0;
+            channel->retry_at = now + 1000;
+        }
     }
 }
 
@@ -4294,9 +4481,12 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
     acquisition->command = worker_command_result;
     acquisition->callback_context = acquisition;
     int link_fd = open_link_monitor();
-    if (link_fd < 0)
+    if (link_fd < 0) {
         edge_log_write("warn", "network", "cannot subscribe to link events",
                        "device reconnect will rely on transport errors");
+        edge_log_local_fault(NULL, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK, 16U);
+    }
 
     bool stop = false;
     uint64_t next_tick = monotonic_milliseconds();
@@ -4318,6 +4508,8 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
             close_fd(&link_fd);
             edge_log_write("warn", "network", "link event monitor stopped",
                            "device reconnect will rely on transport errors");
+            edge_log_local_fault(NULL, NULL, 0U,
+                                 EDGE_LOCAL_FAULT_NETWORK, 17U);
         } else if (ready > 0 && link_fd >= 0 &&
                    (descriptors[1].revents & POLLIN) != 0) {
             drain_link_events(acquisition, link_fd);
@@ -4480,6 +4672,7 @@ int edge_acquisition_event_fd(const edge_acquisition *acquisition) {
 }
 
 static void worker_reaped(edge_acquisition *acquisition, uint64_t now_ms) {
+    edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_NETWORK, 5U);
     if (acquisition->worker_fd >= 0)
         close(acquisition->worker_fd);
     acquisition->worker_fd = -1;
@@ -4552,8 +4745,11 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
                     (void)send(acquisition->worker_fd, &message, acquisition_message_size(0),
                                MSG_DONTWAIT | MSG_NOSIGNAL);
                 }
-            } else
+            } else {
                 syslog(LOG_ERR, "cannot decode telemetry from acquisition worker");
+                edge_log_local_fault(message.platform_id, NULL, 0U,
+                                     EDGE_LOCAL_FAULT_PARENT_DECODE, 1U);
+            }
             pb_release(iot_edge_v1_TelemetryRecord_fields, &record);
         } else if (message.type == EDGE_ACQUISITION_EVENT_COMMAND_RESULT &&
                    message.payload_size == sizeof(message.payload.command_result)) {
@@ -4594,6 +4790,7 @@ void edge_acquisition_tick(edge_acquisition *acquisition, uint64_t now_ms) {
         now_ms - acquisition->worker_last_event_ms >= EDGE_ACQUISITION_WATCHDOG_MS) {
         edge_log_write("error", "acquisition", "acquisition worker stalled",
                        "watchdog=120s action=restart");
+        edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_NETWORK, 6U);
         (void)kill(acquisition->worker_pid, SIGKILL);
         close(acquisition->worker_fd);
         acquisition->worker_fd = -1;

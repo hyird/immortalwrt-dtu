@@ -179,7 +179,8 @@ if(UNIX)
     if(MBEDTLS_INCLUDE_DIR AND MBEDCRYPTO_LIBRARY)
         add_executable(edge_dtu_checkpoint_fixture edge_dtu_checkpoint_fixture.c
             "${EDGENODE_ROOT}/src/edge_spool.c" "${EDGENODE_ROOT}/src/edge_memory.c"
-            "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c")
+            "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c"
+            "${EDGENODE_ROOT}/src/log.c")
         target_include_directories(edge_dtu_checkpoint_fixture PRIVATE "${EDGENODE_ROOT}/src" "${MBEDTLS_INCLUDE_DIR}")
         target_link_libraries(edge_dtu_checkpoint_fixture PRIVATE edgenode_nanopb "${MBEDCRYPTO_LIBRARY}")
         target_compile_definitions(edge_dtu_checkpoint_fixture PRIVATE EDGE_SPOOL_ROOT="spool" EDGE_DTU_CONFIG_ROOT="checkpoints")

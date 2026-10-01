@@ -218,6 +218,10 @@ struct edge_sl651_session {
     uint8_t seen_acquisitions[64][16];
     size_t seen_count, seen_next;
 };
+static void sl651_fault(edge_sl651_session *s, edge_sl651_fault_reason reason) {
+    if (s->callbacks.fault)
+        s->callbacks.fault(s->context, reason);
+}
 static void packets_free(edge_sl651_session *s) {
     if (s->packets)
         for (size_t i = 0; i < s->total; ++i) {
@@ -277,12 +281,17 @@ static bool confirm(edge_sl651_session *s, const edge_sl651_frame *f, uint8_t en
                     uint16_t seq) {
     uint8_t out[32];
     size_t n = edge_sl651_confirm(f, ending, seq, s->time, out, sizeof(out));
-    return n && s->callbacks.send(s->context, out, n, f->acquisition_id, f->packet_id);
+    const bool sent = n && s->callbacks.send(s->context, out, n,
+                                             f->acquisition_id, f->packet_id);
+    if (!sent)
+        sl651_fault(s, EDGE_SL651_FAULT_SEND);
+    return sent;
 }
 static bool missing(edge_sl651_session *s) {
     for (uint16_t i = 0; i < s->total; ++i)
         if (!s->packets[i].bytes) {
             if (s->packets[i].retries >= 2) {
+                sl651_fault(s, EDGE_SL651_FAULT_TIMEOUT);
                 query_finish(s, false, "SL651 packet timeout");
                 packets_free(s);
                 return false;
@@ -296,6 +305,7 @@ static bool missing(edge_sl651_session *s) {
 }
 static void submit(edge_sl651_session *s, const edge_sl651_frame *f, uint8_t *body, size_t n) {
     if (!report_body(body, n)) {
+        sl651_fault(s, EDGE_SL651_FAULT_BODY);
         free(body);
         return;
     }
@@ -318,6 +328,7 @@ static void submit(edge_sl651_session *s, const edge_sl651_frame *f, uint8_t *bo
     if (!f->total) {
         uint8_t *raw = malloc(f->raw_size);
         if (!raw) {
+            sl651_fault(s, EDGE_SL651_FAULT_ALLOCATION);
             free(body);
             return;
         }
@@ -349,8 +360,10 @@ static void consume_frame(edge_sl651_session *s, const edge_sl651_frame *f) {
     }
     if (!f->total) {
         uint8_t *body = malloc(f->body_size);
-        if (!body)
+        if (!body) {
+            sl651_fault(s, EDGE_SL651_FAULT_ALLOCATION);
             return;
+        }
         memcpy(body, f->body, f->body_size);
         submit(s, f, body, f->body_size);
         return;
@@ -362,8 +375,10 @@ static void consume_frame(edge_sl651_session *s, const edge_sl651_frame *f) {
         packets_free(s);
     if (!s->packets) {
         s->packets = calloc(f->total, sizeof(*s->packets));
-        if (!s->packets)
+        if (!s->packets) {
+            sl651_fault(s, EDGE_SL651_FAULT_ALLOCATION);
             return;
+        }
         s->total = f->total;
         s->header = *f;
         s->header.body = NULL;
@@ -375,15 +390,19 @@ static void consume_frame(edge_sl651_session *s, const edge_sl651_frame *f) {
             return;
     } else {
         if (!f->body_size || f->body_size > EDGE_SL651_BODY_MAX - s->assembled_size) {
+            sl651_fault(s, EDGE_SL651_FAULT_BODY);
             query_finish(s, false, "SL651 body limit");
             packets_free(s);
             return;
         }
         packet->bytes = malloc(f->body_size);
-        if (!packet->bytes)
+        if (!packet->bytes) {
+            sl651_fault(s, EDGE_SL651_FAULT_ALLOCATION);
             return;
+        }
         packet->raw = malloc(f->raw_size);
         if (!packet->raw) {
+            sl651_fault(s, EDGE_SL651_FAULT_ALLOCATION);
             free(packet->bytes);
             packet->bytes = NULL;
             return;
@@ -413,8 +432,10 @@ static void consume_frame(edge_sl651_session *s, const edge_sl651_frame *f) {
         return;
     }
     uint8_t *body = malloc(s->assembled_size);
-    if (!body)
+    if (!body) {
+        sl651_fault(s, EDGE_SL651_FAULT_ALLOCATION);
         return;
+    }
     size_t offset = 0;
     for (size_t i = 0; i < s->total; ++i) {
         memcpy(body + offset, s->packets[i].bytes, s->packets[i].size);
@@ -450,8 +471,12 @@ static void drain(edge_sl651_session *s) {
                         memcpy(acquisition_id, s->seen_acquisitions[i], 16);
             }
         }
-        if (s->callbacks.trace && !memcmp(s->receive + 3, s->station, 5))
-            s->callbacks.trace(s->context, s->receive, n, packet_id, acquisition_id);
+        if (!memcmp(s->receive + 3, s->station, 5)) {
+            if (!valid)
+                sl651_fault(s, EDGE_SL651_FAULT_FRAME);
+            if (s->callbacks.trace)
+                s->callbacks.trace(s->context, s->receive, n, packet_id, acquisition_id);
+        }
         if (valid) {
             memcpy(frame.packet_id, packet_id, 16);
             memcpy(frame.acquisition_id, acquisition_id, 16);
@@ -468,6 +493,7 @@ void edge_sl651_receive(edge_sl651_session *s, const uint8_t *p, size_t n, uint6
     s->now = now;
     memcpy(s->time, time, 6);
     if (n > sizeof(s->receive) - s->receive_size) {
+        sl651_fault(s, EDGE_SL651_FAULT_OVERFLOW);
         edge_sl651_reset(s);
         return;
     }
@@ -531,10 +557,13 @@ void edge_sl651_tick(edge_sl651_session *s, uint64_t now, const uint8_t time[6])
     if (s->querying && !s->awaiting_commit && now >= s->query_deadline) {
         if (s->packet_deadline)
             s->query_deadline = now + 30000;
-        else if (s->retries >= 2)
+        else if (s->retries >= 2) {
+            sl651_fault(s, EDGE_SL651_FAULT_TIMEOUT);
             query_finish(s, false, "SL651 query timeout");
-        else {
-            (void)s->callbacks.send(s->context, s->query, s->query_size, s->command_id, NULL);
+        } else {
+            if (!s->callbacks.send(s->context, s->query, s->query_size,
+                                   s->command_id, NULL))
+                sl651_fault(s, EDGE_SL651_FAULT_SEND);
             ++s->retries;
             s->query_deadline = now + s->timeout;
         }
@@ -572,8 +601,10 @@ bool edge_sl651_query(edge_sl651_session *s, const uint8_t id[16], uint8_t funct
     header.function = function;
     s->query_size =
         downlink(&header, 5, header.total, content, size + 8, s->query, sizeof(s->query));
-    if (!s->query_size || !s->callbacks.send(s->context, s->query, s->query_size, id, NULL))
+    if (!s->query_size || !s->callbacks.send(s->context, s->query, s->query_size, id, NULL)) {
+        sl651_fault(s, EDGE_SL651_FAULT_SEND);
         return false;
+    }
     s->command_requested = s->command_persisted = false;
     s->querying = true;
     s->query_function = function;

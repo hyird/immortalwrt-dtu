@@ -18,6 +18,7 @@
 #include "edge.pb.h"
 #include "edge_config.h"
 #include "edge_protocol.h"
+#include "log.h"
 #include "edge_sha256.h"
 
 #define EDGE_TMPFS_MIN_FREE_PERCENT 15U
@@ -349,6 +350,8 @@ static bool load_outbox(edge_spool *spool) {
         if (!entry_ok) {
             unlink(path);
             syslog(LOG_WARNING, "removed invalid or over-limit tmpfs outbox message: %s", path);
+            edge_log_local_fault(spool->platform_id, NULL, 0U,
+                                 EDGE_LOCAL_FAULT_OUTBOX_CORRUPT, 2U);
         }
         free(data);
     }
@@ -482,6 +485,8 @@ bool edge_spool_init(edge_spool *spool, const uint8_t platform_id[16],
     if (!load_active(spool)) {
         syslog(LOG_WARNING, "discarded incomplete tmpfs active configuration for platform %s",
                uuid);
+        edge_log_local_fault(spool->platform_id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_CONFIG, 11U);
         edge_memory_config_free(&spool->staging_config);
         edge_memory_config_free(&spool->active_config);
         remove_tree(active);
@@ -635,6 +640,8 @@ bool edge_spool_outbox_put_priority(edge_spool *spool,
         if (!edge_spool_outbox_ack(spool, oldest_id))
             return false;
         syslog(LOG_WARNING, "platform outbox limit reached; removed oldest nanopb message");
+        edge_log_local_fault(spool->platform_id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_OUTBOX_EVICT, 1U);
     }
     char outbox[192];
     char name[36];

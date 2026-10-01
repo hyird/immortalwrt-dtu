@@ -10,6 +10,7 @@
 #include "edge_config.h"
 #include "edge_modem.h"
 #include "edge_ws.h"
+#include "log.h"
 
 static bool reload_requested;
 
@@ -29,6 +30,7 @@ int main(int argc, char **argv) {
     struct ev_loop *loop = EV_DEFAULT;
     if (loop == NULL) {
         syslog(LOG_ERR, "cannot create event loop");
+        edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_CONFIG, 1U);
         return EXIT_FAILURE;
     }
 
@@ -45,6 +47,7 @@ int main(int argc, char **argv) {
     edge_ws_app *app = calloc(1U, sizeof(*app));
     if (app == NULL) {
         syslog(LOG_ERR, "cannot allocate edge runtime");
+        edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_CONFIG, 2U);
         return EXIT_FAILURE;
     }
 
@@ -55,11 +58,13 @@ int main(int argc, char **argv) {
         char error[256];
         if (!edge_config_load(&config, error, sizeof(error))) {
             syslog(LOG_ERR, "configuration rejected: %s", error);
+            edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_CONFIG, 3U);
             exit_code = EXIT_FAILURE;
             break;
         }
         if (!edge_ws_app_init(app, loop, &config)) {
             syslog(LOG_ERR, "cannot initialize platform sessions");
+            edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_CONFIG, 4U);
             exit_code = EXIT_FAILURE;
             break;
         }

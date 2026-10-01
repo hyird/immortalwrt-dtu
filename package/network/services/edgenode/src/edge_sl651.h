@@ -19,6 +19,14 @@ typedef struct {
 } edge_sl651_frame;
 
 typedef struct edge_sl651_session edge_sl651_session;
+typedef enum {
+    EDGE_SL651_FAULT_FRAME = 1,
+    EDGE_SL651_FAULT_OVERFLOW = 2,
+    EDGE_SL651_FAULT_ALLOCATION = 3,
+    EDGE_SL651_FAULT_BODY = 4,
+    EDGE_SL651_FAULT_SEND = 5,
+    EDGE_SL651_FAULT_TIMEOUT = 6,
+} edge_sl651_fault_reason;
 typedef struct {
     bool (*send)(void *context, const uint8_t *bytes, size_t size,
                  const uint8_t acquisition_id[16], const uint8_t *reply_to_packet_id);
@@ -26,6 +34,7 @@ typedef struct {
     bool (*report)(void *context, uint64_t token, const edge_sl651_frame *frame);
     void (*command)(void *context, const uint8_t id[16], bool success, const char *reason);
     void (*trace)(void *context, const uint8_t *bytes, size_t size, uint8_t packet_id[16], uint8_t acquisition_id[16]);
+    void (*fault)(void *context, edge_sl651_fault_reason reason);
 } edge_sl651_callbacks;
 
 uint16_t edge_sl651_crc(const uint8_t *bytes, size_t size);

@@ -2056,5 +2056,24 @@ int main(void) {
         verify_complete_acquisition_record(false, (flags & 1) != 0, (flags & 2) != 0);
         verify_complete_acquisition_record(true, (flags & 1) != 0, (flags & 2) != 0);
     }
+    bool configured[7] = {false};
+    for (unsigned file = 0U; file < 4U; ++file) {
+        char path[128];
+        if (file == 0U)
+            snprintf(path, sizeof(path), "%s", local_log);
+        else
+            snprintf(path, sizeof(path), "%s.%u", local_log, file);
+        FILE *input = fopen(path, "r");
+        if (input == NULL) continue;
+        while (fgets(diagnostic, sizeof(diagnostic), input) != NULL)
+            for (unsigned protocol = 1U; protocol <= 6U; ++protocol) {
+                char event[32];
+                snprintf(event, sizeof(event), "\t%u\tconfig-applied\t", protocol);
+                configured[protocol] |= strstr(diagnostic, event) != NULL;
+            }
+        assert(fclose(input) == 0);
+    }
+    for (unsigned protocol = 1U; protocol <= 6U; ++protocol)
+        assert(configured[protocol]);
     return 0;
 }

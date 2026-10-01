@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <time.h>
@@ -24,8 +25,11 @@
 #define EDGE_LOG_DIR EDGE_LOG_ROOT "/logs"
 #define EDGE_LOG_PATH EDGE_LOG_DIR "/current.log"
 #define EDGE_LOCAL_LOG_PATH EDGE_LOG_DIR "/acquisition.log"
+#define EDGE_LOCAL_LOCK_PATH EDGE_LOG_DIR "/acquisition.lock"
 #define EDGE_LOCAL_LOG_MAX_FILES 4U
 #define EDGE_LOCAL_LOG_MAX_BYTES (256U * 1024U)
+#define EDGE_LOCAL_FAULT_CACHE_SIZE 128U
+#define EDGE_LOCAL_FAULT_REPEAT_MS 60000LL
 #define EDGE_LOG_MAX_FILE_BYTES (256U * 1024U)
 #define EDGE_LOG_MAX_FILES 16U
 #define EDGE_LOG_FREE_PERCENT 20U
@@ -38,6 +42,14 @@ static char log_level_name[9] = "silent";
 static int64_t log_deadline_ms;
 static int64_t log_refresh_ms;
 static bool log_settings_ready;
+
+typedef struct {
+  uint8_t platform[16], device[16];
+  unsigned protocol, fault, reason;
+  int64_t written_at_ms;
+} local_fault_entry;
+static local_fault_entry local_faults[EDGE_LOCAL_FAULT_CACHE_SIZE];
+static unsigned next_local_fault;
 
 static int64_t monotonic_ms(void) {
   struct timespec value;
@@ -440,57 +452,120 @@ static void hex_id(const uint8_t id[16], char output[33]) {
   output[32] = '\0';
 }
 
-static void write_local_event(const uint8_t platform_id[16],
-                              const uint8_t device_id[16], const char *event,
-                              unsigned value, unsigned points, unsigned frames) {
-  if (platform_id == NULL || device_id == NULL ||
-      !ensure_log_dir() || !tmpfs_has_reserve())
-    return;
+static bool write_local_event(const uint8_t platform_id[16],
+                              const uint8_t device_id[16], unsigned protocol,
+                              const char *event, unsigned value,
+                              unsigned points, unsigned frames) {
+  if (!ensure_log_dir() || !tmpfs_has_reserve())
+    return false;
+  static const uint8_t unknown_id[16] = {0};
+  char platform[33], device[33], line[208];
+  hex_id(platform_id != NULL ? platform_id : unknown_id, platform);
+  hex_id(device_id != NULL ? device_id : unknown_id, device);
+  const int length = snprintf(line, sizeof(line),
+      "%" PRId64 "\t%s\t%s\t%u\t%s\t%u\t%u\t%u\n",
+      now_ms(), platform, device, protocol, event, value, points, frames);
+  if (length < 0 || (size_t)length >= sizeof(line))
+    return false;
+  /* The main process and forked acquisition worker share this tmpfs journal.
+   * Serialize rotation as well as append; one write keeps each line intact. */
+  const int lock = open(EDGE_LOCAL_LOCK_PATH,
+                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (lock < 0)
+    return false;
+  if (flock(lock, LOCK_EX) != 0) {
+    (void)close(lock);
+    return false;
+  }
   if ((unsigned long)file_size(EDGE_LOCAL_LOG_PATH) >= EDGE_LOCAL_LOG_MAX_BYTES)
     rotate_local_logs();
-  char platform[33], device[33], line[176];
-  hex_id(platform_id, platform);
-  hex_id(device_id, device);
-  const int length = snprintf(line, sizeof(line),
-      "%" PRId64 "\t%s\t%s\t%s\t%u\t%u\t%u\n",
-      now_ms(), platform, device, event, value, points, frames);
-  if (length < 0 || (size_t)length >= sizeof(line))
-    return;
   const int fd = open(EDGE_LOCAL_LOG_PATH,
                       O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
-  if (fd < 0)
-    return;
+  if (fd < 0) {
+    (void)close(lock);
+    return false;
+  }
   (void)fchmod(fd, 0600);
-  (void)write(fd, line, (size_t)length);
+  const bool written = write(fd, line, (size_t)length) == length;
   (void)close(fd);
   if ((unsigned long)file_size(EDGE_LOCAL_LOG_PATH) >= EDGE_LOCAL_LOG_MAX_BYTES)
     rotate_local_logs();
+  (void)close(lock);
+  return written;
 }
 
 void edge_log_local_io(const uint8_t platform_id[16], const uint8_t device_id[16],
-                       const char *operation, unsigned result) {
+                       unsigned protocol, const char *operation, unsigned result) {
   const char *event = "io-other";
   if (operation != NULL) {
     if (strcmp(operation, "connect") == 0) event = "io-connect";
     else if (strcmp(operation, "s7-cotp") == 0) event = "io-cotp";
     else if (strcmp(operation, "s7-setup") == 0) event = "io-setup";
+    else if (strcmp(operation, "handshake") == 0) event = "io-handshake";
     else if (strcmp(operation, "read") == 0) event = "io-read";
   }
-  write_local_event(platform_id, device_id, event, result, 0U, 0U);
+  write_local_event(platform_id, device_id, protocol, event, result, 0U, 0U);
 }
 
 void edge_log_local_report(const uint8_t platform_id[16], const uint8_t device_id[16],
-                           edge_local_report_result result, unsigned points,
-                           unsigned frames) {
-  write_local_event(platform_id, device_id,
+                           unsigned protocol, edge_local_report_result result,
+                           unsigned points, unsigned frames) {
+  write_local_event(platform_id, device_id, protocol,
                     result == EDGE_LOCAL_REPORT_QUEUED ? "report-queued" : "report-failed",
                     (unsigned)result, points, frames);
 }
 
 void edge_log_local_config(const uint8_t platform_id[16], const uint8_t device_id[16],
+                           unsigned protocol, unsigned transport,
                            unsigned scan_ms, unsigned report_sec) {
-  write_local_event(platform_id, device_id, "config-applied", scan_ms,
-                    report_sec, 0U);
+  write_local_event(platform_id, device_id, protocol, "config-applied", scan_ms,
+                    report_sec, transport);
+}
+
+void edge_log_local_fault(const uint8_t platform_id[16], const uint8_t device_id[16],
+                          unsigned protocol, edge_local_fault fault, unsigned reason) {
+  static const char *const events[] = {
+      "invalid", "sample-incomplete", "sl651-frame", "sl651-buffer",
+      "sl651-report", "worker-encode", "worker-send", "parent-decode",
+      "parent-outbox", "outbox-corrupt", "outbox-send", "command-failed",
+      "network-failed", "config-failed", "outbox-evicted",
+      "protocol-decode", "capture-failed", "dtu-failed", "vpn-failed",
+      "firmware-failed", "modem-failed", "network-config-failed"};
+  if ((unsigned)fault == 0U || (unsigned)fault >= sizeof(events) / sizeof(events[0]))
+    return;
+  static const uint8_t unknown_id[16] = {0};
+  const uint8_t *platform = platform_id != NULL ? platform_id : unknown_id;
+  const uint8_t *device = device_id != NULL ? device_id : unknown_id;
+  const int64_t now = monotonic_ms();
+  if (now <= 0) {
+    (void)write_local_event(platform, device, protocol, events[(unsigned)fault],
+                            reason, 0U, 0U);
+    return;
+  }
+  for (unsigned index = 0U; index < EDGE_LOCAL_FAULT_CACHE_SIZE; ++index) {
+    local_fault_entry *entry = &local_faults[index];
+    if (entry->written_at_ms == 0 || entry->protocol != protocol ||
+        entry->fault != (unsigned)fault || entry->reason != reason ||
+        memcmp(entry->platform, platform, 16U) || memcmp(entry->device, device, 16U))
+      continue;
+    if (now >= entry->written_at_ms &&
+        now - entry->written_at_ms < EDGE_LOCAL_FAULT_REPEAT_MS)
+      return;
+    if (write_local_event(platform, device, protocol, events[(unsigned)fault],
+                          reason, 0U, 0U))
+      entry->written_at_ms = now;
+    return;
+  }
+  if (!write_local_event(platform, device, protocol, events[(unsigned)fault],
+                         reason, 0U, 0U))
+    return;
+  local_fault_entry *entry = &local_faults[next_local_fault++ % EDGE_LOCAL_FAULT_CACHE_SIZE];
+  memcpy(entry->platform, platform, 16U);
+  memcpy(entry->device, device, 16U);
+  entry->protocol = protocol;
+  entry->fault = (unsigned)fault;
+  entry->reason = reason;
+  entry->written_at_ms = now;
 }
 
 void edge_log_packet(const char *source, const char *direction,

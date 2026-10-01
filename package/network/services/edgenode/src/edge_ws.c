@@ -248,12 +248,19 @@ static void safe_copy(char *output, size_t capacity, const char *input) {
 
 static bool init_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
     uint8_t random[10];
-    if (!random_bytes(random, sizeof(random)))
+    if (!random_bytes(random, sizeof(random))) {
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_CONFIG, 8U);
         return false;
-    return edge_protocol_init_envelope(
+    }
+    const bool initialized = edge_protocol_init_envelope(
         envelope, session->config->id,
         session->enrolled ? session->node_id : NULL,
         session->session_epoch, ++session->sequence, now_ms(), random);
+    if (!initialized)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_CONFIG, 10U);
+    return initialized;
 }
 
 static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
@@ -263,9 +270,15 @@ static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
         !edge_protocol_encode(envelope, session->app->wire, sizeof(session->app->wire),
                               &wire_size, &error)) {
         syslog(LOG_ERR, "cannot encode edge envelope: %s", error != NULL ? error : "closed");
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK,
+                             session->websocket_open ? 12U : 11U);
         return false;
     }
     const bool sent = edge_ws_transport_send(&session->transport, session->app->wire, wire_size);
+    if (!sent)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK, 13U);
     /* Telemetry may update the same device state as a standalone snapshot. */
     if (sent && envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag)
         edge_report_free(&session->device_snapshot);
@@ -315,6 +328,9 @@ static void send_dtu_status(edge_ws_session *session) {
 
 static void acquisition_dtu(void *context, const uint8_t platform_id[16],
                             const iot_edge_v1_DtuStatus *status) {
+    if (status->error[0] != '\0')
+        edge_log_local_fault(platform_id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_DTU, 1U);
     edge_ws_app *app = context;
     edge_ws_session *session = session_for_platform(app, platform_id);
     if (!session) return;
@@ -379,13 +395,22 @@ static bool acquisition_telemetry(void *context,
                                   const iot_edge_v1_TelemetryRecord *record) {
     edge_ws_app *app = context;
     edge_ws_session *session = session_for_platform(app, platform_id);
-    if (session == NULL || record == NULL || record->record_id.size != 16U)
+    const uint8_t *device_id = record != NULL && record->device_id.size == 16U
+        ? record->device_id.bytes : NULL;
+    const unsigned protocol = record != NULL ? (unsigned)record->protocol : 0U;
+    if (session == NULL || record == NULL || record->record_id.size != 16U) {
+        edge_log_local_fault(platform_id, device_id, protocol,
+                             EDGE_LOCAL_FAULT_PARENT_OUTBOX, 1U);
         return false;
+    }
     uint8_t record_id[16];
     memcpy(record_id, record->record_id.bytes, sizeof(record_id));
     iot_edge_v1_Envelope *envelope = &session->app->envelope;
-    if (!init_envelope(session, envelope))
+    if (!init_envelope(session, envelope)) {
+        edge_log_local_fault(platform_id, device_id, protocol,
+                             EDGE_LOCAL_FAULT_PARENT_OUTBOX, 2U);
         return false;
+    }
     envelope->which_payload = iot_edge_v1_Envelope_telemetry_batch_tag;
     envelope->payload.telemetry_batch.records_count = 1U;
     envelope->payload.telemetry_batch.records[0] = *record;
@@ -395,6 +420,8 @@ static bool acquisition_telemetry(void *context,
     envelope->payload.telemetry_batch.records[0].values_count = 0U;
     envelope->payload.telemetry_batch.records[0].raw_payloads = NULL;
     envelope->payload.telemetry_batch.records[0].raw_payloads_count = 0U;
+    edge_log_local_fault(platform_id, device_id, protocol,
+                         EDGE_LOCAL_FAULT_PARENT_OUTBOX, queued ? 0U : 3U);
     return queued;
 }
 
@@ -403,8 +430,13 @@ static bool acquisition_command_result(void *context,
                                        const iot_edge_v1_CommandResult *result) {
     edge_ws_app *app = context;
     edge_ws_session *session = session_for_platform(app, platform_id);
-    if (session == NULL || result == NULL || result->command_id.size != 16U)
+    const uint8_t *device_id = result != NULL && result->device_id.size == 16U
+        ? result->device_id.bytes : NULL;
+    if (session == NULL || result == NULL || result->command_id.size != 16U) {
+        edge_log_local_fault(platform_id, device_id, 0U,
+                             EDGE_LOCAL_FAULT_PARENT_OUTBOX, 4U);
         return false;
+    }
     uint8_t command_id[16];
     memcpy(command_id, result->command_id.bytes, sizeof(command_id));
     char summary[160];
@@ -413,11 +445,19 @@ static bool acquisition_command_result(void *context,
     log_uuid_task(session, "device-command", command_id,
                   command_state_name(result->state), summary);
     iot_edge_v1_Envelope *envelope = &session->app->envelope;
-    if (!init_envelope(session, envelope))
+    if (!init_envelope(session, envelope)) {
+        edge_log_local_fault(platform_id, device_id, 0U,
+                             EDGE_LOCAL_FAULT_PARENT_OUTBOX, 5U);
         return false;
+    }
     envelope->which_payload = iot_edge_v1_Envelope_command_result_tag;
     envelope->payload.command_result = *result;
-    return edge_ws_app_enqueue(session->app, session->config->id, command_id, envelope);
+    const bool queued = edge_ws_app_enqueue(session->app, session->config->id,
+                                            command_id, envelope);
+    if (!queued)
+        edge_log_local_fault(platform_id, device_id, 0U,
+                             EDGE_LOCAL_FAULT_PARENT_OUTBOX, 6U);
+    return queued;
 }
 
 static void send_outbox_window(edge_ws_session *session) {
@@ -438,6 +478,8 @@ static void send_outbox_window(edge_ws_session *session) {
                                   &error)) {
             syslog(LOG_ERR, "cannot decode tmpfs outbox envelope: %s",
                    error != NULL ? error : "unknown error");
+            edge_log_local_fault(session->config->id, NULL, 0U,
+                                 EDGE_LOCAL_FAULT_OUTBOX_CORRUPT, 1U);
             (void)edge_spool_outbox_ack(&session->spool, message_id);
             continue;
         }
@@ -445,7 +487,17 @@ static void send_outbox_window(edge_ws_session *session) {
                                 session->node_id, sizeof(session->node_id));
         envelope->session_epoch = session->session_epoch;
         envelope->sequence = ++session->sequence;
+        const iot_edge_v1_TelemetryRecord *record =
+            envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag &&
+            envelope->payload.telemetry_batch.records_count != 0U
+                ? &envelope->payload.telemetry_batch.records[0] : NULL;
+        const uint8_t *device_id = record != NULL && record->device_id.size == 16U
+            ? record->device_id.bytes : NULL;
+        const unsigned protocol = record != NULL ? (unsigned)record->protocol : 0U;
         const bool sent = send_envelope(session, envelope);
+        if (!sent)
+            edge_log_local_fault(session->config->id, device_id, protocol,
+                                 EDGE_LOCAL_FAULT_OUTBOX_SEND, 1U);
         edge_protocol_release(envelope);
         if (!sent) {
             (void)edge_spool_outbox_retry(&session->spool, message_id);
@@ -682,6 +734,10 @@ static void websocket_close(void *user, int code, const char *reason) {
     snprintf(detail, sizeof(detail), "platform=%s code=%d reason=%s",
              session->config->name, code, reason != NULL ? reason : "");
     edge_log_write("warn", "ws", "platform websocket closed", detail);
+    if (code != 1000)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK,
+                             code >= 0 ? (unsigned)code : 0U);
     schedule_reconnect(session);
 }
 
@@ -966,9 +1022,15 @@ static void send_firmware_result(edge_ws_session *session, const uint8_t request
                                   iot_edge_v1_FirmwareUpdateState state,
                                   const char *message, uint64_t downloaded_bytes,
                                   uint64_t total_bytes, uint32_t progress_percent) {
+    if (state == iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_FIRMWARE, 1U);
     iot_edge_v1_Envelope *output = &session->app->envelope;
-    if (!init_envelope(session, output))
+    if (!init_envelope(session, output)) {
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_FIRMWARE, 2U);
         return;
+    }
     output->which_payload = iot_edge_v1_Envelope_firmware_update_result_tag;
     edge_protocol_set_bytes(&output->payload.firmware_update_result.request_id,
                             sizeof(output->payload.firmware_update_result.request_id.bytes),
@@ -979,7 +1041,9 @@ static void send_firmware_result(edge_ws_session *session, const uint8_t request
     output->payload.firmware_update_result.downloaded_bytes = downloaded_bytes;
     output->payload.firmware_update_result.total_bytes = total_bytes;
     output->payload.firmware_update_result.progress_percent = progress_percent;
-    send_envelope(session, output);
+    if (!send_envelope(session, output))
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_FIRMWARE, 3U);
 }
 
 static bool send_firmware_chunk_request(edge_ws_session *session, bool force) {
@@ -998,6 +1062,10 @@ static bool send_firmware_chunk_request(edge_ws_session *session, bool force) {
 static void send_network_result(edge_ws_session *session,
                                 const uint8_t request_id[16], bool success,
                                 bool rolled_back, const char *message) {
+    if (!success || rolled_back)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK_CONFIG,
+                             rolled_back ? 2U : 1U);
     iot_edge_v1_Envelope *output = &session->app->envelope;
     if (!init_envelope(session, output))
         return;
@@ -1015,6 +1083,11 @@ static void send_network_result(edge_ws_session *session,
 static void send_vpn_result(edge_ws_session *session,
                             const uint8_t request_id[16], uint64_t config_version,
                             bool applied, const char *error_message) {
+    if (!applied)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_VPN,
+                             error_message != NULL && strstr(error_message, "stale") != NULL
+                                 ? 1U : 2U);
     iot_edge_v1_Envelope *output = &session->app->envelope;
     if (!init_envelope(session, output))
         return;
@@ -1113,6 +1186,12 @@ static bool send_modem_result(edge_ws_session *session, const uint8_t request_id
     safe_copy(output->payload.modem_control_result.apn,
               sizeof(output->payload.modem_control_result.apn), apn);
     const bool sent = send_envelope(session, output);
+    if (state == iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_MODEM, (unsigned)action);
+    if (!sent)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_MODEM, 100U);
     char summary[160];
     snprintf(summary, sizeof(summary), "action=%d message=%s",
              (int)action, message != NULL ? message : "");
@@ -1506,6 +1585,8 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         !valid_origin(session, envelope)) {
         syslog(LOG_WARNING, "platform %s sent invalid nanopb envelope: %s",
                session->config->name, error != NULL ? error : "wrong origin");
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 8U);
         edge_protocol_release(envelope);
         edge_ws_transport_close(&session->transport, 1002, "invalid envelope");
         return;
@@ -1788,6 +1869,8 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         break;
     case iot_edge_v1_Envelope_enrollment_rejected_tag:
         syslog(LOG_WARNING, "platform %s enrollment rejected", session->config->name);
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK, 14U);
         edge_ws_transport_close(&session->transport, 1008,
                            "enrollment rejected");
         break;
@@ -2079,6 +2162,8 @@ static void start_connection(edge_ws_session *session) {
                                           sizeof(session->transport_url))) {
         syslog(LOG_WARNING, "platform %s has an invalid WebSocket base URL",
                session->config->name);
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_CONFIG, 9U);
         schedule_reconnect(session);
         return;
     }
@@ -2089,6 +2174,8 @@ static void start_connection(edge_ws_session *session) {
                                     session, websocket_open, websocket_message, websocket_close)) {
         syslog(LOG_WARNING, "platform %s WebSocket connect initialization failed",
                session->config->name);
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK, 15U);
         schedule_reconnect(session);
         return;
     }
@@ -2104,6 +2191,8 @@ static void reconnect_timer(struct ev_loop *loop, struct ev_timer *timer, int ev
     if (edge_retry_attempt_timed_out(&session->retry, current_ms)) {
         syslog(LOG_WARNING, "platform %s WebSocket connection attempt timed out",
                session->config->name);
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_NETWORK, 1U);
         edge_ws_transport_destroy(&session->transport);
         session->client_active = false;
         schedule_reconnect(session);
@@ -2128,6 +2217,9 @@ static void liveness_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     bool acknowledgement_stalled =
         edge_spool_outbox_timed_out(&session->spool, current_ms,
                                     EDGE_OUTBOX_ACK_TIMEOUT_MS);
+    if (acknowledgement_stalled)
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_OUTBOX_SEND, 2U);
     if (!application_stalled && acknowledgement_stalled) {
         const size_t retried = edge_memory_outbox_retry_expired(
             &session->spool.outbox, current_ms, EDGE_OUTBOX_ACK_TIMEOUT_MS, 2U);
@@ -2147,6 +2239,9 @@ static void liveness_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     snprintf(detail, sizeof(detail), "platform=%s reason=%s",
              session->config->name, reason);
     edge_log_write("warn", "ws", "platform session stalled", detail);
+    edge_log_local_fault(session->config->id, NULL, 0U,
+                         EDGE_LOCAL_FAULT_NETWORK,
+                         application_stalled ? 2U : 3U);
     edge_ws_transport_destroy(&session->transport);
     session->client_active = false;
     schedule_reconnect(session);
@@ -2184,6 +2279,8 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
                                           error, sizeof(error))) {
                 syslog(LOG_ERR, "platform %s active config rejected: %s",
                        session->config->name, error);
+                edge_log_local_fault(session->config->id, NULL, 0U,
+                                     EDGE_LOCAL_FAULT_CONFIG, 5U);
                 for (size_t cleanup = 0; cleanup <= index; ++cleanup) {
                     edge_runtime_config_free(&app->sessions[cleanup].runtime_config);
                     edge_spool_free(&app->sessions[cleanup].spool);
@@ -2230,6 +2327,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         !edge_acquisition_start(app->acquisition, acquisition_error,
                                 sizeof(acquisition_error))) {
         syslog(LOG_ERR, "shared acquisition config rejected: %s", acquisition_error);
+        edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_CONFIG, 6U);
         edge_acquisition_destroy(app->acquisition);
         app->acquisition = NULL;
         for (size_t cleanup = 0U; cleanup < config->platform_count; ++cleanup) {
@@ -2350,12 +2448,15 @@ bool edge_ws_app_enqueue(edge_ws_app *app, const uint8_t origin_platform_id[16],
         return false;
     size_t wire_size = 0U;
     const char *error = NULL;
-    if (!edge_protocol_encode(envelope, app->wire, sizeof(app->wire), &wire_size, &error) ||
-        !edge_spool_outbox_put_priority(
+    const bool encoded = edge_protocol_encode(envelope, app->wire,
+                                               sizeof(app->wire), &wire_size, &error);
+    if (!encoded || !edge_spool_outbox_put_priority(
             &session->spool, ack_id, app->wire, wire_size,
             envelope->which_payload == iot_edge_v1_Envelope_command_result_tag)) {
         syslog(LOG_ERR, "cannot queue nanopb message for origin platform %s: %s",
                session->config->name, error != NULL ? error : "tmpfs spool rejected");
+        edge_log_local_fault(origin_platform_id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_PARENT_OUTBOX, encoded ? 7U : 8U);
         return false;
     }
     send_outbox_window(session);
