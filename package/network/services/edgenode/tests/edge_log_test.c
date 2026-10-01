@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -88,7 +89,51 @@ static void test_log_lease(void) {
   edge_log_init();
 }
 
+static void test_local_diagnostics_do_not_enter_log_api(void) {
+  const char *path = "/tmp/edgenode-test-local-diagnostics/logs/acquisition.log";
+  const char *older = "/tmp/edgenode-test-local-diagnostics/logs/acquisition.log.1";
+  (void)unlink(path);
+  (void)unlink(older);
+  edge_log_init();
+  assert(strcmp(edge_log_level(), "silent") == 0);
+  const uint8_t platform[16] = {0x12U}, device[16] = {0x34U};
+  edge_log_local_config(platform, device, 1000U, 300U);
+  edge_log_local_io(platform, device, "read", 2U);
+  edge_log_local_report(platform, device, EDGE_LOCAL_REPORT_ENQUEUE, 11U, 22U);
+  edge_log_local_report(platform, device, EDGE_LOCAL_REPORT_QUEUED, 11U, 22U);
+  struct stat info;
+  assert(stat(path, &info) == 0 && (info.st_mode & 0777) == 0600);
+  FILE *input = fopen(path, "r");
+  assert(input != NULL);
+  char lines[512] = {0};
+  const size_t read = fread(lines, 1U, sizeof(lines) - 1U, input);
+  assert(read != 0U && fclose(input) == 0);
+  assert(strstr(lines, "12000000") != NULL && strstr(lines, "34000000") != NULL);
+  assert(strstr(lines, "\tconfig-applied\t1000\t300\t0\n") != NULL);
+  assert(strstr(lines, "\tio-read\t2\t0\t0\n") != NULL);
+  assert(strstr(lines, "\treport-failed\t4\t11\t22\n") != NULL);
+  assert(strstr(lines, "\treport-queued\t0\t11\t22\n") != NULL);
+  assert(strstr(lines, "data=") == NULL && strstr(lines, "endpoint=") == NULL);
+  iot_edge_v1_LogRequest request = iot_edge_v1_LogRequest_init_zero;
+  iot_edge_v1_LogResult result = iot_edge_v1_LogResult_init_zero;
+  edge_log_query(&request, &result);
+  assert(result.success && result.lines_count == 0U);
+  for (unsigned i = 0U; i < 4000U; ++i)
+    edge_log_local_io(platform, device, "not-a-real-operation secret", 2U);
+  assert(stat(path, &info) == 0 && info.st_size <= 256 * 1024);
+  assert(stat(older, &info) == 0 && (info.st_mode & 0777) == 0600);
+  input = fopen(path, "r");
+  assert(input != NULL);
+  memset(lines, 0, sizeof(lines));
+  assert(fread(lines, 1U, sizeof(lines) - 1U, input) != 0U);
+  fclose(input);
+  assert(strstr(lines, "secret") == NULL);
+  (void)unlink(path);
+  (void)unlink(older);
+}
+
 int main(void) {
   test_log_lease();
+  test_local_diagnostics_do_not_enter_log_api();
   return 0;
 }

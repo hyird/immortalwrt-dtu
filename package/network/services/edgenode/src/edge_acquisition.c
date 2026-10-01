@@ -143,6 +143,7 @@ struct edge_acquisition_device {
     int64_t last_activity_at_ms;
     edge_io_result last_io_result;
     int64_t last_io_log_ms;
+    int64_t last_queue_failure_log_ms;
     char last_error[128];
     bool has_last_io_result;
     bool s7_handshake_logged;
@@ -426,6 +427,8 @@ static void log_io_result(edge_acquisition_device *device, edge_io_result result
              result == EDGE_IO_OK ? "ready" : "failed", io_result_name(result));
     edge_log_write(result == EDGE_IO_OK ? "info" : "warn", log_source(device),
                    message, detail);
+    edge_log_local_io(device->platform_id, device->config->device_id.bytes,
+                      operation, (unsigned)result);
     device->last_io_result = result;
     device->last_io_log_ms = now;
     device->has_last_io_result = true;
@@ -2712,10 +2715,23 @@ static bool publish_derived_expiry(edge_acquisition_device *device) {
     return true;
 }
 
+static void log_report_result(edge_acquisition_device *device,
+                              edge_local_report_result result, size_t frames) {
+    const int64_t now = current_ms();
+    if (result == EDGE_LOCAL_REPORT_QUEUED ||
+        device->last_queue_failure_log_ms == 0 ||
+        now - device->last_queue_failure_log_ms >= EDGE_IO_LOG_REPEAT_MS) {
+        edge_log_local_report(device->platform_id, device->config->device_id.bytes,
+                              result, (unsigned)device->point_count, (unsigned)frames);
+        device->last_queue_failure_log_ms = result == EDGE_LOCAL_REPORT_QUEUED ? 0 : now;
+    }
+}
+
 static bool device_report(void *context, const uint8_t platform_id[16],
                           const uint8_t device_id[16], const edge_device_sample *sample) {
     edge_acquisition_device *device = context;
     bool queued = false;
+    edge_local_report_result result = EDGE_LOCAL_REPORT_ALLOCATION;
     (void)sample;
     iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
     const size_t capacity = device->point_count;
@@ -2724,7 +2740,14 @@ static bool device_report(void *context, const uint8_t platform_id[16],
         if (device->points[index].valid)
             for (const edge_acquisition_response *part = device->points[index].response; part; part = part->previous)
                 ++raw_capacity;
-    if (raw_capacity > 512) { syslog(LOG_ERR, "acquisition cycle exceeds raw packet limit"); return false; }
+    if (raw_capacity > 512) {
+        log_report_result(device, EDGE_LOCAL_REPORT_FRAME_LIMIT, raw_capacity);
+        return false;
+    }
+    if (raw_capacity == 0) {
+        log_report_result(device, EDGE_LOCAL_REPORT_EMPTY, 0);
+        return false;
+    }
     if (!device->raw_telemetry)
         record.values = calloc(capacity + edge_derived_count(device->derived), sizeof(*record.values));
     record.raw_payloads = calloc(raw_capacity, sizeof(*record.raw_payloads));
@@ -2773,6 +2796,7 @@ static bool device_report(void *context, const uint8_t platform_id[16],
     }
     record.raw_packet_ids_count = record.raw_payloads_count;
     if (device->raw_telemetry) record.raw_requests_count = record.raw_payloads_count;
+    result = EDGE_LOCAL_REPORT_EMPTY;
     if ((!device->raw_telemetry && !record.values_count) || !record.raw_payloads_count) goto cleanup;
     record.observed_at_ms = responses[0]->observed_at_ms;
     device->observed_at_ms = responses[record.raw_payloads_count-1]->observed_at_ms;
@@ -2793,9 +2817,12 @@ static bool device_report(void *context, const uint8_t platform_id[16],
         edge_derived_values(device->derived, record.values + record.values_count);
         record.values_count += (pb_size_t)edge_derived_count(device->derived);
     }
+    result = EDGE_LOCAL_REPORT_ENQUEUE;
     queued = publish_acquisition_cycle(device, platform_id, &record);
     if (!queued)
         syslog(LOG_ERR, "cannot queue complete acquisition cycle");
+    else
+        result = EDGE_LOCAL_REPORT_QUEUED;
 cleanup:
     for (size_t index = 0; index < raw_capacity; ++index) {
         if (record.raw_payloads) free(record.raw_payloads[index]);
@@ -2803,6 +2830,8 @@ cleanup:
         if (record.raw_packet_ids) free(record.raw_packet_ids[index]);
     }
     free(responses); free(record.raw_payloads); free(record.raw_requests); free(record.raw_packet_ids); free(record.values);
+    log_report_result(device, result,
+                      record.raw_payloads_count ? record.raw_payloads_count : raw_capacity);
     return queued;
 }
 
@@ -3340,6 +3369,11 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
     snprintf(detail, sizeof(detail), "platforms=%zu devices=%zu resources=%zu",
              source_count, output, link_count);
     edge_log_write("info", "config", "acquisition config applied", detail);
+    for (size_t index = 0U; index < output; ++index)
+        edge_log_local_config(devices[index].platform_id,
+                              devices[index].config->device_id.bytes,
+                              devices[index].runtime.io_interval_ms,
+                              devices[index].config->report_interval_sec);
     return true;
 }
 

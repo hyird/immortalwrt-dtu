@@ -1,6 +1,7 @@
 #include "log.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,9 +15,17 @@
 
 #include "edge_protocol.h"
 
+#ifndef EDGE_LOG_ROOT
 #define EDGE_LOG_ROOT "/tmp/edgenode"
+#endif
+#ifndef EDGE_LOG_SPACE_PATH
+#define EDGE_LOG_SPACE_PATH "/tmp"
+#endif
 #define EDGE_LOG_DIR EDGE_LOG_ROOT "/logs"
 #define EDGE_LOG_PATH EDGE_LOG_DIR "/current.log"
+#define EDGE_LOCAL_LOG_PATH EDGE_LOG_DIR "/acquisition.log"
+#define EDGE_LOCAL_LOG_MAX_FILES 4U
+#define EDGE_LOCAL_LOG_MAX_BYTES (256U * 1024U)
 #define EDGE_LOG_MAX_FILE_BYTES (256U * 1024U)
 #define EDGE_LOG_MAX_FILES 16U
 #define EDGE_LOG_FREE_PERCENT 20U
@@ -101,7 +110,7 @@ static off_t file_size(const char *path) {
 
 static bool tmpfs_has_reserve(void) {
   struct statvfs fs;
-  if (statvfs("/tmp", &fs) != 0 || fs.f_blocks == 0U)
+  if (statvfs(EDGE_LOG_SPACE_PATH, &fs) != 0 || fs.f_blocks == 0U)
     return true;
   const unsigned long long available =
       (unsigned long long)fs.f_bavail * (unsigned long long)fs.f_frsize;
@@ -402,6 +411,86 @@ void edge_log_write(const char *level, const char *source, const char *message,
   if ((unsigned long)file_size(EDGE_LOG_PATH) >= EDGE_LOG_MAX_FILE_BYTES)
     rotate_logs();
   enforce_space_reserve();
+}
+
+static void local_log_path(unsigned index, char *path, size_t size) {
+  if (index == 0U)
+    snprintf(path, size, "%s", EDGE_LOCAL_LOG_PATH);
+  else
+    snprintf(path, size, "%s.%u", EDGE_LOCAL_LOG_PATH, index);
+}
+
+static void rotate_local_logs(void) {
+  char from[128], to[128];
+  local_log_path(EDGE_LOCAL_LOG_MAX_FILES - 1U, to, sizeof(to));
+  (void)unlink(to);
+  for (unsigned index = EDGE_LOCAL_LOG_MAX_FILES - 1U; index > 0U; --index) {
+    local_log_path(index - 1U, from, sizeof(from));
+    local_log_path(index, to, sizeof(to));
+    (void)rename(from, to);
+  }
+}
+
+static void hex_id(const uint8_t id[16], char output[33]) {
+  static const char digits[] = "0123456789abcdef";
+  for (unsigned index = 0U; index < 16U; ++index) {
+    output[index * 2U] = digits[id[index] >> 4U];
+    output[index * 2U + 1U] = digits[id[index] & 15U];
+  }
+  output[32] = '\0';
+}
+
+static void write_local_event(const uint8_t platform_id[16],
+                              const uint8_t device_id[16], const char *event,
+                              unsigned value, unsigned points, unsigned frames) {
+  if (platform_id == NULL || device_id == NULL ||
+      !ensure_log_dir() || !tmpfs_has_reserve())
+    return;
+  if ((unsigned long)file_size(EDGE_LOCAL_LOG_PATH) >= EDGE_LOCAL_LOG_MAX_BYTES)
+    rotate_local_logs();
+  char platform[33], device[33], line[176];
+  hex_id(platform_id, platform);
+  hex_id(device_id, device);
+  const int length = snprintf(line, sizeof(line),
+      "%" PRId64 "\t%s\t%s\t%s\t%u\t%u\t%u\n",
+      now_ms(), platform, device, event, value, points, frames);
+  if (length < 0 || (size_t)length >= sizeof(line))
+    return;
+  const int fd = open(EDGE_LOCAL_LOG_PATH,
+                      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return;
+  (void)fchmod(fd, 0600);
+  (void)write(fd, line, (size_t)length);
+  (void)close(fd);
+  if ((unsigned long)file_size(EDGE_LOCAL_LOG_PATH) >= EDGE_LOCAL_LOG_MAX_BYTES)
+    rotate_local_logs();
+}
+
+void edge_log_local_io(const uint8_t platform_id[16], const uint8_t device_id[16],
+                       const char *operation, unsigned result) {
+  const char *event = "io-other";
+  if (operation != NULL) {
+    if (strcmp(operation, "connect") == 0) event = "io-connect";
+    else if (strcmp(operation, "s7-cotp") == 0) event = "io-cotp";
+    else if (strcmp(operation, "s7-setup") == 0) event = "io-setup";
+    else if (strcmp(operation, "read") == 0) event = "io-read";
+  }
+  write_local_event(platform_id, device_id, event, result, 0U, 0U);
+}
+
+void edge_log_local_report(const uint8_t platform_id[16], const uint8_t device_id[16],
+                           edge_local_report_result result, unsigned points,
+                           unsigned frames) {
+  write_local_event(platform_id, device_id,
+                    result == EDGE_LOCAL_REPORT_QUEUED ? "report-queued" : "report-failed",
+                    (unsigned)result, points, frames);
+}
+
+void edge_log_local_config(const uint8_t platform_id[16], const uint8_t device_id[16],
+                           unsigned scan_ms, unsigned report_sec) {
+  write_local_event(platform_id, device_id, "config-applied", scan_ms,
+                    report_sec, 0U);
 }
 
 void edge_log_packet(const char *source, const char *direction,

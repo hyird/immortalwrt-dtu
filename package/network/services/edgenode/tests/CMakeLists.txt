@@ -221,7 +221,9 @@ if(UNIX)
         "${EDGENODE_ROOT}/src/log.c"
         "${EDGENODE_ROOT}/src/edge_protocol.c")
     target_compile_definitions(edge_log_test PRIVATE
-        clock_gettime=edge_log_test_clock_gettime)
+        clock_gettime=edge_log_test_clock_gettime
+        EDGE_LOG_ROOT=\"/tmp/edgenode-test-local-diagnostics\"
+        EDGE_LOG_SPACE_PATH=\"/\")
     target_compile_options(edge_log_test PRIVATE -UNDEBUG)
     target_include_directories(edge_log_test PRIVATE "${EDGENODE_ROOT}/src")
     target_link_libraries(edge_log_test PRIVATE edgenode_nanopb)

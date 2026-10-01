@@ -4,6 +4,12 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
+## 本地采集诊断（0.3.67）
+
+- 节点默认在 `/tmp/edgenode/logs/acquisition.log` 常驻记录配置应用、采集连接、S7 握手、读取状态变化及失败的最多每分钟一次摘要，以及完整上报成功入队和入队失败的摘要。不依赖临时日志级别，不发送这些记录到平台，也不由节点日志 API 读取。
+- TSV 字段依次为毫秒时间戳、平台 UUID、设备 UUID、固定事件、结果编号、点数、帧数。`io-*` 结果编号为 0 正常、1 无响应、2 离线、3 协议错误、4 指令开始超时；`report-*` 结果编号为 0 已入队、1 帧数超限、2 内存分配失败、3 空记录、4 入队失败；`config-applied` 的后三列改为扫描间隔（毫秒）、上报间隔（秒）、0。记录不含 PLC 原始报文、测点值、地址、设备名、连接端点或凭据。单文件不超过 256 KiB，轮转最多四份，`/tmp` 空间余量不足时停止写入，不占满设备内存。
+- 日志记录的“入队成功”不代表平台已确认或持久化；节点离线、应用 ACK 和平台数据库故障仍需分别对照 outbox 和平台历史数据。日志在 tmpfs，设备重启会清空；当前已部署 0.3.65 的历史空档无法事后补出故障原因。
+
 ## 到期报告持续尝试（0.3.66）
 
 - 主动采集到达普通上报期限后，只有本轮读到完整新点集并成功写入节点上报队列，才上报一次并从该成功时刻重新计算 `report_interval_sec`；本轮读取失败、写任务占用或入队失败时保留到期状态，下一采集轮继续尝试，不发送残缺或缓存的旧点集，不累积补报次数。
