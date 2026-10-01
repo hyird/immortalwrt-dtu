@@ -1948,6 +1948,12 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
             for (size_t point_index = 0U; point_index < device->modbus_point_count;
                  ++point_index) {
                 const edge_modbus_read_point *planned = &device->modbus_points[point_index];
+                if (planned->function != group->function ||
+                    planned->address < group->address ||
+                    (uint32_t)planned->address + planned->quantity >
+                        (uint32_t)group->address + group->quantity ||
+                    device->points[planned->point_index].valid)
+                    continue;
                 uint8_t raw[EDGE_DEVICE_VALUE_MAX];
                 size_t raw_size = 0U;
                 if (!edge_modbus_extract_point(group, planned, grouped, grouped_size,
@@ -1955,11 +1961,24 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
                     edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
                                          (unsigned)device->config->protocol,
                                          EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 3U);
-                    continue;
+                    log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "read");
+                    return EDGE_IO_PROTOCOL_ERROR;
                 }
                 edge_acquisition_point *point = &device->points[planned->point_index];
                 fill_point_value(device, point, raw, raw_size, device->read_response);
+                if (!point->valid) {
+                    log_incomplete_sample(device);
+                    log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "read");
+                    return EDGE_IO_PROTOCOL_ERROR;
+                }
                 any = any || point->valid;
+            }
+        }
+        for (size_t index = 0U; index < device->point_count; ++index) {
+            if (!device->points[index].valid) {
+                log_incomplete_sample(device);
+                log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "read");
+                return EDGE_IO_PROTOCOL_ERROR;
             }
         }
         log_incomplete_sample(device);
@@ -1980,8 +1999,7 @@ static edge_io_result read_acquisition(void *context, edge_device_sample *sample
             return result;
         }
         fill_point_value(device, point, raw, raw_size, device->read_response);
-        if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7 &&
-            !point->valid) {
+        if (!point->valid) {
             log_incomplete_sample(device);
             log_io_result(device, EDGE_IO_PROTOCOL_ERROR, "read");
             return EDGE_IO_PROTOCOL_ERROR;
@@ -2270,8 +2288,7 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
     debug_acquisition_state(device, "running");
     for (size_t index = 0; index < device->point_count; ++index) device->points[index].valid = false;
     const edge_io_result result = read_acquisition(context, sample);
-    if (result != EDGE_IO_OK &&
-        device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_S7) {
+    if (result != EDGE_IO_OK) {
         for (size_t index = 0; index < device->point_count; ++index)
             device->points[index].valid = false;
     } else {
