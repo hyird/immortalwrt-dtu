@@ -1992,9 +1992,27 @@ static void verify_command_expiry_while_serial_is_paused(void) {
 }
 
 int main(void) {
+    const char *local_log = "/tmp/edgenode-test-acquisition/logs/acquisition.log";
+    (void)unlink(local_log);
+    for (unsigned index = 1U; index < 4U; ++index) {
+        char older[128];
+        snprintf(older, sizeof(older), "%s.%u", local_log, index);
+        (void)unlink(older);
+    }
     verify_s7_timeout_retry_over_loopback();
     verify_s7_invalid_response_retry_over_loopback();
     verify_s7_full_and_invalid_scans();
+    FILE *local = fopen(local_log, "r");
+    assert(local != NULL);
+    bool saw_config = false, saw_read_failure = false, saw_report = false;
+    char diagnostic[240];
+    while (fgets(diagnostic, sizeof(diagnostic), local) != NULL) {
+        saw_config |= strstr(diagnostic, "\tconfig-applied\t") != NULL;
+        saw_read_failure |= strstr(diagnostic, "\tio-read\t3\t") != NULL;
+        saw_report |= strstr(diagnostic, "\treport-queued\t0\t") != NULL;
+    }
+    assert(fclose(local) == 0);
+    assert(saw_config && saw_read_failure && saw_report);
     verify_serial_debug();
     verify_worker_kill_and_old_command_not_replayed();
     iot_edge_v1_ConfigItem values[3];

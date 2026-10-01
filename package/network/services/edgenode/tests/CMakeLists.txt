@@ -243,6 +243,9 @@ if(UNIX)
         "${EDGENODE_ROOT}/src/edge_protocol.c"
         "${EDGENODE_ROOT}/src/edge_process.c"
         "${EDGENODE_ROOT}/src/log.c")
+    target_compile_definitions(edge_acquisition_test PRIVATE
+        EDGE_LOG_ROOT=\"/tmp/edgenode-test-acquisition\"
+        EDGE_LOG_SPACE_PATH=\"/\")
     target_include_directories(edge_acquisition_test PRIVATE "${EDGENODE_ROOT}/src")
     target_link_libraries(edge_acquisition_test PRIVATE edgenode_nanopb m)
     add_test(NAME edge_acquisition COMMAND edge_acquisition_test)
