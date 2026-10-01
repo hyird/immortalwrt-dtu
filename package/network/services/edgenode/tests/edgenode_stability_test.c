@@ -321,8 +321,8 @@ static void stress_device_runtime(uint64_t cycle) {
                                  (int64_t)(cycle * 4000U + tick * 1000U));
     require_true(state.connects == 1U && state.reads == 3U &&
                      state.writes == 1U && state.completions == 1U &&
-                     state.reports == 1U,
-                 "priority write must replace its scheduled read; only the fresh due sample reports");
+                     state.reports == 2U,
+                 "priority write must replace its scheduled read; initial and periodic reports use fresh samples");
     edge_device_runtime_close(&runtime);
     require_true(state.disconnects == 1U, "device runtime did not disconnect");
 }

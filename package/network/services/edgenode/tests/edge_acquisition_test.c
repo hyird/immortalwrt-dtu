@@ -412,7 +412,14 @@ static bool store_response_record(void *context, const uint8_t platform_id[16],
     assert(record->raw_requests_count == (raw_fixture ? 2U : 0U));
     for (unsigned index = 0; index < 2; ++index) {
         assert(record->raw_payloads[index]->size == expected_response_size);
-        assert(memcmp(record->raw_payloads[index]->bytes, expected_responses[index], expected_response_size) == 0);
+        for (size_t byte = 0U; byte < expected_response_size; ++byte) {
+            /* These request-correlated IDs legitimately differ between scans. */
+            if ((s7_responses && (byte == 11U || byte == 12U)) ||
+                (!s7_responses && (byte == 0U || byte == 1U)))
+                continue;
+            assert(record->raw_payloads[index]->bytes[byte] ==
+                   expected_responses[index][byte]);
+        }
         assert(record->raw_packet_ids[index]->size == 16);
         if (raw_fixture) {
             const pb_bytes_array_t *request = record->raw_requests[index];
@@ -482,7 +489,7 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     iot_edge_v1_ConfigItem values[5];
     edge_runtime_config config = make_config(values);
     values[0].item.endpoint.port = ntohs(address.sin_port);
-    values[1].item.device.report_interval_sec = 1U;
+    values[1].item.device.report_interval_sec = 300U;
     values[0].item.endpoint.debug_enabled = link_debug;
     values[1].item.device.debug_enabled = device_debug;
     values[3] = values[2];
@@ -886,7 +893,7 @@ static void verify_s7_timeout_retry_over_loopback(void) {
     assert(request[17] == 4U);
     s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_VALID);
     assert(wait_s7_activity_after(acquisition, first_activity_ms, 3000U));
-    assert(s7_test_records == 0U);
+    assert(s7_test_records == 1U); /* The initial complete scan was already enqueued. */
     edge_acquisition_stop(acquisition);
     close(fd);
     close(listener);

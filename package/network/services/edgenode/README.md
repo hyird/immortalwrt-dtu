@@ -24,15 +24,15 @@ sole source location for the OpenWrt node implementation and its node-side tests
 - 未发送且已过期或无法验证的命令拒绝（`REJECTED`）；可能已发送但无 ACK、或已获 ACK 而回读失败均记为 `UNKNOWN`，不自动重放。
 - 启用该能力前须先升级平台。保留 `0.3.44` 兼容路径，但该旧固件不提供新截止保证。
 
-## 主动轮询与遥测调度（0.3.63）
+## 主动轮询与首次遥测调度（0.3.70）
 
 - 主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 使用 `EDGE_ACQUISITION_TICK_MS=1000ms` 为目标读取间隔；平台下发更慢的 `io_interval_ms` 不再降低读取频率。该值是调度目标，不是严格实时承诺；超时、共享物理链路和平台优先级会造成延迟。迟到调度跳过过期轮次，不补跑堆积读取。
-- `report_interval_sec` 独立控制普通遥测。配置生效后的首次成功读取不立即上报；首次也要等普通到期轮，并且只上报该轮新读取成功的完整样本。读失败、无连接或写命令占用到期轮时不拿旧样本补报。
+- `report_interval_sec` 独立控制普通遥测。配置应用后，首次完整新点集在本轮立即尝试入队；不会仅因收到配置应用确认、单独主动采集或已有旧样本而上报。首次读取失败、写命令占用或遥测入队失败时保留首次待报状态，每个后续采集轮只在读到完整新点集后重试；成功入队后才从成功时刻起算 `report_interval_sec`。
 - Worker 在每次开始下一项读取前先有限量消费控制队列，并按既有平台优先级顺序优先执行已入队写任务；每轮最多插队 4 项写任务，随后仍处理当前扫描索引（同一设备刚执行过写时跳过该设备的重复普通读），不会因写任务跳过其他设备或被动 SL651 收帧。预算耗尽时，仍有待写命令的设备不执行普通读。单 Worker 的同步协议交换不可抢占：已发出的请求必须先完成或超时，之后才能写入；写请求只发送一次，不自动重放。共享物理资源仍由同一 Worker 串行操作，SL651 被动确认、DTU 透传及平台优先级规则不变。
 - 经验证的写命令可以启动快读窗口；快窗口仅在 fast due 轮成功取得新样本后上报。写入仍即时返回命令结果，不因写后回读额外发送自动遥测，也不会把写入占用到期轮的旧遥测补报。
 - 静默扫描不发自动 RawPacket、解析值或报文 debug；必要故障状态和命令结果即时上报，到期轮和显式人工调试按原路径处理。S7 TCP Client 持连及断线重连、共享串口资源和平台优先级保持原机制。
 - 被动 SL651 的确认、分包和主动上送，DTU 透传及串口监听不属于主动轮询；其既有行为不变、不受此扫描节奏约束，不丢帧。协议字段、固件身份及 0.3.44 升级兼容路径保持不变。
-- 行为变化：首次遥测延迟至 `report_interval_sec` 的首个到期轮，间隔较长时平台不再获得配置后立即样本；需要首轮遥测时应配置较短报告周期。此版本保持协议字段、固件身份和 0.3.44 兼容升级路径。
+- 行为变化：首次完整点集在配置应用后的首个成功采集轮立即尝试入队，普通后续周期从首次成功入队时起算；入队失败或采集失败时继续逐轮重试。快读窗口仍按原有到期规则运行；本版本保持协议字段、固件身份和 0.3.44 兼容升级路径。
 
 ## 临时日志级别
 
@@ -170,7 +170,7 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
   `/tmp/edgenode/<platform_id>/`; process restarts recover them, device reboots do not;
 - before every tmpfs write, the daemon preserves 15% free space by rolling the oldest
   outbox message across all platforms; active and staging config are never rolled;
-- 采集 Worker 每秒检查调度；主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 均以 1000ms 为目标读取周期，忽略更慢的 `io_interval_ms`，迟到轮次跳过且不追赶。普通遥测独立遵循 `report_interval_sec`，首次也只在首次普通到期且当轮读取成功时上报；命令结果即时返回。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
+- 采集 Worker 每秒检查调度；主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 均以 1000ms 为目标读取周期，忽略更慢的 `io_interval_ms`，迟到轮次跳过且不追赶。普通遥测独立遵循 `report_interval_sec`：配置应用后首个完整新点集立即尝试入队，成功入队后才开始计算后续周期；失败时逐轮重试，不用旧样本补报。命令结果即时返回。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
 - platforms may share a physical serial channel and use different baud/parity settings;
   the worker drains the prior request, applies the next task's serial settings, clears
   stale input, observes the RTU quiet interval, and then performs that task. TCP Server

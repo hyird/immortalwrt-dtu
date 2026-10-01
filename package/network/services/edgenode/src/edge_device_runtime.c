@@ -428,7 +428,9 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         runtime->next_fast_report_at_ms <= runtime->fast_report_until_ms &&
         schedule_ms >= runtime->next_fast_report_at_ms;
     const bool regular_report_due = schedule_ms >= runtime->next_report_at_ms;
-    const bool report_due = fast_report_due || (regular_report_due && !fast_window_active);
+    const bool initial_report_due = runtime->initial_report_pending;
+    const bool report_due = initial_report_due || fast_report_due ||
+        (regular_report_due && !fast_window_active);
     if (regular_report_due && fast_window_active)
         runtime->next_report_at_ms = advance_deadline(runtime->next_report_at_ms,
             (uint64_t)runtime->report_interval_sec * 1000U, schedule_ms);
@@ -532,7 +534,7 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         runtime->driver.report(runtime->driver_context, runtime->platform_id,
                                runtime->device_id, &runtime->latest)) {
         const uint64_t reported_at_ms = runtime_now(runtime, schedule_ms);
-        if (regular_report_due && !fast_window_active)
+        if (initial_report_due || (regular_report_due && !fast_window_active))
             runtime->next_report_at_ms = deadline_after_seconds(
                 reported_at_ms, runtime->report_interval_sec);
         if (fast_report_due && runtime->fast_report_until_ms != 0U)
