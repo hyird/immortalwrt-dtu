@@ -2,10 +2,10 @@
 
 # ImmortalWrt DTU firmware
 
-This device tree is based on the official **ImmortalWrt v25.12.2** release
-(`4fc16f2985a358bd43bb522e43f05395fcbd6ed5`), using Linux 6.12.103.
-The official packages and LuCI feeds are pinned to the exact revisions shipped
-with that release. Do not update this tree from master.
+This device tree follows the official **ImmortalWrt openwrt-25.12** stable branch,
+currently synchronized to `3682a14dd5ec6382af65d7e72b5b415b5f3173a8`
+with Linux 6.12.112. The official packages and LuCI feeds are pinned to reviewed
+`openwrt-25.12` commits in `feeds.conf.default`. Do not update this tree from master.
 
 This repository maintains three devices:
 
@@ -89,7 +89,7 @@ To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensi
   - For more details, please see [Build system setup](https://openwrt.org/docs/guide-developer/build-system/install-buildsystem) documentation.
 
   ### Quickstart
-  1. Run `git clone -b codex/immortalwrt-25.12.2 --single-branch --filter=blob:none https://github.com/hyird/immortalwrt-dtu.git` to clone this device tree.
+  1. Run `git clone -b main --single-branch --filter=blob:none https://github.com/hyird/immortalwrt-dtu.git` to clone this device tree.
   2. Run `cd immortalwrt-dtu` to enter the source directory.
   3. Run `./scripts/feeds update -a` to obtain the pinned official feeds.
   4. Run `./scripts/install-tas-feeds.sh` to install the selected packages and their dependencies.

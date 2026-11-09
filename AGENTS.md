@@ -8,14 +8,18 @@
   unrelated board targets, bootloaders or device-specific packages.
 - Maintain EdgeNode directly under `package/network/services/edgenode` and its
   LuCI application under `package/luci-app-edgenode`.
-- Base firmware on the official ImmortalWrt `v25.12.2` tag (Linux 6.12).
-  Keep `packages` and `luci` pinned to the official revisions recorded by that
-  release in `feeds.conf.default`; do not track master, add private feed forks,
-  or duplicate EdgeNode packages in a feed.
+- Base firmware on the official ImmortalWrt `openwrt-25.12` stable branch
+  (Linux 6.12). The current synchronized upstream commit is
+  `3682a14dd5ec6382af65d7e72b5b415b5f3173a8`. Review each stable-branch
+  update and preserve the device pruning and local customizations. Keep
+  `packages` and `luci` pinned in `feeds.conf.default` to reviewed commits from
+  their official `openwrt-25.12` branches; do not track master, add private
+  feed forks, or duplicate EdgeNode packages in a feed.
 - Use `main` as the default and sole maintained branch. Commit and push
   directly to `origin/main`; do not create feature or task branches.
-  Do not merge upstream master; review future
-  baseline updates against an explicitly selected official release tag.
+  Do not merge upstream master. Synchronize only the official
+  `openwrt-25.12` stable branch; changing release series requires explicit
+  user approval.
 - Every EdgeNode change must remain backward compatible with deployed firmware,
   including protocol messages, platform APIs, configuration, tasks, and upgrade
   transport. Do not remove an old path until a tested migration and compatibility
@@ -68,7 +72,7 @@
   `luci-proto-wireguard` with their dependencies.
   `scripts/libwebsockets-edgenode.patch` enables permessage-deflate, zlib and
   built-in libev in the official feed recipe without forking library sources.
-  The release's libwebsockets 4.4.1 already sets client inflater completion
+  The pinned feed's libwebsockets 4.4.1 already sets client inflater completion
   state before callbacks. Keep `scripts/libwebsockets-pmd-final.patch` as the
   historical 4.5.8 backport; do not apply it to 4.4.1. The helper checks the
   library version and pre-seeds required source packages to keep the feeds

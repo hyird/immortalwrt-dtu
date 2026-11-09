@@ -13,13 +13,13 @@ elif ! patch --dry-run --reverse -p1 -d feeds/packages < "$patch_file" >/dev/nul
     exit 1
 fi
 
-# 25.12.2 的 4.4.1 解析器已在用户回调前更新 inflater draining 状态。
+# 固定的官方稳定分支 4.4.1 解析器已在用户回调前更新 inflater draining 状态。
 # 旧 4.5.8 回移修复针对重构后的函数，不应重复应用到发布版。
 backport_source="$PWD/scripts/libwebsockets-pmd-final.patch"
 backport_target="feeds/packages/libs/libwebsockets/patches/950-edgenode-pmd-final.patch"
 lws_version=$(sed -n 's/^PKG_VERSION:=//p' feeds/packages/libs/libwebsockets/Makefile)
 if [ "$lws_version" != 4.4.1 ]; then
-    echo "Expected the 25.12.2 libwebsockets 4.4.1; review parser compatibility before updating" >&2
+    echo "Expected the pinned openwrt-25.12 libwebsockets 4.4.1; review parser compatibility before updating" >&2
     exit 1
 fi
 if [ -e "$backport_target" ]; then

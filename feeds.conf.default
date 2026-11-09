@@ -1,3 +1,3 @@
-# Official feed revisions shipped with ImmortalWrt v25.12.2.
-src-git packages https://github.com/immortalwrt/packages.git^84bd86384928955b568988ca0e09e2c78c75173d
-src-git luci https://github.com/immortalwrt/luci.git^d6167ea0645cbd1327708d85f94824f42d0eb872
+# Official openwrt-25.12 feed snapshots reviewed with core 3682a14dd5.
+src-git packages https://github.com/immortalwrt/packages.git^fa25995d74a720c1c98bf6265d3dd8b4eb620d1f
+src-git luci https://github.com/immortalwrt/luci.git^c38e5665e826f5e6e2ac9168e167ee368d0969d9
