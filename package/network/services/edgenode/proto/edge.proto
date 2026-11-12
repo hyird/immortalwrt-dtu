@@ -974,6 +974,9 @@ message ModbusGatewayPoint {
   string byte_order = 16 [(nanopb).max_length = 24];
   bool writable = 17;
   string source_address = 18 [(nanopb).max_length = 64];
+  string register_type = 19 [(nanopb).max_length = 24];
+  uint32 value_address = 20;
+  uint32 value_words = 21;
 }
 
 // Ordered zero-based source addresses, unsigned 16-bit big endian.

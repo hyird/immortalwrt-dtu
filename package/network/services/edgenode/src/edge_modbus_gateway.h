@@ -2,7 +2,7 @@
 
 #include "edge_acquisition.h"
 
-/* One persistent slot: type, quality, 64-bit value, 64-bit Unix milliseconds.
+/* One persistent slot: type, quality, up to four value words, Unix milliseconds.
  * All words and multiword values are most-significant first. */
 #define EDGE_GATEWAY_SLOT_WORDS 10U
 #define EDGE_GATEWAY_MAX_POINTS (65536U / EDGE_GATEWAY_SLOT_WORDS)

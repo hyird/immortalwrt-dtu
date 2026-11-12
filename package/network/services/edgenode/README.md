@@ -12,9 +12,11 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 `supports_modbus_gateway_order = 43` 单独声明手动排序能力。支持的平台可在表格中拖拽预览并确认目标顺序；节点按当前平台映射 SHA-256 拒绝旧快照，校验全部地址后原子保存并切换。只在参与点位原有槽位间排列，其他平台和未参与点位地址不变，缓存随点位移动。成功后关闭旧 Modbus 连接，PLC/组态需同步更新地址；日常显示排序与分组仍不改变地址。
 
-设置 `edgenode.node.modbus_gateway='1'` 并重启服务后，节点把下发配置中的物理测点和设备绑定 IO 自动映射成只读寄存器。默认关闭，监听 `edgenode.node.modbus_gateway_interface` 指定的接口，留空时使用 `hardware.lan_interface`；网桥 LAN 必须指定承载地址的桥接口（例如 `br-lan`），不能指定桥成员网口。端口由 `edgenode.node.modbus_gateway_port` 指定，默认 `502`；Unit ID 为 `1`，支持 `03/04`。不会修改防火墙。派生点、图片及文本不转换为数值。
+设置 `edgenode.node.modbus_gateway='1'` 并重启服务后，节点把下发配置中的物理测点和设备绑定 IO 自动映射成只读寄存器。默认关闭，监听 `edgenode.node.modbus_gateway_interface` 指定的接口，留空时使用 `hardware.lan_interface`；网桥 LAN 必须指定承载地址的桥接口（例如 `br-lan`），不能指定桥成员网口。端口由 `edgenode.node.modbus_gateway_port` 指定，默认 `502`；Unit ID 为 `1`，默认数值为 `4X/03` 原生类型映射，Bool 为 `1X/02` 按位映射，`3X/04` 保留旧版 64 位兼容视图。不会修改防火墙。派生点、图片及文本不转换为数值。
 
-当前地址表为 `/tmp/edgenode-modbus.csv`，按平台、设备、测点身份分配零基地址。每点占 10 个寄存器：类型（1）、质量（1）、64 位值（4）、UTC 毫秒时间（4），多字高位在前；类型 `2/3/4/5` 分别为 BOOL/INT64/UINT64/FLOAT64，质量 `0/1/2/3` 分别为未采集/有效/无效/超时。客户端必须检查质量。超时采用设备 `online_timeout_sec`，缺省 900 秒；整数保留完整 64 位，十进制文本转换为 FLOAT64。
+当前地址表为 `/tmp/edgenode-modbus.csv`，按平台、设备、测点身份分配零基地址。每点预留 10 个寄存器：类型（1）、质量（1）、最多四字数值区（4）、UTC 毫秒时间（4），多字高位在前。4X 的 Int16/UInt16 使用 1 字，Int32/UInt32/Float32 使用 2 字，Int64/UInt64/Double 使用 4 字，未使用的数值预留字为 0；Bool 在数值区使用单字 0/1，并以槽位序号提供 1X 位地址。类型码 2/3/4/5/6/7/8/9/10 分别为 Bool/Int64/UInt64/Double/Int16/UInt16/Int32/UInt32/Float32。质量 `0/1/2/3` 分别为未采集/有效/无效/超时，客户端必须检查质量。超时采用设备 `online_timeout_sec`，缺省 900 秒。整数保留完整精度；有倍率换算的 16/32 位整数及十进制结果映射为 Double，防止小数截断；越界或浮点溢出标记无效。
+
+0.3.84 改正 4X/03 的数值编码，升级前需导出映射并调整 PLC/组态的数据类型和读取数量。数值起始位置及持久文件格式不变，3X/04 保留旧版四字 64 位格式用于分步迁移；不要在新 4X 视图中继续把所有值按 64 位解释。
 
 地址预留持久化在 `/etc/edgenode-modbus.map` 并列入包配置保留清单；删除点位不挪用旧地址，恢复相同身份继续使用原地址，最多保留 6553 个身份。不要删除或重排该文件。文件损坏、写入失败、容量耗尽或与南向监听端口冲突时拒绝新配置。重启或配置切换后值缓存重新采集，寄存器地址保留。采集进程异常退出会使已有值失效；本地样本事件受阻会记录错误，旧值按超时规则失效。
 

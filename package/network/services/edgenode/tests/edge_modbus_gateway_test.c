@@ -82,7 +82,118 @@ static void test_drag_permutation(void) {
     remove(path);
 }
 
+static size_t read_native(edge_modbus_gateway *gateway, unsigned function, unsigned address,
+                           unsigned count, uint8_t response[260]) {
+    uint8_t request[12] = {0, 1, 0, 0, 0, 6, 1, 0};
+    request[7] = (uint8_t)function;
+    request[8] = (uint8_t)(address >> 8); request[9] = (uint8_t)address;
+    request[10] = (uint8_t)(count >> 8); request[11] = (uint8_t)count;
+    return edge_modbus_gateway_reply(gateway, request, sizeof(request), response, 1);
+}
+
+static void test_native_types(void) {
+    const char *path = "gateway-native-test.map";
+    remove(path);
+    const char *types[] = {"BOOL", "BOOL", "INT16", "UINT16", "INT32", "UINT32", "FLOAT32", "INT64", "UINT64", "DOUBLE"};
+    const unsigned words[] = {1,1,1,1,2,2,2,4,4,4};
+    const unsigned codes[] = {2,2,6,7,8,9,10,3,4,5};
+    const uint64_t bits[] = {1,1,0xff85,0xffff,0xfffe1dc0,UINT32_MAX,0x3fc00000,UINT64_C(0x8000000000000000),UINT64_MAX,UINT64_C(0x3ff8000000000000)};
+    uint8_t platform[16] = {1};
+    iot_edge_v1_ConfigItem items[12] = {0};
+    items[0].which_item = iot_edge_v1_ConfigItem_endpoint_tag;
+    items[0].item.endpoint.endpoint_id.size = 16;
+    items[0].item.endpoint.endpoint_id.bytes[0] = 3;
+    items[0].item.endpoint.enabled = true;
+    items[1].which_item = iot_edge_v1_ConfigItem_device_tag;
+    items[1].item.device.device_id.size = 16;
+    items[1].item.device.device_id.bytes[0] = 4;
+    items[1].item.device.endpoint_id.size = 16;
+    items[1].item.device.endpoint_id.bytes[0] = 3;
+    items[1].item.device.enabled = true;
+    for (unsigned i = 0; i < 10; ++i) {
+        items[i+2].which_item = iot_edge_v1_ConfigItem_modbus_register_tag;
+        iot_edge_v1_ModbusRegisterConfig *point = &items[i+2].item.modbus_register;
+        point->device_id.size = 16; point->device_id.bytes[0] = 4;
+        snprintf(point->element_id, sizeof(point->element_id), "typed-%u", i);
+        snprintf(point->data_type, sizeof(point->data_type), "%s", types[i]);
+        point->scale = 1; point->decimals = -1;
+    }
+    edge_runtime_config config = {.items = items, .item_count = 12};
+    edge_acquisition_source source = {.platform_id = platform, .config = &config};
+    edge_modbus_gateway *gateway = edge_modbus_gateway_prepare(path, &source, 1);
+    CHECK(gateway);
+    uint8_t response[260];
+    for (unsigned i = 0; i < 10; ++i) {
+        edge_acquisition_sample sample = {0}; sample.device_id[0] = 4;
+        snprintf(sample.element_id, sizeof(sample.element_id), "typed-%u", i);
+        iot_edge_v1_ModbusGatewayPoint point = iot_edge_v1_ModbusGatewayPoint_init_zero;
+        CHECK(edge_modbus_gateway_describe(gateway, platform, sample.device_id, sample.element_id, &point, 1));
+        CHECK(point.value_type == codes[i] && point.value_words == words[i] && point.quality == 0);
+        CHECK(point.value_address == (i < 2 ? i : i * 10 + 2));
+        CHECK(!strcmp(point.register_type, i < 2 ? "DISCRETE_INPUT" : "HOLDING_REGISTER"));
+        sample.valid = true;
+        if (i < 2) { sample.value.which_value = iot_edge_v1_ScalarValue_bool_value_tag; sample.value.value.bool_value = true; }
+        else if (i == 2 || i == 4 || i == 7) {
+            sample.value.which_value = iot_edge_v1_ScalarValue_signed_value_tag;
+            sample.value.value.signed_value = i == 2 ? -123 : i == 4 ? -123456 : INT64_MIN;
+        } else if (i == 3 || i == 5 || i == 8) {
+            sample.value.which_value = iot_edge_v1_ScalarValue_unsigned_value_tag;
+            sample.value.value.unsigned_value = i == 3 ? UINT16_MAX : i == 5 ? UINT32_MAX : UINT64_MAX;
+        } else { sample.value.which_value = iot_edge_v1_ScalarValue_double_value_tag; sample.value.value.double_value = 1.5; }
+        edge_modbus_gateway_update(gateway, platform, &sample, 1);
+        CHECK(read_native(gateway, 3, i * 10 + 2, words[i], response) == 9 + 2 * words[i]);
+        CHECK(response[8] == words[i] * 2);
+        uint64_t actual = 0;
+        for (unsigned w = 0; w < words[i]; ++w) actual = (actual << 16) | word(response + 9 + w * 2);
+        CHECK(actual == bits[i]);
+        if (words[i] < 4) {
+            CHECK(read_native(gateway, 3, i * 10 + 2 + words[i], 4 - words[i], response) == 9 + 2 * (4 - words[i]));
+            for (unsigned b = 9; b < 9 + 2 * (4 - words[i]); ++b) CHECK(response[b] == 0);
+        }
+        CHECK(edge_modbus_gateway_describe(gateway, platform, sample.device_id, sample.element_id, &point, 1));
+        CHECK(point.quality == 1);
+        if (i == 8) CHECK(!strcmp(point.value, "18446744073709551615"));
+    }
+    CHECK(read_native(gateway, 2, 0, 2, response) == 10 && response[8] == 1 && response[9] == 3);
+    CHECK(read_native(gateway, 2, 2, 1, response) == 9 && response[8] == 2);
+    CHECK(read_native(gateway, 2, 0, 0, response) == 9 && response[8] == 3);
+    CHECK(read_native(gateway, 2, 0, 2001, response) == 9 && response[8] == 3);
+    CHECK(read_native(gateway, 5, 0, 1, response) == 9 && response[8] == 1);
+    /* The input-register view remains the existing four-word 64-bit format. */
+    CHECK(read_native(gateway, 4, 62, 4, response) == 17 && word(response+9) == 0x3ff8);
+    CHECK(read_native(gateway, 4, 22, 4, response) == 17 && word(response+9) == 0xffff && word(response+15) == 0xff85);
+    /* Whole-point reordering moves the bit address as well as numeric address. */
+    iot_edge_v1_ModbusGatewayOrder order = iot_edge_v1_ModbusGatewayOrder_init_zero;
+    order.expected_digest.size = 32; order.addresses.size = 4; order.addresses.bytes[1] = 20;
+    CHECK(edge_modbus_gateway_digest(gateway, platform, order.expected_digest.bytes));
+    CHECK(edge_modbus_gateway_reorder(gateway, path, platform, &order));
+    CHECK(read_native(gateway, 2, 2, 1, response) == 10 && response[9] == 1);
+    CHECK(read_native(gateway, 2, 0, 1, response) == 9 && response[8] == 2);
+    CHECK(read_native(gateway, 3, 2, 1, response) == 11 && word(response+9) == 0xff85);
+    /* Native integer conversion must reject overflow and fractional values. */
+    edge_acquisition_sample sample = {0}; sample.device_id[0] = 4; sample.valid = true;
+    strcpy(sample.element_id, "typed-2"); sample.value.which_value = iot_edge_v1_ScalarValue_signed_value_tag;
+    sample.value.value.signed_value = 32768;
+    edge_modbus_gateway_update(gateway, platform, &sample, 1);
+    CHECK(read_native(gateway, 3, 1, 1, response) == 11 && word(response+9) == 2);
+    CHECK(read_native(gateway, 4, 1, 1, response) == 11 && word(response+9) == 1);
+    sample.value.which_value = iot_edge_v1_ScalarValue_double_value_tag; sample.value.value.double_value = 1.25;
+    edge_modbus_gateway_update(gateway, platform, &sample, 1);
+    CHECK(read_native(gateway, 3, 1, 1, response) == 11 && word(response+9) == 2);
+    strcpy(sample.element_id, "typed-6"); sample.value.value.double_value = 1e300;
+    edge_modbus_gateway_update(gateway, platform, &sample, 1);
+    CHECK(read_native(gateway, 3, 61, 1, response) == 11 && word(response+9) == 2);
+    CHECK(read_native(gateway, 4, 61, 1, response) == 11 && word(response+9) == 1);
+    edge_modbus_gateway_free(gateway);
+    gateway = edge_modbus_gateway_prepare(path, &source, 1);
+    iot_edge_v1_ModbusGatewayPoint point = iot_edge_v1_ModbusGatewayPoint_init_zero;
+    CHECK(gateway && edge_modbus_gateway_describe(gateway, platform, sample.device_id, "typed-0", &point, 1));
+    CHECK(point.value_address == 2 && point.value_words == 1 && !strcmp(point.register_type,"DISCRETE_INPUT"));
+    edge_modbus_gateway_free(gateway); remove(path);
+}
+
 int main(void) {
+    test_native_types();
     test_drag_permutation();
     const char *path = "gateway-test.map";
     remove(path);
