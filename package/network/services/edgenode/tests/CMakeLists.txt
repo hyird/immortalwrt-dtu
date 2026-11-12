@@ -42,13 +42,25 @@ enable_testing()
 
 option(EDGENODE_GATEWAY_NETWORK_TESTS "验证 Modbus 网关实际 TCP 连接与分包" OFF)
 
+if(MBEDTLS_ROOT)
+    add_library(edgenode_gateway_crypto STATIC
+        "${MBEDTLS_ROOT}/library/sha256.c" "${MBEDTLS_ROOT}/library/platform_util.c")
+    target_include_directories(edgenode_gateway_crypto PUBLIC "${MBEDTLS_ROOT}/include")
+else()
+    find_path(GATEWAY_MBEDTLS_INCLUDE_DIR mbedtls/sha256.h REQUIRED)
+    find_library(GATEWAY_MBEDCRYPTO_LIBRARY mbedcrypto REQUIRED)
+    add_library(edgenode_gateway_crypto INTERFACE)
+    target_include_directories(edgenode_gateway_crypto INTERFACE "${GATEWAY_MBEDTLS_INCLUDE_DIR}")
+    target_link_libraries(edgenode_gateway_crypto INTERFACE "${GATEWAY_MBEDCRYPTO_LIBRARY}")
+endif()
+
 add_executable(edge_modbus_gateway_test edge_modbus_gateway_test.c
     "${EDGENODE_ROOT}/src/edge_modbus_gateway.c"
     "${EDGENODE_ROOT}/src/edge_runtime_config.c"
     "${EDGENODE_ROOT}/src/edge_industrial.c"
     "${EDGENODE_ROOT}/src/edge_derived.c")
 target_include_directories(edge_modbus_gateway_test PRIVATE "${EDGENODE_ROOT}/src")
-target_link_libraries(edge_modbus_gateway_test PRIVATE edgenode_nanopb)
+target_link_libraries(edge_modbus_gateway_test PRIVATE edgenode_nanopb edgenode_gateway_crypto)
 if(NOT MSVC)
     target_link_libraries(edge_modbus_gateway_test PRIVATE m)
 endif()
@@ -252,7 +264,7 @@ if(UNIX)
             "${EDGENODE_ROOT}/src/edge_industrial.c"
             "${EDGENODE_ROOT}/src/edge_derived.c")
         target_include_directories(edge_modbus_gateway_fixture PRIVATE "${EDGENODE_ROOT}/src" "${GATEWAY_LIBEV_INCLUDE_DIR}")
-        target_link_libraries(edge_modbus_gateway_fixture PRIVATE edgenode_nanopb "${GATEWAY_LIBEV_LIBRARY}" m)
+        target_link_libraries(edge_modbus_gateway_fixture PRIVATE edgenode_nanopb edgenode_gateway_crypto "${GATEWAY_LIBEV_LIBRARY}" m)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
         add_test(NAME edge_modbus_gateway_network COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_LIST_DIR}/edge_modbus_gateway_network_test.py" "$<TARGET_FILE:edge_modbus_gateway_fixture>")

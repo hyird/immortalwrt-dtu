@@ -590,6 +590,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_external_io = access("/etc/init.d/dtu-io", X_OK) == 0;
     hello->supports_external_io_milliamps = hello->supports_external_io;
     hello->supports_modbus_gateway = true;
+    hello->supports_modbus_gateway_order = true;
     hello->supports_node_io = hello->supports_external_io;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -997,6 +998,12 @@ static bool gateway_points(edge_ws_session *session, const iot_edge_v1_ModbusGat
         map = loaded;
         if (!map) { safe_copy(result->message, sizeof(result->message), "无法读取寄存器地址预留表"); return false; }
     }
+    if (!edge_modbus_gateway_digest(map, session->config->id, result->mapping_digest.bytes)) {
+        edge_modbus_gateway_free(loaded);
+        safe_copy(result->message, sizeof(result->message), "无法计算映射表版本");
+        return false;
+    }
+    result->mapping_digest.size = 32;
     const bool success = edge_modbus_gateway_points(map, session->config->id, &session->runtime_config,
         session->app->config->modbus_gateway, edge_modbus_gateway_listening(session->app->gateway_server),
         request, result, monotonic_ms());
@@ -1004,17 +1011,39 @@ static bool gateway_points(edge_ws_session *session, const iot_edge_v1_ModbusGat
     return success;
 }
 
+static bool apply_gateway_order(edge_ws_session *session,
+    const iot_edge_v1_ModbusGatewayRequest *request, char *error, size_t error_size) {
+    edge_ws_app *app = session->app;
+    if (request->has_settings || request->include_points || !app->config->modbus_gateway ||
+        !edge_modbus_gateway_listening(app->gateway_server)) {
+        snprintf(error, error_size, "请启用网关并单独提交地址排序");
+        return false;
+    }
+    if (!edge_modbus_gateway_reorder(app->gateway, EDGE_GATEWAY_MAP_PATH, session->config->id,
+                                    &request->order)) {
+        snprintf(error, error_size, "映射已变化、排序无效或保存失败；请重新读取后排序");
+        return false;
+    }
+    edge_modbus_gateway_replace(app->gateway_server, app->gateway);
+    export_gateway(app);
+    return true;
+}
+
 static void handle_gateway_request(edge_ws_session *session, const iot_edge_v1_Envelope *input) {
     const iot_edge_v1_ModbusGatewayRequest request = input->payload.modbus_gateway_request;
     if (request.request_id.size != 16U) return;
     char error[257] = {0};
-    const bool success = !request.has_settings || apply_gateway_settings(session->app, &request.settings, error, sizeof(error));
+    const bool success = request.has_order
+        ? apply_gateway_order(session, &request, error, sizeof(error))
+        : !request.has_settings || apply_gateway_settings(session->app, &request.settings, error, sizeof(error));
     iot_edge_v1_Envelope *output = &session->app->envelope;
     if (!init_envelope(session, output)) return;
     output->which_payload = iot_edge_v1_Envelope_modbus_gateway_result_tag;
     iot_edge_v1_ModbusGatewayResult *result = &output->payload.modbus_gateway_result;
     edge_protocol_set_bytes(&result->request_id, sizeof(result->request_id.bytes), request.request_id.bytes, 16U);
     result->success = success;
+    result->order_applied = success && request.has_order;
+    result->order_supported = true;
     safe_copy(result->message, sizeof(result->message), success ? "ok" : error);
     result->has_settings = true;
     result->settings.enabled = session->app->config->modbus_gateway;

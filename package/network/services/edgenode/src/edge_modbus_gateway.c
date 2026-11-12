@@ -1,4 +1,5 @@
 #include "edge_modbus_gateway.h"
+#include "edge_sha256.h"
 
 #include <errno.h>
 #include <math.h>
@@ -11,6 +12,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <syslog.h>
 #include <unistd.h>
 #endif
 
@@ -148,7 +150,10 @@ static bool save_map(const edge_modbus_gateway *gateway, const char *path) {
         } else
             strcpy(parent, ".");
         const int fd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        ok = fd >= 0 && fsync(fd) == 0;
+        /* rename is the commit boundary: after it succeeds, the live map must
+         * also switch even if directory durability reporting fails. */
+        if (fd < 0 || fsync(fd) != 0)
+            syslog(LOG_ERR, "Modbus map applied but directory sync failed: %s", strerror(errno));
         if (fd >= 0)
             close(fd);
     }
@@ -254,6 +259,73 @@ void edge_modbus_gateway_free(edge_modbus_gateway *gateway) {
         free(gateway->points);
         free(gateway);
     }
+}
+
+bool edge_modbus_gateway_digest(const edge_modbus_gateway *gateway,
+                                const uint8_t platform[16], uint8_t digest[32]) {
+    if (!gateway) return false;
+    mbedtls_sha256_context context;
+    mbedtls_sha256_init(&context);
+    bool ok = edge_sha256_starts(&context, 0) == 0;
+    for (size_t i = 0; ok && i < gateway->count; ++i) {
+        const edge_gateway_point *point = &gateway->points[i];
+        if (memcmp(point->platform, platform, 16)) continue;
+        const uint8_t metadata[] = {(uint8_t)(i >> 8), (uint8_t)i, point->active ? 1 : 0};
+        ok = edge_sha256_update(&context, metadata, sizeof(metadata)) == 0 &&
+             edge_sha256_update(&context, point->device, 16) == 0 &&
+             edge_sha256_update(&context, (const unsigned char *)point->element,
+                                strlen(point->element) + 1) == 0;
+    }
+    if (ok) ok = edge_sha256_finish(&context, digest) == 0;
+    mbedtls_sha256_free(&context);
+    return ok;
+}
+
+bool edge_modbus_gateway_reorder(edge_modbus_gateway *gateway, const char *path,
+                                 const uint8_t platform[16],
+                                 const iot_edge_v1_ModbusGatewayOrder *order) {
+    uint8_t digest[32];
+    if (!gateway || order->expected_digest.size != sizeof(digest) ||
+        order->addresses.size < 4 || order->addresses.size % 2 ||
+        order->addresses.size > EDGE_GATEWAY_MAX_POINTS * 2 ||
+        !edge_modbus_gateway_digest(gateway, platform, digest) ||
+        memcmp(digest, order->expected_digest.bytes, sizeof(digest)))
+        return false;
+    const size_t count = order->addresses.size / 2;
+    /* One bit per reserved slot; validate the entire permutation before I/O. */
+    uint8_t selected[(EDGE_GATEWAY_MAX_POINTS + 7) / 8] = {0};
+    for (size_t i = 0; i < count; ++i) {
+        const unsigned address = ((unsigned)order->addresses.bytes[i * 2] << 8) |
+                                  order->addresses.bytes[i * 2 + 1];
+        const size_t slot = address / EDGE_GATEWAY_SLOT_WORDS;
+        if (address % EDGE_GATEWAY_SLOT_WORDS || slot >= gateway->count ||
+            !gateway->points[slot].active ||
+            memcmp(gateway->points[slot].platform, platform, 16) ||
+            (selected[slot / 8] & (1U << (slot % 8))))
+            return false;
+        selected[slot / 8] |= (uint8_t)(1U << (slot % 8));
+    }
+    edge_modbus_gateway candidate = *gateway;
+    candidate.points = malloc(gateway->count * sizeof(*candidate.points));
+    if (!candidate.points) return false;
+    memcpy(candidate.points, gateway->points, gateway->count * sizeof(*candidate.points));
+    size_t next = 0;
+    bool changed = false;
+    for (size_t slot = 0; slot < gateway->count; ++slot) {
+        if (!(selected[slot / 8] & (1U << (slot % 8)))) continue;
+        const size_t source = (((unsigned)order->addresses.bytes[next * 2] << 8) |
+                              order->addresses.bytes[next * 2 + 1]) / EDGE_GATEWAY_SLOT_WORDS;
+        candidate.points[slot] = gateway->points[source];
+        changed = changed || slot != source;
+        ++next;
+    }
+    const bool saved = !changed || save_map(&candidate, path);
+    if (saved && changed) {
+        free(gateway->points);
+        gateway->points = candidate.points;
+        gateway->capacity = gateway->count;
+    } else free(candidate.points);
+    return saved;
 }
 
 bool edge_modbus_gateway_export(const edge_modbus_gateway *gateway, const char *path) {

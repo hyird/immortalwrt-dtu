@@ -10,6 +10,8 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 平台还能分页读取自己已下发的全部点位信息及实际地址预留，包括未映射的派生点、停用点及文本/图片点。每页最多 8 项；不返回其他平台的点位，查询不触发采集或写入地址表。数值以字符串回传，保留 64 位整数精度。页面按需读取，不新增轮询。
 
+`supports_modbus_gateway_order = 43` 单独声明手动排序能力。支持的平台可在表格中拖拽预览并确认目标顺序；节点按当前平台映射 SHA-256 拒绝旧快照，校验全部地址后原子保存并切换。只在参与点位原有槽位间排列，其他平台和未参与点位地址不变，缓存随点位移动。成功后关闭旧 Modbus 连接，PLC/组态需同步更新地址；日常显示排序与分组仍不改变地址。
+
 设置 `edgenode.node.modbus_gateway='1'` 并重启服务后，节点把下发配置中的物理测点和设备绑定 IO 自动映射成只读寄存器。默认关闭，监听 `edgenode.node.modbus_gateway_interface` 指定的接口，留空时使用 `hardware.lan_interface`；网桥 LAN 必须指定承载地址的桥接口（例如 `br-lan`），不能指定桥成员网口。端口由 `edgenode.node.modbus_gateway_port` 指定，默认 `502`；Unit ID 为 `1`，支持 `03/04`。不会修改防火墙。派生点、图片及文本不转换为数值。
 
 当前地址表为 `/tmp/edgenode-modbus.csv`，按平台、设备、测点身份分配零基地址。每点占 10 个寄存器：类型（1）、质量（1）、64 位值（4）、UTC 毫秒时间（4），多字高位在前；类型 `2/3/4/5` 分别为 BOOL/INT64/UINT64/FLOAT64，质量 `0/1/2/3` 分别为未采集/有效/无效/超时。客户端必须检查质量。超时采用设备 `online_timeout_sec`，缺省 900 秒；整数保留完整 64 位，十进制文本转换为 FLOAT64。
@@ -371,6 +373,8 @@ Regenerate both files with nanopb 0.4.9.1 whenever the protocol changes.
 Node-side protocol, runtime, and configuration tests are kept under `tests/` beside
 the implementation instead of in the platform repository. They can be run on a host
 with the exact nanopb source used for generation:
+
+主机网关测试还需要 mbedTLS 开发文件；也可通过 `-DMBEDTLS_ROOT=/path/to/mbedtls` 指定源码目录，构建与固件相同的 SHA-256 实现。
 
 ```sh
 cmake -S tests -B build/tests -DNANOPB_ROOT=/path/to/nanopb-0.4.9.1

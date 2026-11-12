@@ -853,6 +853,26 @@ static void test_gateway_request_presence(void) {
         if (apply) require(!output.payload.modbus_gateway_request.settings.enabled && output.payload.modbus_gateway_request.settings.port == 1502, "explicit disable settings lost");
         edge_protocol_release(&output);
     }
+    input.payload.modbus_gateway_request.has_settings = false;
+    input.payload.modbus_gateway_request.has_order = true;
+    iot_edge_v1_ModbusGatewayOrder *order = &input.payload.modbus_gateway_request.order;
+    order->expected_digest.size = 32;
+    memset(order->expected_digest.bytes, 0x42, 32);
+    order->addresses.size = sizeof(order->addresses.bytes);
+    for (size_t i = 0; i < order->addresses.size / 2; ++i) {
+        const unsigned address = (unsigned)(i * 10);
+        order->addresses.bytes[i * 2] = (uint8_t)(address >> 8);
+        order->addresses.bytes[i * 2 + 1] = (uint8_t)address;
+    }
+    uint8_t wire[EDGENODE_MAX_WS_MESSAGE]; size_t size = 0; const char *error = NULL;
+    require(edge_protocol_encode(&input, wire, sizeof(wire), &size, &error), "maximum gateway order exceeds WS frame");
+    iot_edge_v1_Envelope output = iot_edge_v1_Envelope_init_zero;
+    require(edge_protocol_decode(wire, size, &output, &error), "gateway order decoding failed");
+    require(output.payload.modbus_gateway_request.has_order &&
+        output.payload.modbus_gateway_request.order.addresses.size == order->addresses.size &&
+        !memcmp(output.payload.modbus_gateway_request.order.addresses.bytes, order->addresses.bytes, order->addresses.size),
+        "maximum gateway order permutation changed");
+    edge_protocol_release(&output);
 }
 
 int main(void) {

@@ -23,7 +23,67 @@ static size_t read_registers(edge_modbus_gateway *gateway, uint16_t start, uint1
     return edge_modbus_gateway_reply(gateway, request, sizeof(request), response, now);
 }
 
+static void test_drag_permutation(void) {
+    const char *path = "gateway-order-test.map";
+    remove(path);
+    uint8_t platform[16] = {1}, foreign[16] = {2};
+    iot_edge_v1_ConfigItem items[5] = {0};
+    items[0].which_item = iot_edge_v1_ConfigItem_endpoint_tag;
+    items[0].item.endpoint.endpoint_id.size = 16;
+    items[0].item.endpoint.endpoint_id.bytes[0] = 3;
+    items[0].item.endpoint.enabled = true;
+    items[1].which_item = iot_edge_v1_ConfigItem_device_tag;
+    items[1].item.device.device_id.size = 16;
+    items[1].item.device.device_id.bytes[0] = 4;
+    items[1].item.device.endpoint_id.size = 16;
+    items[1].item.device.endpoint_id.bytes[0] = 3;
+    items[1].item.device.enabled = true;
+    for (size_t i = 2; i < 5; ++i) {
+        items[i].which_item = iot_edge_v1_ConfigItem_modbus_register_tag;
+        items[i].item.modbus_register.device_id.size = 16;
+        items[i].item.modbus_register.device_id.bytes[0] = 4;
+        snprintf(items[i].item.modbus_register.element_id, 65, "point-%u", (unsigned)i);
+    }
+    edge_runtime_config config = {.items = items, .item_count = 5};
+    edge_acquisition_source sources[] = {{.platform_id = platform, .config = &config},
+                                        {.platform_id = foreign, .config = &config}};
+    edge_modbus_gateway *gateway = edge_modbus_gateway_prepare(path, sources, 2);
+    CHECK(gateway);
+    edge_acquisition_sample sample = {0};
+    sample.device_id[0] = 4;
+    strcpy(sample.element_id, "point-4");
+    sample.valid = true;
+    sample.value.which_value = iot_edge_v1_ScalarValue_unsigned_value_tag;
+    sample.value.value.unsigned_value = 123;
+    edge_modbus_gateway_update(gateway, platform, &sample, 1);
+    iot_edge_v1_ModbusGatewayOrder order = iot_edge_v1_ModbusGatewayOrder_init_zero;
+    order.expected_digest.size = 32;
+    CHECK(edge_modbus_gateway_digest(gateway, platform, order.expected_digest.bytes));
+    order.addresses.size = 6;
+    order.addresses.bytes[1] = 20;
+    order.addresses.bytes[5] = 10; /* Move last to first: [20, 0, 10]. */
+    CHECK(edge_modbus_gateway_reorder(gateway, path, platform, &order));
+    iot_edge_v1_ModbusGatewayPoint point = iot_edge_v1_ModbusGatewayPoint_init_zero;
+    const unsigned expected[] = {10, 20, 0};
+    for (unsigned i = 0; i < 3; ++i) {
+        char element[65]; snprintf(element, sizeof(element), "point-%u", i + 2);
+        CHECK(edge_modbus_gateway_describe(gateway, platform, sample.device_id, element, &point, 1));
+        CHECK(point.address == expected[i]);
+        CHECK(edge_modbus_gateway_describe(gateway, foreign, sample.device_id, element, &point, 1));
+        CHECK(point.address == (i + 3) * 10);
+    }
+    CHECK(edge_modbus_gateway_describe(gateway, platform, sample.device_id, "point-4", &point, 1));
+    CHECK(!strcmp(point.value, "123"));
+    edge_modbus_gateway_free(gateway);
+    gateway = edge_modbus_gateway_prepare(path, sources, 2);
+    CHECK(gateway && edge_modbus_gateway_describe(gateway, platform, sample.device_id, "point-4", &point, 1));
+    CHECK(point.address == 0);
+    edge_modbus_gateway_free(gateway);
+    remove(path);
+}
+
 int main(void) {
+    test_drag_permutation();
     const char *path = "gateway-test.map";
     remove(path);
     remove("gateway-test.csv");
@@ -79,6 +139,35 @@ int main(void) {
                                        1000));
     CHECK(described.has_mapping && described.address == 10 &&
           !strcmp(described.value, "18446744073709551615"));
+    /* Confirmed drag order moves samples with their identities and preserves
+     * foreign-platform slots. Stale, duplicate and invalid writes fail closed. */
+    iot_edge_v1_ModbusGatewayOrder order = iot_edge_v1_ModbusGatewayOrder_init_zero;
+    order.expected_digest.size = 32;
+    CHECK(edge_modbus_gateway_digest(gateway, platform, order.expected_digest.bytes));
+    order.addresses.size = 4;
+    order.addresses.bytes[1] = 10;
+    CHECK(edge_modbus_gateway_reorder(gateway, path, platform, &order));
+    CHECK(edge_modbus_gateway_describe(gateway, platform, sample.device_id, "counter", &described, 1000));
+    CHECK(described.address == 0 && !strcmp(described.value, "18446744073709551615"));
+    CHECK(read_registers(gateway, 2, 4, response, 1000) == 17 && word(response + 9) == 0xffff);
+    CHECK(read_registers(gateway, 30, 10, response, 1000) == 29 && word(response + 11) == 0);
+    CHECK(!edge_modbus_gateway_reorder(gateway, path, platform, &order)); /* Stale digest. */
+    edge_modbus_gateway *reloaded = edge_modbus_gateway_prepare(path, sources, 2);
+    CHECK(reloaded && edge_modbus_gateway_describe(reloaded, platform, sample.device_id, "counter", &described, 0));
+    CHECK(described.address == 0 && described.quality == 0);
+    edge_modbus_gateway_free(reloaded);
+    CHECK(edge_modbus_gateway_digest(gateway, platform, order.expected_digest.bytes));
+    order.addresses.bytes[3] = 10;
+    CHECK(!edge_modbus_gateway_reorder(gateway, path, platform, &order)); /* Duplicate. */
+    order.addresses.bytes[3] = 20;
+    CHECK(!edge_modbus_gateway_reorder(gateway, path, platform, &order)); /* Another platform. */
+    order.addresses.bytes[3] = 1;
+    CHECK(!edge_modbus_gateway_reorder(gateway, path, platform, &order)); /* Misaligned. */
+    order.addresses.bytes[3] = 0;
+    CHECK(!edge_modbus_gateway_reorder(gateway, "no-such-directory/map", platform, &order));
+    CHECK(edge_modbus_gateway_describe(gateway, platform, sample.device_id, "counter", &described, 1000) && described.address == 0);
+    CHECK(edge_modbus_gateway_reorder(gateway, path, platform, &order)); /* Restore. */
+    CHECK(edge_modbus_gateway_describe(gateway, platform, sample.device_id, "counter", &described, 1000) && described.address == 10);
     iot_edge_v1_ModbusGatewayRequest page_request = iot_edge_v1_ModbusGatewayRequest_init_zero;
     page_request.include_points = true;
     page_request.limit = 1;

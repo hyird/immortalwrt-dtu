@@ -145,6 +145,7 @@ message Empty {}
 
 message Hello {
   bool supports_modbus_gateway = 42;
+  bool supports_modbus_gateway_order = 43;
   // Required to negotiate the mA external IO protocol.
   bool supports_external_io_milliamps = 41;
   bool supports_node_io = 40;
@@ -975,12 +976,19 @@ message ModbusGatewayPoint {
   string source_address = 18 [(nanopb).max_length = 64];
 }
 
+// Ordered zero-based source addresses, unsigned 16-bit big endian.
+// Only these slots are rearranged; every other reservation stays unchanged.
+message ModbusGatewayOrder {
+  bytes expected_digest = 1 [(nanopb).max_size = 32];
+  bytes addresses = 2 [(nanopb).max_size = 13106];
+}
 message ModbusGatewayRequest {
   bytes request_id = 1 [(nanopb).max_size = 16];
   ModbusGatewaySettings settings = 2;
   uint32 offset = 3;
   bool include_points = 4;
   uint32 limit = 5;
+  ModbusGatewayOrder order = 6;
 }
 message ModbusGatewayResult {
   bytes request_id = 1 [(nanopb).max_size = 16];
@@ -990,6 +998,9 @@ message ModbusGatewayResult {
   repeated ModbusGatewayPoint points = 5 [(nanopb).max_count = 8];
   uint32 total = 6;
   uint32 offset = 7;
+  bool order_applied = 8;
+  bool order_supported = 10;
+  bytes mapping_digest = 9 [(nanopb).max_size = 32];
 }
 
 message LogLevelRequest {

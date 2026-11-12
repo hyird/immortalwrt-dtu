@@ -195,6 +195,7 @@ typedef struct _iot_edge_v1_Hello {
     bool supports_node_io;
     bool supports_external_io_milliamps;
     bool supports_modbus_gateway;
+    bool supports_modbus_gateway_order;
 } iot_edge_v1_Hello;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_HelloAck_assigned_node_id_t;
@@ -1036,6 +1037,13 @@ typedef struct _iot_edge_v1_ModbusGatewayPoint {
     char source_address[65];
 } iot_edge_v1_ModbusGatewayPoint;
 
+typedef PB_BYTES_ARRAY_T(32) iot_edge_v1_ModbusGatewayOrder_expected_digest_t;
+typedef PB_BYTES_ARRAY_T(13106) iot_edge_v1_ModbusGatewayOrder_addresses_t;
+typedef struct _iot_edge_v1_ModbusGatewayOrder {
+    iot_edge_v1_ModbusGatewayOrder_expected_digest_t expected_digest;
+    iot_edge_v1_ModbusGatewayOrder_addresses_t addresses;
+} iot_edge_v1_ModbusGatewayOrder;
+
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_ModbusGatewayRequest_request_id_t;
 typedef struct _iot_edge_v1_ModbusGatewayRequest {
     iot_edge_v1_ModbusGatewayRequest_request_id_t request_id;
@@ -1044,9 +1052,12 @@ typedef struct _iot_edge_v1_ModbusGatewayRequest {
     uint32_t offset;
     bool include_points;
     uint32_t limit;
+    bool has_order;
+    iot_edge_v1_ModbusGatewayOrder order;
 } iot_edge_v1_ModbusGatewayRequest;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_ModbusGatewayResult_request_id_t;
+typedef PB_BYTES_ARRAY_T(32) iot_edge_v1_ModbusGatewayResult_mapping_digest_t;
 typedef struct _iot_edge_v1_ModbusGatewayResult {
     iot_edge_v1_ModbusGatewayResult_request_id_t request_id;
     bool success;
@@ -1057,6 +1068,9 @@ typedef struct _iot_edge_v1_ModbusGatewayResult {
     iot_edge_v1_ModbusGatewayPoint points[8];
     uint32_t total;
     uint32_t offset;
+    bool order_applied;
+    iot_edge_v1_ModbusGatewayResult_mapping_digest_t mapping_digest;
+    bool order_supported;
 } iot_edge_v1_ModbusGatewayResult;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_LogLevelRequest_request_id_t;
@@ -1410,9 +1424,10 @@ extern "C" {
 
 
 
+
 /* Initializer values for message structs */
 #define iot_edge_v1_Empty_init_default           {0}
-#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define iot_edge_v1_HelloAck_init_default        {{0, {0}}, 0, 0, 0, 0, 0, false, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_default {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_default {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1481,8 +1496,9 @@ extern "C" {
 #define iot_edge_v1_LogResult_init_default       {{0, {0}}, 0, "", 0, {iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default}}
 #define iot_edge_v1_ModbusGatewaySettings_init_default {0, 0, ""}
 #define iot_edge_v1_ModbusGatewayPoint_init_default {{0, {0}}, "", "", "", "", "", "", 0, "", 0, 0, 0, 0, 0, "", "", 0, ""}
-#define iot_edge_v1_ModbusGatewayRequest_init_default {{0, {0}}, false, iot_edge_v1_ModbusGatewaySettings_init_default, 0, 0, 0}
-#define iot_edge_v1_ModbusGatewayResult_init_default {{0, {0}}, 0, "", false, iot_edge_v1_ModbusGatewaySettings_init_default, 0, {iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default}, 0, 0}
+#define iot_edge_v1_ModbusGatewayOrder_init_default {{0, {0}}, {0, {0}}}
+#define iot_edge_v1_ModbusGatewayRequest_init_default {{0, {0}}, false, iot_edge_v1_ModbusGatewaySettings_init_default, 0, 0, 0, false, iot_edge_v1_ModbusGatewayOrder_init_default}
+#define iot_edge_v1_ModbusGatewayResult_init_default {{0, {0}}, 0, "", false, iot_edge_v1_ModbusGatewaySettings_init_default, 0, {iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default, iot_edge_v1_ModbusGatewayPoint_init_default}, 0, 0, 0, {0, {0}}, 0}
 #define iot_edge_v1_LogLevelRequest_init_default {{0, {0}}, ""}
 #define iot_edge_v1_LogLevelResult_init_default  {{0, {0}}, 0, "", ""}
 #define iot_edge_v1_TerminalOpen_init_default    {{0, {0}}, {0, {0}}, 0, 0}
@@ -1498,7 +1514,7 @@ extern "C" {
 #define iot_edge_v1_Error_init_default           {"", "", 0}
 #define iot_edge_v1_Envelope_init_default        {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, 0, {iot_edge_v1_Hello_init_default}}
 #define iot_edge_v1_Empty_init_zero              {0}
-#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define iot_edge_v1_HelloAck_init_zero           {{0, {0}}, 0, 0, 0, 0, 0, false, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_zero   {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_zero {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1567,8 +1583,9 @@ extern "C" {
 #define iot_edge_v1_LogResult_init_zero          {{0, {0}}, 0, "", 0, {iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero}}
 #define iot_edge_v1_ModbusGatewaySettings_init_zero {0, 0, ""}
 #define iot_edge_v1_ModbusGatewayPoint_init_zero {{0, {0}}, "", "", "", "", "", "", 0, "", 0, 0, 0, 0, 0, "", "", 0, ""}
-#define iot_edge_v1_ModbusGatewayRequest_init_zero {{0, {0}}, false, iot_edge_v1_ModbusGatewaySettings_init_zero, 0, 0, 0}
-#define iot_edge_v1_ModbusGatewayResult_init_zero {{0, {0}}, 0, "", false, iot_edge_v1_ModbusGatewaySettings_init_zero, 0, {iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero}, 0, 0}
+#define iot_edge_v1_ModbusGatewayOrder_init_zero {{0, {0}}, {0, {0}}}
+#define iot_edge_v1_ModbusGatewayRequest_init_zero {{0, {0}}, false, iot_edge_v1_ModbusGatewaySettings_init_zero, 0, 0, 0, false, iot_edge_v1_ModbusGatewayOrder_init_zero}
+#define iot_edge_v1_ModbusGatewayResult_init_zero {{0, {0}}, 0, "", false, iot_edge_v1_ModbusGatewaySettings_init_zero, 0, {iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero, iot_edge_v1_ModbusGatewayPoint_init_zero}, 0, 0, 0, {0, {0}}, 0}
 #define iot_edge_v1_LogLevelRequest_init_zero    {{0, {0}}, ""}
 #define iot_edge_v1_LogLevelResult_init_zero     {{0, {0}}, 0, "", ""}
 #define iot_edge_v1_TerminalOpen_init_zero       {{0, {0}}, {0, {0}}, 0, 0}
@@ -1626,6 +1643,7 @@ extern "C" {
 #define iot_edge_v1_Hello_supports_node_io_tag   40
 #define iot_edge_v1_Hello_supports_external_io_milliamps_tag 41
 #define iot_edge_v1_Hello_supports_modbus_gateway_tag 42
+#define iot_edge_v1_Hello_supports_modbus_gateway_order_tag 43
 #define iot_edge_v1_HelloAck_assigned_node_id_tag 1
 #define iot_edge_v1_HelloAck_session_epoch_tag   2
 #define iot_edge_v1_HelloAck_negotiated_protocol_version_tag 3
@@ -2144,11 +2162,14 @@ extern "C" {
 #define iot_edge_v1_ModbusGatewayPoint_byte_order_tag 16
 #define iot_edge_v1_ModbusGatewayPoint_writable_tag 17
 #define iot_edge_v1_ModbusGatewayPoint_source_address_tag 18
+#define iot_edge_v1_ModbusGatewayOrder_expected_digest_tag 1
+#define iot_edge_v1_ModbusGatewayOrder_addresses_tag 2
 #define iot_edge_v1_ModbusGatewayRequest_request_id_tag 1
 #define iot_edge_v1_ModbusGatewayRequest_settings_tag 2
 #define iot_edge_v1_ModbusGatewayRequest_offset_tag 3
 #define iot_edge_v1_ModbusGatewayRequest_include_points_tag 4
 #define iot_edge_v1_ModbusGatewayRequest_limit_tag 5
+#define iot_edge_v1_ModbusGatewayRequest_order_tag 6
 #define iot_edge_v1_ModbusGatewayResult_request_id_tag 1
 #define iot_edge_v1_ModbusGatewayResult_success_tag 2
 #define iot_edge_v1_ModbusGatewayResult_message_tag 3
@@ -2156,6 +2177,9 @@ extern "C" {
 #define iot_edge_v1_ModbusGatewayResult_points_tag 5
 #define iot_edge_v1_ModbusGatewayResult_total_tag 6
 #define iot_edge_v1_ModbusGatewayResult_offset_tag 7
+#define iot_edge_v1_ModbusGatewayResult_order_applied_tag 8
+#define iot_edge_v1_ModbusGatewayResult_mapping_digest_tag 9
+#define iot_edge_v1_ModbusGatewayResult_order_supported_tag 10
 #define iot_edge_v1_LogLevelRequest_request_id_tag 1
 #define iot_edge_v1_LogLevelRequest_level_tag    2
 #define iot_edge_v1_LogLevelResult_request_id_tag 1
@@ -2308,7 +2332,8 @@ X(a, STATIC,   SINGULAR, BOOL,     supports_raw_telemetry,  38) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_external_io,  39) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_node_io,  40) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_external_io_milliamps,  41) \
-X(a, STATIC,   SINGULAR, BOOL,     supports_modbus_gateway,  42)
+X(a, STATIC,   SINGULAR, BOOL,     supports_modbus_gateway,  42) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_modbus_gateway_order,  43)
 #define iot_edge_v1_Hello_CALLBACK NULL
 #define iot_edge_v1_Hello_DEFAULT NULL
 
@@ -3139,15 +3164,23 @@ X(a, STATIC,   SINGULAR, STRING,   source_address,   18)
 #define iot_edge_v1_ModbusGatewayPoint_CALLBACK NULL
 #define iot_edge_v1_ModbusGatewayPoint_DEFAULT NULL
 
+#define iot_edge_v1_ModbusGatewayOrder_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    expected_digest,   1) \
+X(a, STATIC,   SINGULAR, BYTES,    addresses,         2)
+#define iot_edge_v1_ModbusGatewayOrder_CALLBACK NULL
+#define iot_edge_v1_ModbusGatewayOrder_DEFAULT NULL
+
 #define iot_edge_v1_ModbusGatewayRequest_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  settings,          2) \
 X(a, STATIC,   SINGULAR, UINT32,   offset,            3) \
 X(a, STATIC,   SINGULAR, BOOL,     include_points,    4) \
-X(a, STATIC,   SINGULAR, UINT32,   limit,             5)
+X(a, STATIC,   SINGULAR, UINT32,   limit,             5) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  order,             6)
 #define iot_edge_v1_ModbusGatewayRequest_CALLBACK NULL
 #define iot_edge_v1_ModbusGatewayRequest_DEFAULT NULL
 #define iot_edge_v1_ModbusGatewayRequest_settings_MSGTYPE iot_edge_v1_ModbusGatewaySettings
+#define iot_edge_v1_ModbusGatewayRequest_order_MSGTYPE iot_edge_v1_ModbusGatewayOrder
 
 #define iot_edge_v1_ModbusGatewayResult_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, BYTES,    request_id,        1) \
@@ -3156,7 +3189,10 @@ X(a, STATIC,   SINGULAR, STRING,   message,           3) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  settings,          4) \
 X(a, STATIC,   REPEATED, MESSAGE,  points,            5) \
 X(a, STATIC,   SINGULAR, UINT32,   total,             6) \
-X(a, STATIC,   SINGULAR, UINT32,   offset,            7)
+X(a, STATIC,   SINGULAR, UINT32,   offset,            7) \
+X(a, STATIC,   SINGULAR, BOOL,     order_applied,     8) \
+X(a, STATIC,   SINGULAR, BYTES,    mapping_digest,    9) \
+X(a, STATIC,   SINGULAR, BOOL,     order_supported,  10)
 #define iot_edge_v1_ModbusGatewayResult_CALLBACK NULL
 #define iot_edge_v1_ModbusGatewayResult_DEFAULT NULL
 #define iot_edge_v1_ModbusGatewayResult_settings_MSGTYPE iot_edge_v1_ModbusGatewaySettings
@@ -3447,6 +3483,7 @@ extern const pb_msgdesc_t iot_edge_v1_LogLine_msg;
 extern const pb_msgdesc_t iot_edge_v1_LogResult_msg;
 extern const pb_msgdesc_t iot_edge_v1_ModbusGatewaySettings_msg;
 extern const pb_msgdesc_t iot_edge_v1_ModbusGatewayPoint_msg;
+extern const pb_msgdesc_t iot_edge_v1_ModbusGatewayOrder_msg;
 extern const pb_msgdesc_t iot_edge_v1_ModbusGatewayRequest_msg;
 extern const pb_msgdesc_t iot_edge_v1_ModbusGatewayResult_msg;
 extern const pb_msgdesc_t iot_edge_v1_LogLevelRequest_msg;
@@ -3535,6 +3572,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_LogResult_fields &iot_edge_v1_LogResult_msg
 #define iot_edge_v1_ModbusGatewaySettings_fields &iot_edge_v1_ModbusGatewaySettings_msg
 #define iot_edge_v1_ModbusGatewayPoint_fields &iot_edge_v1_ModbusGatewayPoint_msg
+#define iot_edge_v1_ModbusGatewayOrder_fields &iot_edge_v1_ModbusGatewayOrder_msg
 #define iot_edge_v1_ModbusGatewayRequest_fields &iot_edge_v1_ModbusGatewayRequest_msg
 #define iot_edge_v1_ModbusGatewayResult_fields &iot_edge_v1_ModbusGatewayResult_msg
 #define iot_edge_v1_LogLevelRequest_fields &iot_edge_v1_LogLevelRequest_msg
@@ -3561,7 +3599,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 /* iot_edge_v1_RawPacket_size depends on runtime parameters */
 /* iot_edge_v1_CommandResult_size depends on runtime parameters */
 /* iot_edge_v1_Envelope_size depends on runtime parameters */
-#define IOT_EDGE_V1_EDGE_PB_H_MAX_SIZE           iot_edge_v1_LogResult_size
+#define IOT_EDGE_V1_EDGE_PB_H_MAX_SIZE           iot_edge_v1_ModbusGatewayRequest_size
 #define iot_edge_v1_CapabilityReport_size        12034
 #define iot_edge_v1_CommandProgress_size         215
 #define iot_edge_v1_CommandRequest_size          2755
@@ -3594,7 +3632,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_HeartbeatAck_size            59
 #define iot_edge_v1_Heartbeat_size               461
 #define iot_edge_v1_HelloAck_size                75
-#define iot_edge_v1_Hello_size                   739
+#define iot_edge_v1_Hello_size                   742
 #define iot_edge_v1_IndustrialConnectionConfig_size 93
 #define iot_edge_v1_IndustrialPointConfig_size   346
 #define iot_edge_v1_InterfaceCapability_size     424
@@ -3603,9 +3641,10 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_LogLine_size                 268
 #define iot_edge_v1_LogRequest_size              52
 #define iot_edge_v1_LogResult_size               13126
+#define iot_edge_v1_ModbusGatewayOrder_size      13143
 #define iot_edge_v1_ModbusGatewayPoint_size      657
-#define iot_edge_v1_ModbusGatewayRequest_size    59
-#define iot_edge_v1_ModbusGatewayResult_size     5598
+#define iot_edge_v1_ModbusGatewayRequest_size    13205
+#define iot_edge_v1_ModbusGatewayResult_size     5636
 #define iot_edge_v1_ModbusGatewaySettings_size   25
 #define iot_edge_v1_ModbusRegisterConfig_size    332
 #define iot_edge_v1_ModemControlRequest_size     337
