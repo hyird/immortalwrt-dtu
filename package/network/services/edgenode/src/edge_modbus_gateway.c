@@ -346,6 +346,7 @@ bool edge_modbus_gateway_reorder(edge_modbus_gateway *gateway, const char *path,
     const size_t count = order->addresses.size / 2;
     /* One bit per reserved slot; validate the entire permutation before I/O. */
     uint8_t selected[(EDGE_GATEWAY_MAX_POINTS + 7) / 8] = {0};
+    bool discrete = false;
     for (size_t i = 0; i < count; ++i) {
         const unsigned address = ((unsigned)order->addresses.bytes[i * 2] << 8) |
                                   order->addresses.bytes[i * 2 + 1];
@@ -355,6 +356,9 @@ bool edge_modbus_gateway_reorder(edge_modbus_gateway *gateway, const char *path,
             memcmp(gateway->points[slot].platform, platform, 16) ||
             (selected[slot / 8] & (1U << (slot % 8))))
             return false;
+        const bool point_discrete = gateway->points[slot].native_type == EDGE_GATEWAY_BOOL;
+        if (i && discrete != point_discrete) return false;
+        discrete = point_discrete;
         selected[slot / 8] |= (uint8_t)(1U << (slot % 8));
     }
     edge_modbus_gateway candidate = *gateway;

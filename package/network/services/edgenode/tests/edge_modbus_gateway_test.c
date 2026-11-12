@@ -162,33 +162,49 @@ static void test_native_types(void) {
     /* The input-register view remains the existing four-word 64-bit format. */
     CHECK(read_native(gateway, 4, 62, 4, response) == 17 && word(response+9) == 0x3ff8);
     CHECK(read_native(gateway, 4, 22, 4, response) == 17 && word(response+9) == 0xffff && word(response+15) == 0xff85);
-    /* Whole-point reordering moves the bit address as well as numeric address. */
+    /* Mixing input bits and holding registers is rejected without changes. */
     iot_edge_v1_ModbusGatewayOrder order = iot_edge_v1_ModbusGatewayOrder_init_zero;
     order.expected_digest.size = 32; order.addresses.size = 4; order.addresses.bytes[1] = 20;
     CHECK(edge_modbus_gateway_digest(gateway, platform, order.expected_digest.bytes));
+    CHECK(!edge_modbus_gateway_reorder(gateway, path, platform, &order));
+    CHECK(read_native(gateway, 3, 22, 1, response) == 11 && word(response+9) == 0xff85);
+    CHECK(read_native(gateway, 2, 0, 2, response) == 10 && response[9] == 3);
+    /* Boolean rows reorder within 1X and keep every numeric slot intact. */
+    edge_acquisition_sample boolean = {0}; boolean.device_id[0] = 4; boolean.valid = true;
+    strcpy(boolean.element_id, "typed-0"); boolean.value.which_value = iot_edge_v1_ScalarValue_bool_value_tag;
+    edge_modbus_gateway_update(gateway, platform, &boolean, 1);
+    order.addresses.bytes[1] = 10;
     CHECK(edge_modbus_gateway_reorder(gateway, path, platform, &order));
-    CHECK(read_native(gateway, 2, 2, 1, response) == 10 && response[9] == 1);
-    CHECK(read_native(gateway, 2, 0, 1, response) == 9 && response[8] == 2);
-    CHECK(read_native(gateway, 3, 2, 1, response) == 11 && word(response+9) == 0xff85);
+    CHECK(read_native(gateway, 2, 0, 2, response) == 10 && response[9] == 1);
+    CHECK(read_native(gateway, 3, 22, 1, response) == 11 && word(response+9) == 0xff85);
+    /* Int16, UInt16 and Float32 share 4X, while Bool slots remain fixed. */
+    CHECK(edge_modbus_gateway_digest(gateway, platform, order.expected_digest.bytes));
+    order.addresses.size = 6;
+    order.addresses.bytes[1] = 60; order.addresses.bytes[3] = 20; order.addresses.bytes[5] = 30;
+    CHECK(edge_modbus_gateway_reorder(gateway, path, platform, &order));
+    CHECK(read_native(gateway, 3, 22, 2, response) == 13 && word(response+9) == 0x3fc0);
+    CHECK(read_native(gateway, 3, 32, 1, response) == 11 && word(response+9) == 0xff85);
+    CHECK(read_native(gateway, 3, 62, 1, response) == 11 && word(response+9) == 0xffff);
+    CHECK(read_native(gateway, 2, 0, 2, response) == 10 && response[9] == 1);
     /* Native integer conversion must reject overflow and fractional values. */
     edge_acquisition_sample sample = {0}; sample.device_id[0] = 4; sample.valid = true;
     strcpy(sample.element_id, "typed-2"); sample.value.which_value = iot_edge_v1_ScalarValue_signed_value_tag;
     sample.value.value.signed_value = 32768;
     edge_modbus_gateway_update(gateway, platform, &sample, 1);
-    CHECK(read_native(gateway, 3, 1, 1, response) == 11 && word(response+9) == 2);
-    CHECK(read_native(gateway, 4, 1, 1, response) == 11 && word(response+9) == 1);
+    CHECK(read_native(gateway, 3, 31, 1, response) == 11 && word(response+9) == 2);
+    CHECK(read_native(gateway, 4, 31, 1, response) == 11 && word(response+9) == 1);
     sample.value.which_value = iot_edge_v1_ScalarValue_double_value_tag; sample.value.value.double_value = 1.25;
     edge_modbus_gateway_update(gateway, platform, &sample, 1);
-    CHECK(read_native(gateway, 3, 1, 1, response) == 11 && word(response+9) == 2);
+    CHECK(read_native(gateway, 3, 31, 1, response) == 11 && word(response+9) == 2);
     strcpy(sample.element_id, "typed-6"); sample.value.value.double_value = 1e300;
     edge_modbus_gateway_update(gateway, platform, &sample, 1);
-    CHECK(read_native(gateway, 3, 61, 1, response) == 11 && word(response+9) == 2);
-    CHECK(read_native(gateway, 4, 61, 1, response) == 11 && word(response+9) == 1);
+    CHECK(read_native(gateway, 3, 21, 1, response) == 11 && word(response+9) == 2);
+    CHECK(read_native(gateway, 4, 21, 1, response) == 11 && word(response+9) == 1);
     edge_modbus_gateway_free(gateway);
     gateway = edge_modbus_gateway_prepare(path, &source, 1);
     iot_edge_v1_ModbusGatewayPoint point = iot_edge_v1_ModbusGatewayPoint_init_zero;
     CHECK(gateway && edge_modbus_gateway_describe(gateway, platform, sample.device_id, "typed-0", &point, 1));
-    CHECK(point.value_address == 2 && point.value_words == 1 && !strcmp(point.register_type,"DISCRETE_INPUT"));
+    CHECK(point.value_address == 1 && point.value_words == 1 && !strcmp(point.register_type,"DISCRETE_INPUT"));
     edge_modbus_gateway_free(gateway); remove(path);
 }
 
