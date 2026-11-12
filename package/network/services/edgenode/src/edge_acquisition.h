@@ -9,6 +9,20 @@
 #include "edge_external_io.h"
 
 typedef struct edge_acquisition edge_acquisition;
+/* Pointer-free local sample; independent of platform telemetry negotiation. */
+typedef struct {
+    uint8_t device_id[16];
+    char element_id[65];
+    iot_edge_v1_ScalarValue value;
+    bool valid;
+    int64_t observed_at_ms;
+} edge_acquisition_sample;
+typedef void (*edge_acquisition_sample_callback)(void *context,
+    const uint8_t platform_id[16], const edge_acquisition_sample *sample);
+/* NULL sample invalidates that platform's cache when the worker exits. */
+bool edge_acquisition_set_gateway_enabled(edge_acquisition *acquisition, bool enabled);
+void edge_acquisition_set_sample_callback(edge_acquisition *acquisition,
+    edge_acquisition_sample_callback callback);
 typedef void (*edge_acquisition_dtu_callback)(void *context, const uint8_t platform_id[16],
     const iot_edge_v1_DtuStatus *status);
 void edge_acquisition_set_dtu_callback(edge_acquisition *acquisition, edge_acquisition_dtu_callback callback);

@@ -1,3 +1,4 @@
+#include "edge_modbus_gateway.h"
 #include "edge_protocol.h"
 #include "edge_ws.h"
 
@@ -393,6 +394,43 @@ static void close_serial_debug(edge_ws_session *session, const char *reason) {
     session->serial_debug_active = false;
 }
 
+#ifndef EDGE_GATEWAY_MAP_PATH
+#define EDGE_GATEWAY_MAP_PATH "/etc/edgenode-modbus.map"
+#endif
+
+static void export_gateway(edge_ws_app *app) {
+    if (!app->gateway) {
+        remove("/tmp/edgenode-modbus.csv");
+        return;
+    }
+    if (app->gateway && !edge_modbus_gateway_export(app->gateway, "/tmp/edgenode-modbus.csv")) {
+        remove("/tmp/edgenode-modbus.csv");
+        syslog(LOG_ERR, "cannot export Modbus gateway register map");
+    }
+}
+
+static void acquisition_sample(void *context, const uint8_t platform[16],
+    const edge_acquisition_sample *sample) {
+    edge_ws_app *app = context;
+    edge_modbus_gateway_update(app->gateway, platform, sample, monotonic_ms());
+}
+
+static edge_modbus_gateway *prepare_gateway(const edge_acquisition_source *sources, size_t count, uint16_t port) {
+    for (size_t s = 0; s < count; ++s) {
+        const edge_runtime_config *config = sources[s].config;
+        for (size_t i = 0; i < config->item_count; ++i) {
+            const iot_edge_v1_ConfigItem *item = &config->items[i];
+            if ((item->which_item == iot_edge_v1_ConfigItem_endpoint_tag &&
+                 item->item.endpoint.enabled && item->item.endpoint.mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER &&
+                 item->item.endpoint.port == port) ||
+                (item->which_item == iot_edge_v1_ConfigItem_dtu_tag && item->item.dtu.enabled &&
+                 item->item.dtu.south_mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER &&
+                 item->item.dtu.south_port == port)) return NULL;
+        }
+    }
+    return edge_modbus_gateway_prepare(EDGE_GATEWAY_MAP_PATH, sources, count);
+}
+
 static void acquisition_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
     edge_ws_app *app = context;
     edge_ws_session *session = session_for_platform(app, platform_id);
@@ -551,6 +589,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_raw_telemetry = true;
     hello->supports_external_io = access("/etc/init.d/dtu-io", X_OK) == 0;
     hello->supports_external_io_milliamps = hello->supports_external_io;
+    hello->supports_modbus_gateway = true;
     hello->supports_node_io = hello->supports_external_io;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -903,6 +942,90 @@ static size_t build_acquisition_sources(
     return count;
 }
 
+static bool apply_gateway_settings(edge_ws_app *app, const iot_edge_v1_ModbusGatewaySettings *settings,
+    char *error, size_t error_size) {
+    if (!settings->port || settings->port > 65535 || !settings->interface_name[0] ||
+        strspn(settings->interface_name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-") != strlen(settings->interface_name)) {
+        snprintf(error, error_size, "监听接口或端口无效"); return false;
+    }
+    edge_app_config candidate = app->config_storage;
+    candidate.modbus_gateway = settings->enabled;
+    candidate.modbus_gateway_port = (uint16_t)settings->port;
+    safe_copy(candidate.modbus_gateway_interface, sizeof(candidate.modbus_gateway_interface), settings->interface_name);
+    const char *previous_interface = app->config->modbus_gateway_interface[0]
+        ? app->config->modbus_gateway_interface : app->config->lan_interface;
+    const bool reuse = settings->enabled && edge_modbus_gateway_listening(app->gateway_server) &&
+        app->config->modbus_gateway_port == settings->port && !strcmp(previous_interface, settings->interface_name);
+    edge_modbus_gateway *map = NULL;
+    edge_modbus_gateway_server *server = NULL;
+    if (settings->enabled) {
+        edge_acquisition_source sources[EDGE_MAX_PLATFORMS];
+        const size_t count = build_acquisition_sources(app, NULL, NULL, sources);
+        map = prepare_gateway(sources, count, candidate.modbus_gateway_port);
+        if (!map) { snprintf(error, error_size, "地址映射不可用、容量已满或监听端口冲突"); return false; }
+        server = reuse ? app->gateway_server : edge_modbus_gateway_listen(app->loop, map,
+            candidate.modbus_gateway_interface, candidate.modbus_gateway_port);
+        if (!server) { edge_modbus_gateway_free(map); snprintf(error, error_size, "无法绑定监听接口或端口"); return false; }
+    }
+    if (!edge_acquisition_set_gateway_enabled(app->acquisition, settings->enabled)) {
+        if (!reuse) edge_modbus_gateway_close(server);
+        edge_modbus_gateway_free(map);
+        snprintf(error, error_size, "采集进程忙，请稍后重试"); return false;
+    }
+    if (!edge_config_save_modbus_gateway(&candidate)) {
+        if (!edge_acquisition_set_gateway_enabled(app->acquisition, app->config->modbus_gateway))
+            syslog(LOG_ERR, "cannot restore gateway sampling mode after UCI failure");
+        if (!reuse) edge_modbus_gateway_close(server);
+        edge_modbus_gateway_free(map);
+        snprintf(error, error_size, "无法持久保存网关配置"); return false;
+    }
+    if (reuse) edge_modbus_gateway_replace(server, map);
+    else edge_modbus_gateway_close(app->gateway_server);
+    edge_modbus_gateway_free(app->gateway);
+    app->gateway = map; app->gateway_server = server;
+    app->config_storage = candidate;
+    export_gateway(app);
+    return true;
+}
+
+static bool gateway_points(edge_ws_session *session, const iot_edge_v1_ModbusGatewayRequest *request,
+    iot_edge_v1_ModbusGatewayResult *result) {
+    edge_modbus_gateway *loaded = NULL;
+    const edge_modbus_gateway *map = session->app->gateway;
+    if (!map) {
+        loaded = edge_modbus_gateway_load(EDGE_GATEWAY_MAP_PATH);
+        map = loaded;
+        if (!map) { safe_copy(result->message, sizeof(result->message), "无法读取寄存器地址预留表"); return false; }
+    }
+    const bool success = edge_modbus_gateway_points(map, session->config->id, &session->runtime_config,
+        session->app->config->modbus_gateway, edge_modbus_gateway_listening(session->app->gateway_server),
+        request, result, monotonic_ms());
+    edge_modbus_gateway_free(loaded);
+    return success;
+}
+
+static void handle_gateway_request(edge_ws_session *session, const iot_edge_v1_Envelope *input) {
+    const iot_edge_v1_ModbusGatewayRequest request = input->payload.modbus_gateway_request;
+    if (request.request_id.size != 16U) return;
+    char error[257] = {0};
+    const bool success = !request.has_settings || apply_gateway_settings(session->app, &request.settings, error, sizeof(error));
+    iot_edge_v1_Envelope *output = &session->app->envelope;
+    if (!init_envelope(session, output)) return;
+    output->which_payload = iot_edge_v1_Envelope_modbus_gateway_result_tag;
+    iot_edge_v1_ModbusGatewayResult *result = &output->payload.modbus_gateway_result;
+    edge_protocol_set_bytes(&result->request_id, sizeof(result->request_id.bytes), request.request_id.bytes, 16U);
+    result->success = success;
+    safe_copy(result->message, sizeof(result->message), success ? "ok" : error);
+    result->has_settings = true;
+    result->settings.enabled = session->app->config->modbus_gateway;
+    result->settings.port = session->app->config->modbus_gateway_port;
+    safe_copy(result->settings.interface_name, sizeof(result->settings.interface_name),
+        session->app->config->modbus_gateway_interface[0] ? session->app->config->modbus_gateway_interface : session->app->config->lan_interface);
+    if (result->success && request.include_points)
+        result->success = gateway_points(session, &request, result);
+    if (!send_envelope(session, output)) syslog(LOG_WARNING, "Modbus gateway configuration reply was not sent");
+}
+
 static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
     const edge_config_replay replay = edge_protocol_config_replay(envelope,
         session->spool.active_config.revision, session->spool.active_config.digest);
@@ -938,6 +1061,7 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     const iot_edge_v1_ConfigCommit *commit = &committed;
     edge_runtime_config candidate = {0};
     edge_acquisition *candidate_acquisition = NULL;
+    edge_modbus_gateway *candidate_gateway = NULL;
     char apply_error[256] = "configuration digest or item count failed";
     if (commit->sha256.size != 32U ||
         !edge_runtime_config_load(&candidate, &session->spool.staging_config,
@@ -953,6 +1077,9 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     candidate_acquisition = edge_acquisition_create(acquisition_telemetry,
                                                      acquisition_command_result,
                                                      session->app);
+    edge_acquisition_set_sample_callback(candidate_acquisition,
+        acquisition_sample);
+    (void)edge_acquisition_set_gateway_enabled(candidate_acquisition, session->app->config->modbus_gateway);
     edge_acquisition_set_debug_callback(candidate_acquisition, acquisition_debug);
     edge_acquisition_set_dtu_callback(candidate_acquisition, acquisition_dtu);
     edge_acquisition_set_io_callback(candidate_acquisition, acquisition_io_capability);
@@ -968,7 +1095,18 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                            "config_runtime_invalid", apply_error);
         return;
     }
+    if (session->app->config->modbus_gateway) {
+        candidate_gateway = prepare_gateway(sources, source_count, session->app->config->modbus_gateway_port);
+        if (!candidate_gateway) {
+            edge_acquisition_destroy(candidate_acquisition);
+            edge_runtime_config_free(&candidate);
+            send_config_result(session, commit->revision, commit->sha256.bytes, false,
+                "modbus_gateway_invalid", "gateway address map unavailable, full, or listener port conflicts");
+            return;
+        }
+    }
     if (!edge_acquisition_prepare_io_swap(session->app->acquisition)) {
+        edge_modbus_gateway_free(candidate_gateway);
         edge_acquisition_destroy(candidate_acquisition);
         edge_runtime_config_free(&candidate);
         send_config_result(session, commit->revision, commit->sha256.bytes, false,
@@ -988,6 +1126,7 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                            "previous acquisition worker could not restart",
                            restart_error);
         sync_acquisition_io(session->app);
+        edge_modbus_gateway_free(candidate_gateway);
         edge_acquisition_destroy(candidate_acquisition);
         edge_runtime_config_free(&candidate);
         send_config_result(session, commit->revision, commit->sha256.bytes, false,
@@ -996,6 +1135,7 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     }
     if (!edge_spool_config_commit(&session->spool, commit->revision,
                                   commit->sha256.bytes)) {
+        edge_modbus_gateway_free(candidate_gateway);
         edge_acquisition_destroy(candidate_acquisition);
         char restart_error[128] = {0};
         if (!edge_acquisition_start(session->app->acquisition, restart_error,
@@ -1012,6 +1152,10 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     edge_acquisition_destroy(session->app->acquisition);
     edge_runtime_config_free(&session->runtime_config);
     session->app->acquisition = candidate_acquisition;
+    edge_modbus_gateway_replace(session->app->gateway_server, candidate_gateway);
+    edge_modbus_gateway_free(session->app->gateway);
+    session->app->gateway = candidate_gateway;
+    export_gateway(session->app);
     session->runtime_config = candidate;
     session->dtu_status_count = 0;
     for (size_t i = 0; i < 8; ++i) edge_report_free(&session->dtu_snapshots[i]);
@@ -1825,6 +1969,9 @@ static void dispatch_platform_message(edge_ws_session *session,
         if (session->enrolled)
             handle_log_request(session, envelope);
         break;
+    case iot_edge_v1_Envelope_modbus_gateway_request_tag:
+        handle_gateway_request(session, envelope);
+        break;
     case iot_edge_v1_Envelope_log_level_request_tag:
         if (session->enrolled)
             handle_log_level_request(session, envelope);
@@ -2333,6 +2480,8 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
     memset(app, 0, sizeof(*app));
     edge_log_init();
     app->loop = loop;
+    app->config_storage = *config;
+    config = &app->config_storage;
     app->config = config;
     app->traffic.event_fd = app->traffic.query_fd = -1;
     if (!edge_vpn_recover_resources()) return false;
@@ -2394,6 +2543,8 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
     const size_t source_count = build_acquisition_sources(app, NULL, NULL, sources);
     app->acquisition = edge_acquisition_create(
         acquisition_telemetry, acquisition_command_result, app);
+    edge_acquisition_set_sample_callback(app->acquisition, acquisition_sample);
+    (void)edge_acquisition_set_gateway_enabled(app->acquisition, config->modbus_gateway);
     edge_acquisition_set_debug_callback(app->acquisition, acquisition_debug);
     edge_acquisition_set_dtu_callback(app->acquisition, acquisition_dtu);
     edge_acquisition_set_io_callback(app->acquisition, acquisition_io_capability);
@@ -2404,18 +2555,27 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         !edge_acquisition_apply_multi(app->acquisition, sources, source_count,
                                       monotonic_ms(), acquisition_error,
                                       sizeof(acquisition_error)) ||
+        (config->modbus_gateway &&
+         (!(app->gateway = prepare_gateway(sources, source_count, config->modbus_gateway_port)) ||
+          !(app->gateway_server = edge_modbus_gateway_listen(loop, app->gateway,
+              config->modbus_gateway_interface[0] ? config->modbus_gateway_interface : config->lan_interface,
+              config->modbus_gateway_port)))) ||
         !edge_acquisition_start(app->acquisition, acquisition_error,
                                 sizeof(acquisition_error))) {
-        syslog(LOG_ERR, "shared acquisition config rejected: %s", acquisition_error);
+        syslog(LOG_ERR, "acquisition or Modbus gateway initialization rejected: %s", acquisition_error[0] ? acquisition_error : "gateway map unavailable or LAN listener cannot bind");
         edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_CONFIG, 6U);
         edge_acquisition_destroy(app->acquisition);
         app->acquisition = NULL;
+        edge_modbus_gateway_close(app->gateway_server);
+        edge_modbus_gateway_free(app->gateway);
+        app->gateway_server = NULL; app->gateway = NULL;
         for (size_t cleanup = 0U; cleanup < config->platform_count; ++cleanup) {
             edge_runtime_config_free(&app->sessions[cleanup].runtime_config);
             edge_spool_free(&app->sessions[cleanup].spool);
         }
         return false;
     }
+    export_gateway(app);
     return true;
 }
 
@@ -2456,6 +2616,10 @@ void edge_ws_app_stop(edge_ws_app *app) {
     ev_io_stop(app->loop, &app->acquisition_io);
     edge_acquisition_destroy(app->acquisition);
     app->acquisition = NULL;
+    edge_modbus_gateway_close(app->gateway_server);
+    edge_modbus_gateway_free(app->gateway);
+    app->gateway_server = NULL; app->gateway = NULL;
+    remove("/tmp/edgenode-modbus.csv");
     for (size_t index = 0; index < app->config->platform_count; ++index) {
         edge_ws_session *session = &app->sessions[index];
         clear_report_snapshots(session);

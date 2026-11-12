@@ -189,6 +189,8 @@ typedef struct {
 } edge_dtu_channel;
 
 struct edge_acquisition {
+    edge_acquisition_sample_callback sample_callback;
+    bool gateway_enabled;
     edge_acquisition_dtu_callback dtu_callback;
     edge_acquisition_io_callback io_callback;
     edge_external_io_snapshot io_capability;
@@ -234,6 +236,8 @@ struct edge_acquisition {
 };
 
 typedef enum {
+    EDGE_ACQUISITION_EVENT_SAMPLE = 23,
+    EDGE_ACQUISITION_CONTROL_GATEWAY = 24,
     EDGE_ACQUISITION_EVENT_EXTERNAL_IO = 14,
     EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_COMMIT = 15,
     EDGE_ACQUISITION_EVENT_IO_CAPABILITY = 16,
@@ -278,8 +282,46 @@ typedef struct {
         iot_edge_v1_SerialDebugEvent serial_event;
         iot_edge_v1_DtuStatus dtu_status;
         edge_external_io_snapshot io_capability;
+        edge_acquisition_sample sample;
     } payload;
 } edge_acquisition_message;
+
+static bool worker_send(edge_acquisition *acquisition, uint32_t type,
+    const uint8_t platform_id[16], const void *payload, uint32_t payload_size);
+
+void edge_acquisition_set_sample_callback(edge_acquisition *acquisition,
+    edge_acquisition_sample_callback callback) {
+    if (acquisition) {
+        acquisition->sample_callback = callback;
+        acquisition->gateway_enabled = callback != NULL;
+    }
+}
+
+bool edge_acquisition_set_gateway_enabled(edge_acquisition *acquisition, bool enabled) {
+    if (!acquisition || (enabled && !acquisition->sample_callback)) return false;
+    if (acquisition->worker_pid > 0) {
+        const uint8_t value = enabled ? 1 : 0;
+        if (!worker_send(acquisition, EDGE_ACQUISITION_CONTROL_GATEWAY, (const uint8_t[16]){0}, &value, 1)) return false;
+    }
+    acquisition->gateway_enabled = enabled;
+    return true;
+}
+
+static void publish_gateway_value(edge_acquisition_device *device,
+    const iot_edge_v1_TelemetryValue *value, int64_t observed_at_ms) {
+    edge_acquisition *owner = device->owner;
+    if (!owner->sample_callback || !owner->gateway_enabled) return;
+    edge_acquisition_sample sample = {0};
+    memcpy(sample.device_id, device->config->device_id.bytes, 16);
+    snprintf(sample.element_id, sizeof(sample.element_id), "%s", value->element_id);
+    sample.value = value->value;
+    sample.valid = value->has_value && (!value->quality[0] || !strcmp(value->quality, "good"));
+    sample.observed_at_ms = observed_at_ms;
+    if (owner->worker_child) {
+        if (!worker_send(owner, EDGE_ACQUISITION_EVENT_SAMPLE, device->platform_id, &sample, sizeof(sample)))
+            syslog(LOG_WARNING, "Modbus gateway sample not delivered: acquisition backpressure");
+    } else owner->sample_callback(owner->callback_context, device->platform_id, &sample);
+}
 
 static void serial_observe(edge_acquisition *acquisition, const char *path,
     const iot_edge_v1_SerialSettings *settings, const char *direction,
@@ -1925,7 +1967,7 @@ static void fill_point_value(edge_acquisition_device *device, edge_acquisition_p
         ++response->references;
     release_response(point->response);
     point->response = response;
-    if (device->raw_telemetry && device->acquisition_active &&
+    if (!device->owner->gateway_enabled && device->raw_telemetry && device->acquisition_active &&
         device->runtime.write_count == 0) {
         point->valid = response != NULL;
         return;
@@ -1948,8 +1990,11 @@ static void fill_point_value(edge_acquisition_device *device, edge_acquisition_p
         copy_text(point->value.unit, sizeof(point->value.unit), config->unit);
     }
     point->value.has_value = decode_scalar(point->item, raw, size, &point->value.value);
-    point->valid = point->value.has_value;
-    if (point->valid && response) publish_debug_value(device, response->packet_id, &point->value);
+    /* Raw telemetry validity depends on the exchange, not the optional local decoder. */
+    point->valid = device->raw_telemetry && device->acquisition_active && device->runtime.write_count == 0
+        ? response != NULL : point->value.has_value;
+    publish_gateway_value(device, &point->value, response ? response->observed_at_ms : current_ms());
+    if (point->value.has_value && response) publish_debug_value(device, response->packet_id, &point->value);
 }
 
 static edge_io_result read_acquisition(void *context, edge_device_sample *sample) {
@@ -2333,6 +2378,17 @@ static edge_io_result device_read(void *context, edge_device_sample *sample) {
     } else {
         update_derived_samples(device);
     }
+    for (size_t index = 0; device->owner->gateway_enabled && index < device->point_count; ++index) {
+        edge_acquisition_point *point = &device->points[index];
+        if (point->valid) continue;
+        iot_edge_v1_TelemetryValue invalid = iot_edge_v1_TelemetryValue_init_zero;
+        const char *element = point->item->which_item == iot_edge_v1_ConfigItem_modbus_register_tag
+            ? point->item->item.modbus_register.element_id
+            : point->item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag
+                ? point->item->item.industrial_point.element_id : point->item->item.s7_area.element_id;
+        copy_text(invalid.element_id, sizeof(invalid.element_id), element);
+        publish_gateway_value(device, &invalid, current_ms());
+    }
     finish_debug_acquisition(device, result);
     device->acquisition_active = false;
     return result;
@@ -2537,7 +2593,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         return false;
     }
     size_t count = 0, binary_size = 0;
-    if (!raw_report) {
+    if (!raw_report || device->owner->gateway_enabled) {
     for (size_t i = 0; i < device->point_count; ++i) {
         const iot_edge_v1_Sl651ElementConfig *element = &device->points[i].item->item.sl651_element;
         if (strcmp(function, element->function_code) || element->response_element != response)
@@ -2553,6 +2609,7 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
         bool binary =
             !strcmp(element->encoding, "JPEG") ||
             ((!strcmp(element->encoding, "HEX") || !strcmp(element->encoding, "DICT")) && size > 63);
+        if (raw_report && binary) continue;
         bool decoded = false;
         if (binary && size <= 8192 && size <= EDGE_SL651_BODY_MAX - binary_size) {
             value->encoded_value = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(size));
@@ -2565,6 +2622,13 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
             }
         } else if (!binary)
             decoded = sl651_value(element, bytes, size, &value->value);
+        if (!decoded && raw_report) {
+            copy_text(value->element_id, sizeof(value->element_id), element->element_id);
+            publish_gateway_value(device, value, sl651_observed(device, frame->body));
+            free(value->encoded_value);
+            memset(value, 0, sizeof(*value));
+            continue;
+        }
         if (!decoded) {
             for (size_t j = 0; j < count; ++j)
                 free(values[j].encoded_value);
@@ -2586,11 +2650,20 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     if (parsed_packet) for (size_t index = 0; index < count; ++index)
         publish_debug_value(device, parsed_packet, &values[index]);
     for (size_t index = 0; index < count; ++index) values[index].sample_time_ms = sl651_observed(device, frame->body);
+    for (size_t index = 0; index < count; ++index)
+        publish_gateway_value(device, &values[index], values[index].sample_time_ms);
+    if (raw_report) {
+        for (size_t index = 0; index < count; ++index) free(values[index].encoded_value);
+        memset(values, 0, count * sizeof(*values));
+        count = 0;
+    }
+    if (!raw_report) {
     const int64_t derived_at = current_ms();
     (void)edge_derived_update(device->derived, values, count, derived_at);
     device->derived_deadline = edge_derived_deadline(device->derived, derived_at);
     edge_derived_values(device->derived, values + count);
     count += edge_derived_count(device->derived);
+    }
     }
     size_t starts[129] = {0}, parts = 0;
     for (size_t index = 0; index < count;) {
@@ -4577,6 +4650,10 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
         acquisition->io_quiesce_token = message.report_token;
         return true;
     }
+    if (message.type == EDGE_ACQUISITION_CONTROL_GATEWAY && message.payload_size == 1U) {
+        acquisition->gateway_enabled = message.payload.telemetry[0] != 0;
+        return true;
+    }
     if (message.type == EDGE_ACQUISITION_CONTROL_IO_RESUME && message.payload_size == 0U) {
         acquisition->io_quiesce_requested = false;
         acquisition->io_quiesce_sent = false;
@@ -4827,6 +4904,8 @@ static bool prepare_external_io(edge_acquisition_device *device, const edge_exte
             break;
         }
     }
+    for (size_t i = 0; i < device->external_io_count; ++i)
+        publish_gateway_value(device, &values[i], current_ms());
     const uint64_t interval = device->config->io_interval_ms ? device->config->io_interval_ms : (uint64_t)device->config->report_interval_sec * 1000U;
     device->external_io_next_ms = now + interval;
     if (!any_available && device->external_io_unavailable) return true;
@@ -5119,6 +5198,9 @@ static void worker_reaped(edge_acquisition *acquisition, uint64_t now_ms) {
     acquisition->worker_fd = -1;
     acquisition->worker_pid = 0;
     acquisition->worker_restart_at_ms = now_ms + EDGE_ACQUISITION_RESTART_MS;
+    if (acquisition->sample_callback)
+        for (size_t i = 0; i < acquisition->platform_count; ++i)
+            acquisition->sample_callback(acquisition->callback_context, acquisition->platform_ids[i], NULL);
     for (size_t platform = 0U; platform < acquisition->platform_count; ++platform)
         for (pb_size_t index = 0U;
              index < acquisition->cached_status[platform].devices_count; ++index) {
@@ -5157,7 +5239,10 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_IO_QUIESCED && message.payload_size == 1U && message.report_token == acquisition->io_quiesce_token) {
+        if (message.type == EDGE_ACQUISITION_EVENT_SAMPLE && message.payload_size == sizeof(message.payload.sample)) {
+            if (acquisition->sample_callback)
+                acquisition->sample_callback(acquisition->callback_context, message.platform_id, &message.payload.sample);
+        } else if (message.type == EDGE_ACQUISITION_EVENT_IO_QUIESCED && message.payload_size == 1U && message.report_token == acquisition->io_quiesce_token) {
             acquisition->io_quiesced_ack = true;
         } else if (message.type == EDGE_ACQUISITION_EVENT_IO_CAPABILITY &&
             message.payload_size == sizeof(message.payload.io_capability)) {

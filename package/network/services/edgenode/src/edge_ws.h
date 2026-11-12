@@ -91,15 +91,21 @@ typedef struct {
     bool modem_result_received;
 } edge_ws_session;
 
+typedef struct edge_modbus_gateway edge_modbus_gateway;
+typedef struct edge_modbus_gateway_server edge_modbus_gateway_server;
+
 struct edge_ws_app {
     struct ev_loop *loop;
     const edge_app_config *config;
+    edge_app_config config_storage;
     struct ev_timer acquisition_timer;
     struct ev_timer status_timer;
     struct ev_io acquisition_io;
     struct ev_io traffic_io;
     edge_traffic traffic;
     edge_acquisition *acquisition;
+    edge_modbus_gateway *gateway;
+    edge_modbus_gateway_server *gateway_server;
     edge_ws_session sessions[EDGE_MAX_PLATFORMS];
     iot_edge_v1_Envelope envelope;
     uint8_t wire[EDGENODE_MAX_WS_MESSAGE];

@@ -33,12 +33,26 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
     # Flexible array members are standard C99, but MSVC reports C4200.
-    add_compile_options(/W4 /WX /permissive- /wd4200)
+    add_compile_options(/W4 /WX /permissive- /wd4200 /utf-8)
 else()
     add_compile_options(-Wall -Wextra -Werror)
 endif()
 
 enable_testing()
+
+option(EDGENODE_GATEWAY_NETWORK_TESTS "验证 Modbus 网关实际 TCP 连接与分包" OFF)
+
+add_executable(edge_modbus_gateway_test edge_modbus_gateway_test.c
+    "${EDGENODE_ROOT}/src/edge_modbus_gateway.c"
+    "${EDGENODE_ROOT}/src/edge_runtime_config.c"
+    "${EDGENODE_ROOT}/src/edge_industrial.c"
+    "${EDGENODE_ROOT}/src/edge_derived.c")
+target_include_directories(edge_modbus_gateway_test PRIVATE "${EDGENODE_ROOT}/src")
+target_link_libraries(edge_modbus_gateway_test PRIVATE edgenode_nanopb)
+if(NOT MSVC)
+    target_link_libraries(edge_modbus_gateway_test PRIVATE m)
+endif()
+add_test(NAME edge_modbus_gateway COMMAND edge_modbus_gateway_test)
 
 option(EDGENODE_EXTERNAL_IO_TESTS "验证外部 IO 的 ubus 读取和写入" OFF)
 if(EDGENODE_EXTERNAL_IO_TESTS)
@@ -228,6 +242,22 @@ set_target_properties(edgenode_stability_x64 PROPERTIES
 add_test(NAME edgenode_stability COMMAND edgenode_stability_x64 --iterations 20000)
 
 if(UNIX)
+    if(EDGENODE_GATEWAY_NETWORK_TESTS)
+        find_path(GATEWAY_LIBEV_INCLUDE_DIR ev.h REQUIRED)
+        find_library(GATEWAY_LIBEV_LIBRARY ev REQUIRED)
+        add_executable(edge_modbus_gateway_fixture edge_modbus_gateway_fixture.c
+            "${EDGENODE_ROOT}/src/edge_modbus_gateway.c"
+            "${EDGENODE_ROOT}/src/edge_modbus_gateway_transport.c"
+            "${EDGENODE_ROOT}/src/edge_runtime_config.c"
+            "${EDGENODE_ROOT}/src/edge_industrial.c"
+            "${EDGENODE_ROOT}/src/edge_derived.c")
+        target_include_directories(edge_modbus_gateway_fixture PRIVATE "${EDGENODE_ROOT}/src" "${GATEWAY_LIBEV_INCLUDE_DIR}")
+        target_link_libraries(edge_modbus_gateway_fixture PRIVATE edgenode_nanopb "${GATEWAY_LIBEV_LIBRARY}" m)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME edge_modbus_gateway_network COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/edge_modbus_gateway_network_test.py" "$<TARGET_FILE:edge_modbus_gateway_fixture>")
+        set_tests_properties(edge_modbus_gateway_network PROPERTIES TIMEOUT 15)
+    endif()
     find_path(MBEDTLS_INCLUDE_DIR mbedtls/sha256.h PATH_SUFFIXES mbedtls3)
     find_library(MBEDCRYPTO_LIBRARY mbedcrypto PATH_SUFFIXES mbedtls3)
     if(MBEDTLS_INCLUDE_DIR AND MBEDCRYPTO_LIBRARY)

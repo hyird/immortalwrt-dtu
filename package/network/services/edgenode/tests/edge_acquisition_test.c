@@ -37,6 +37,15 @@ static void copy_text(char *output, size_t capacity, const char *input) {
 
 static void receive_modbus_request(int fd, uint8_t request[12]);
 
+static unsigned gateway_samples;
+static void gateway_sample(void *context, const uint8_t platform[16], const edge_acquisition_sample *sample) {
+    (void)context; (void)platform;
+    if (sample && sample->valid) {
+        assert(sample->element_id[0] && sample->observed_at_ms > 0);
+        ++gateway_samples;
+    }
+}
+
 static bool raw_fixture;
 extern int64_t edge_test_io_ai_microamps;
 
@@ -256,6 +265,7 @@ static void sl651_send_report(int fd, uint8_t function, uint8_t serial, uint8_t 
     assert(write(fd, bytes, sizeof(bytes)) == (ssize_t)sizeof(bytes));
 }
 static void verify_sl651_commit(void) {
+    gateway_samples = 0;
     sl651_allow_report = sl651_allow_command = false;
     sl651_reports = sl651_results = sl651_images = sl651_raw_frames = 0;
     int reservation = socket(AF_INET, SOCK_STREAM, 0); assert(reservation >= 0);
@@ -288,6 +298,7 @@ static void verify_sl651_commit(void) {
     memset(values[4].item.sl651_element.guide.bytes, 0xF3, 2);
     config.item_count = 5;
     edge_acquisition *acquisition = edge_acquisition_create(sl651_store_report, sl651_store_command, NULL); assert(acquisition);
+    edge_acquisition_set_sample_callback(acquisition, gateway_sample);
     char error[256] = {0}; assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(), error, sizeof(error)));
     const uint8_t platform[16] = {0};
     assert(edge_acquisition_set_raw_telemetry(acquisition, platform, raw_fixture));
@@ -301,7 +312,7 @@ static void verify_sl651_commit(void) {
     assert(fd >= 0); sl651_send_report(fd, 0x32, 1, 3);
     uint64_t until = monotonic_ms() + 5000;
     while (!sl651_reports && monotonic_ms() < until) sl651_pump(acquisition, 20);
-    assert(sl651_reports); struct pollfd ready = {.fd = fd, .events = POLLIN};
+    assert(sl651_reports && gateway_samples); struct pollfd ready = {.fd = fd, .events = POLLIN};
     assert(poll(&ready, 1, 100) == 0); // IPC delivery alone must never confirm M2.
     sl651_allow_report = true; uint8_t bytes[128]; ssize_t n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
     assert(n >= 25 && bytes[n-3] == 4 && bytes[15] == 1);
@@ -1587,9 +1598,11 @@ static void verify_modbus_incomplete_scan_not_reported(void) {
               sizeof(items[3].item.modbus_register.data_type), "FLOAT32");
     config.item_count = 4U;
     complete_modbus_records = 0U;
+    gateway_samples = 0;
     edge_acquisition *acquisition = edge_acquisition_create(
         complete_modbus_telemetry, command, NULL);
     assert(acquisition != NULL);
+    edge_acquisition_set_sample_callback(acquisition, gateway_sample);
     char error[256] = {0};
     if (!edge_acquisition_apply(acquisition, &config, monotonic_ms(),
                                 error, sizeof(error))) {
@@ -1613,7 +1626,7 @@ static void verify_modbus_incomplete_scan_not_reported(void) {
         edge_acquisition_tick(acquisition, monotonic_ms());
         usleep(10000U);
     }
-    assert(complete_modbus_records >= 1U);
+    assert(complete_modbus_records >= 1U && gateway_samples);
     /* Both full scans may already have queued their records before the parent
      * drains worker events. Establish the settled baseline before injecting. */
     const uint64_t settled_at = monotonic_ms() + 150U;

@@ -210,6 +210,18 @@ PB_BIND(iot_edge_v1_LogLine, iot_edge_v1_LogLine, 2)
 PB_BIND(iot_edge_v1_LogResult, iot_edge_v1_LogResult, 4)
 
 
+PB_BIND(iot_edge_v1_ModbusGatewaySettings, iot_edge_v1_ModbusGatewaySettings, AUTO)
+
+
+PB_BIND(iot_edge_v1_ModbusGatewayPoint, iot_edge_v1_ModbusGatewayPoint, 2)
+
+
+PB_BIND(iot_edge_v1_ModbusGatewayRequest, iot_edge_v1_ModbusGatewayRequest, AUTO)
+
+
+PB_BIND(iot_edge_v1_ModbusGatewayResult, iot_edge_v1_ModbusGatewayResult, 4)
+
+
 PB_BIND(iot_edge_v1_LogLevelRequest, iot_edge_v1_LogLevelRequest, AUTO)
 
 

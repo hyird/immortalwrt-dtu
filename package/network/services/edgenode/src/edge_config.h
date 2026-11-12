@@ -28,6 +28,9 @@ typedef struct {
     char wan_interface[33];
     char modem_at_port[97];
     char modem_status_path[129];
+    bool modbus_gateway;
+    uint16_t modbus_gateway_port;
+    char modbus_gateway_interface[33];
     bool bridge;
     bool serial_rs485;
     uint16_t heartbeat_interval_sec;
@@ -41,3 +44,5 @@ bool edge_config_valid_platform_url(const char *value);
 
 /* Loads /etc/config/edgenode through libuci. error never contains credentials. */
 bool edge_config_load(edge_app_config *config, char *error, size_t error_size);
+
+bool edge_config_save_modbus_gateway(const edge_app_config *config);

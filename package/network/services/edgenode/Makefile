@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=edgenode
-PKG_VERSION:=0.3.81
+PKG_VERSION:=0.3.82
 PKG_RELEASE:=1
 
 NANOPB_VERSION:=0.4.9.1
@@ -31,6 +31,7 @@ endef
 
 define Package/edgenode/conffiles
 /etc/config/edgenode
+/etc/edgenode-modbus.map
 endef
 
 define Build/Prepare
@@ -82,6 +83,8 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/edge/src/edge_acquisition.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_device_runtime.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_modbus.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_modbus_gateway.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_modbus_gateway_transport.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_s7.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_industrial.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_sl651.c \
@@ -100,6 +103,7 @@ define Package/edgenode/install
 	$(INSTALL_BIN) $(CURDIR)/files/edgenode.init $(1)/etc/init.d/edgenode
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/edgenode.config $(1)/etc/config/edgenode
+	$(INSTALL_CONF) $(CURDIR)/files/edgenode-modbus.map $(1)/etc/edgenode-modbus.map
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) $(CURDIR)/files/95-edgenode-platform $(1)/etc/uci-defaults/95-edgenode-platform
 	$(INSTALL_DIR) $(1)/usr/share/edgenode

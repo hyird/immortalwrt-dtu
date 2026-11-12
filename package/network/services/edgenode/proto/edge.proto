@@ -144,6 +144,7 @@ enum PlatformConfigOperation {
 message Empty {}
 
 message Hello {
+  bool supports_modbus_gateway = 42;
   // Required to negotiate the mA external IO protocol.
   bool supports_external_io_milliamps = 41;
   bool supports_node_io = 40;
@@ -947,6 +948,50 @@ message LogResult {
   repeated LogLine lines = 4 [(nanopb).max_count = 48];
 }
 
+// Node-wide gateway settings. Omitted request settings perform a read only query.
+message ModbusGatewaySettings {
+  bool enabled = 1;
+  uint32 port = 2;
+  string interface_name = 3 [(nanopb).max_length = 15];
+}
+message ModbusGatewayPoint {
+  bytes device_id = 1 [(nanopb).max_size = 16];
+  string element_id = 2 [(nanopb).max_length = 64];
+  string name = 3 [(nanopb).max_length = 100];
+  string unit = 4 [(nanopb).max_length = 32];
+  string device_name = 5 [(nanopb).max_length = 100];
+  string source_protocol = 6 [(nanopb).max_length = 16];
+  string source_type = 7 [(nanopb).max_length = 24];
+  bool has_mapping = 8;
+  string state = 9 [(nanopb).max_length = 24];
+  uint32 address = 10;
+  uint32 words = 11;
+  uint32 value_type = 12;
+  uint32 quality = 13;
+  int64 observed_at_ms = 14;
+  string value = 15 [(nanopb).max_length = 128];
+  string byte_order = 16 [(nanopb).max_length = 24];
+  bool writable = 17;
+  string source_address = 18 [(nanopb).max_length = 64];
+}
+
+message ModbusGatewayRequest {
+  bytes request_id = 1 [(nanopb).max_size = 16];
+  ModbusGatewaySettings settings = 2;
+  uint32 offset = 3;
+  bool include_points = 4;
+  uint32 limit = 5;
+}
+message ModbusGatewayResult {
+  bytes request_id = 1 [(nanopb).max_size = 16];
+  bool success = 2;
+  string message = 3 [(nanopb).max_length = 256];
+  ModbusGatewaySettings settings = 4;
+  repeated ModbusGatewayPoint points = 5 [(nanopb).max_count = 8];
+  uint32 total = 6;
+  uint32 offset = 7;
+}
+
 message LogLevelRequest {
   bytes request_id = 1 [(nanopb).max_size = 16];
   string level = 2 [(nanopb).max_length = 8];
@@ -1093,5 +1138,7 @@ message Envelope {
     DtuStatus dtu_status = 88;
     ExternalIoStatus external_io_status = 89;
     Error error = 90;
+    ModbusGatewayRequest modbus_gateway_request = 91;
+    ModbusGatewayResult modbus_gateway_result = 92;
   }
 }

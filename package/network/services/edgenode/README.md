@@ -4,6 +4,22 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
+## Modbus TCP 采集网关
+
+支持的管理平台可通过“边缘节点 → Modbus 网关”读取和保存节点的开关、监听接口及端口，无需重启。Hello 的 `supports_modbus_gateway = 42` 声明远程配置能力，新增消息字段 `91/92` 保持旧协议兼容。设置先校验监听器和地址表，再持久化 UCI 并切换；失败保留旧配置。
+
+平台还能分页读取自己已下发的全部点位信息及实际地址预留，包括未映射的派生点、停用点及文本/图片点。每页最多 8 项；不返回其他平台的点位，查询不触发采集或写入地址表。数值以字符串回传，保留 64 位整数精度。页面按需读取，不新增轮询。
+
+设置 `edgenode.node.modbus_gateway='1'` 并重启服务后，节点把下发配置中的物理测点和设备绑定 IO 自动映射成只读寄存器。默认关闭，监听 `edgenode.node.modbus_gateway_interface` 指定的接口，留空时使用 `hardware.lan_interface`；网桥 LAN 必须指定承载地址的桥接口（例如 `br-lan`），不能指定桥成员网口。端口由 `edgenode.node.modbus_gateway_port` 指定，默认 `502`；Unit ID 为 `1`，支持 `03/04`。不会修改防火墙。派生点、图片及文本不转换为数值。
+
+当前地址表为 `/tmp/edgenode-modbus.csv`，按平台、设备、测点身份分配零基地址。每点占 10 个寄存器：类型（1）、质量（1）、64 位值（4）、UTC 毫秒时间（4），多字高位在前；类型 `2/3/4/5` 分别为 BOOL/INT64/UINT64/FLOAT64，质量 `0/1/2/3` 分别为未采集/有效/无效/超时。客户端必须检查质量。超时采用设备 `online_timeout_sec`，缺省 900 秒；整数保留完整 64 位，十进制文本转换为 FLOAT64。
+
+地址预留持久化在 `/etc/edgenode-modbus.map` 并列入包配置保留清单；删除点位不挪用旧地址，恢复相同身份继续使用原地址，最多保留 6553 个身份。不要删除或重排该文件。文件损坏、写入失败、容量耗尽或与南向监听端口冲突时拒绝新配置。重启或配置切换后值缓存重新采集，寄存器地址保留。采集进程异常退出会使已有值失效；本地样本事件受阻会记录错误，旧值按超时规则失效。
+
+寄存器读取在主事件循环完成，不触发南向请求；最多 8 条连接，支持分包及连续请求，30 秒未完成请求/响应时关闭连接。原始上报模式复用固件解码器更新缓存，平台报文保持原格式。主机测试入口为 `edge_modbus_gateway`；发布前还需 Linux 网络测试及实际固件验收。
+
+Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON`（需要 libev 开发文件和 Python），随后运行 `ctest --output-on-failure -R 'edge_modbus_gateway|edge_acquisition'`，覆盖实际 TCP 分包、连续请求、异常响应和采集进程的本地样本事件。
+
 ## 平台传输故障隔离（0.3.80）
 
 - 每个平台使用独立网络子进程运行 DNS、TCP、TLS、WebSocket 和压缩处理。

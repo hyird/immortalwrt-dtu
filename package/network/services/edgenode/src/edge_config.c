@@ -159,6 +159,11 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
                 set_error(error, error_size, "node IMEI must be 15 digits with valid Luhn check");
                 goto fail;
             }
+            config->modbus_gateway = bool_option(context, section, "modbus_gateway", false);
+            config->modbus_gateway_port = (uint16_t)number_option(context, section, "modbus_gateway_port", 502U, 1U, 65535U);
+            if (!copy_option(context, section, "modbus_gateway_interface", config->modbus_gateway_interface,
+                             sizeof(config->modbus_gateway_interface), false, error, error_size))
+                goto fail;
             config->heartbeat_interval_sec = (uint16_t)number_option(
                 context, section, "heartbeat_interval_sec", 300U, 5U, 3600U);
             have_node = true;
@@ -244,4 +249,32 @@ fail:
     uci_unload(context, package);
     uci_free_context(context);
     return false;
+}
+
+bool edge_config_save_modbus_gateway(const edge_app_config *config) {
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    if (!context) return false;
+    bool ok = uci_load(context, "edgenode", &package) == UCI_OK;
+    struct uci_section *node = NULL;
+    if (ok) {
+        struct uci_element *element;
+        uci_foreach_element(&package->sections, element) {
+            struct uci_section *section = uci_to_section(element);
+            if (!strcmp(section->type, "node")) { node = section; break; }
+        }
+    }
+    char port[6];
+    snprintf(port, sizeof(port), "%u", config->modbus_gateway_port);
+    const char *names[] = {"modbus_gateway", "modbus_gateway_port", "modbus_gateway_interface"};
+    const char *values[] = {config->modbus_gateway ? "1" : "0", port, config->modbus_gateway_interface};
+    ok = ok && node;
+    for (size_t i = 0; ok && i < 3; ++i) {
+        struct uci_ptr ptr = {.p = package, .s = node, .option = names[i], .value = values[i]};
+        ok = uci_set(context, &ptr) == UCI_OK;
+    }
+    if (ok) ok = uci_commit(context, &package, false) == UCI_OK;
+    if (package) uci_unload(context, package);
+    uci_free_context(context);
+    return ok;
 }

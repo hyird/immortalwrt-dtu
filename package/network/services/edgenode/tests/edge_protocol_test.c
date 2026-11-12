@@ -832,7 +832,31 @@ static void test_full_io_capability_round_trip(void) {
     edge_protocol_release(&decoded);
 }
 
+static void test_gateway_request_presence(void) {
+    iot_edge_v1_Envelope input = iot_edge_v1_Envelope_init_zero;
+    const uint8_t id[16] = {1}; const uint8_t random[10] = {2};
+    require(edge_protocol_init_envelope(&input, id, id, 1, 1, 1784688000123LL, random), "gateway envelope initialization failed");
+    input.which_payload = iot_edge_v1_Envelope_modbus_gateway_request_tag;
+    input.payload.modbus_gateway_request.request_id.size = 16;
+    input.payload.modbus_gateway_request.request_id.bytes[0] = 1;
+    for (unsigned apply = 0; apply < 2; ++apply) {
+        input.payload.modbus_gateway_request.has_settings = apply != 0;
+        input.payload.modbus_gateway_request.settings.enabled = false;
+        input.payload.modbus_gateway_request.settings.port = 1502;
+        strcpy(input.payload.modbus_gateway_request.settings.interface_name, "br-lan");
+        uint8_t wire[EDGENODE_MAX_WS_MESSAGE]; size_t size = 0; const char *error = NULL;
+        require(edge_protocol_encode(&input, wire, sizeof(wire), &size, &error), "gateway request encoding failed");
+        iot_edge_v1_Envelope output = iot_edge_v1_Envelope_init_zero;
+        require(edge_protocol_decode(wire, size, &output, &error), "gateway request decoding failed");
+        require(output.which_payload == iot_edge_v1_Envelope_modbus_gateway_request_tag, "gateway request tag changed");
+        require(output.payload.modbus_gateway_request.has_settings == (apply != 0), "read request confused with explicit disable");
+        if (apply) require(!output.payload.modbus_gateway_request.settings.enabled && output.payload.modbus_gateway_request.settings.port == 1502, "explicit disable settings lost");
+        edge_protocol_release(&output);
+    }
+}
+
 int main(void) {
+    test_gateway_request_presence();
     test_io_status_round_trip();
     test_full_io_capability_round_trip();
     test_raw_exchange_packing();
