@@ -545,7 +545,7 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     if (s7) {
         values[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
         values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
-        values[1].item.device.io_interval_ms = 300000U;
+        values[1].item.device.io_interval_ms = 1000U;
         for (unsigned index = 2; index < 4; ++index) {
             values[index] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
             values[index].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_S7_AREA;
@@ -671,7 +671,8 @@ static edge_runtime_config make_s7_config(iot_edge_v1_ConfigItem *items,
     items[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
     items[0].item.endpoint.port = port;
     items[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_S7;
-    items[1].item.device.io_interval_ms = 300000U;
+    /* Recovery fixtures intentionally request a short ordinary read period. */
+    items[1].item.device.io_interval_ms = 1000U;
     items[1].item.device.report_interval_sec = report_interval_sec;
     for (size_t index = 0U; index < point_count; ++index) {
         iot_edge_v1_ConfigItem *item = &items[index + 2U];
@@ -1514,6 +1515,133 @@ static void send_modbus_read_response(int fd, const uint8_t request[12], uint8_t
     response[7] = 3; response[8] = 2;
     response[9] = 0; response[10] = value;
     assert(send(fd, response, sizeof(response), 0) == (ssize_t)sizeof(response));
+}
+
+typedef struct {
+    unsigned samples;
+    unsigned reports;
+    int64_t last_sample_ms;
+    bool s7;
+} cadence_fixture;
+
+static void cadence_sample(void *context, const uint8_t platform[16],
+                            const edge_acquisition_sample *sample) {
+    (void)platform;
+    cadence_fixture *fixture = context;
+    if (sample == NULL)
+        return;
+    assert(sample->valid && sample->device_id[0] == 2U);
+    assert(strcmp(sample->element_id, fixture->s7 ? "s7-00" : "holding-1") == 0);
+    assert(sample->observed_at_ms > fixture->last_sample_ms);
+    const unsigned expected = 100U + fixture->samples;
+    if (fixture->s7) {
+        assert(sample->value.which_value == iot_edge_v1_ScalarValue_unsigned_value_tag);
+        assert(sample->value.value.unsigned_value == expected);
+    } else {
+        assert(sample->value.which_value == iot_edge_v1_ScalarValue_double_value_tag);
+        assert(sample->value.value.double_value == (double)expected);
+    }
+    fixture->last_sample_ms = sample->observed_at_ms;
+    ++fixture->samples;
+}
+
+static bool cadence_telemetry(void *context, const uint8_t platform[16],
+                               const iot_edge_v1_TelemetryRecord *record) {
+    (void)platform;
+    cadence_fixture *fixture = context;
+    assert(record->values_count == 1U);
+    assert(record->protocol == (fixture->s7 ? iot_edge_v1_Protocol_PROTOCOL_S7
+                                           : iot_edge_v1_Protocol_PROTOCOL_MODBUS));
+    ++fixture->reports;
+    return true;
+}
+
+static void wait_cadence_callbacks(edge_acquisition *acquisition,
+                                   cadence_fixture *fixture,
+                                   unsigned samples, unsigned reports) {
+    const uint64_t deadline = monotonic_ms() + 2000U;
+    while ((fixture->samples < samples || fixture->reports < reports) &&
+           monotonic_ms() < deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    /* A sample event precedes the optional report event in the worker. Drain
+     * that tail too, so an unwanted report cannot escape the count assertion. */
+    const uint64_t settled_at = monotonic_ms() + 100U;
+    while (monotonic_ms() < settled_at) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition),
+                               .events = POLLIN};
+        (void)poll(&event, 1U, 10);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(fixture->samples == samples && fixture->reports == reports);
+}
+
+static void verify_configured_cadence_over_loopback(bool s7, bool explicit_interval) {
+    struct sockaddr_in address;
+    const int listener = open_s7_listener(&address);
+    iot_edge_v1_ConfigItem items[3];
+    edge_runtime_config config = s7
+        ? make_s7_config(items, ntohs(address.sin_port), 1U, false, 300U)
+        : make_config(items);
+    items[0].item.endpoint.port = ntohs(address.sin_port);
+    items[1].item.device.io_interval_ms = explicit_interval ? 3000U : 0U;
+    items[1].item.device.report_interval_sec = explicit_interval ? 300U : 3U;
+    cadence_fixture fixture = {.s7 = s7};
+    edge_acquisition *acquisition = edge_acquisition_create(
+        cadence_telemetry, command, &fixture);
+    assert(acquisition != NULL);
+    edge_acquisition_set_sample_callback(acquisition, cadence_sample);
+    char error[256] = {0};
+    assert(edge_acquisition_apply(acquisition, &config, monotonic_ms(),
+                                  error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    const int fd = accept_s7_with_ticks(listener, acquisition, 3000U);
+    assert(fd >= 0);
+    if (s7)
+        s7_server_handshake(fd);
+    uint8_t request[1024];
+    if (s7)
+        receive_s7_request(fd, request);
+    else
+        receive_modbus_request(fd, request);
+    const uint64_t first_read_ms = monotonic_ms();
+    if (s7)
+        s7_send_read_response(fd, request, 0U, TEST_S7_RESPONSE_VALID);
+    else
+        send_modbus_read_response(fd, request, 100U);
+    /* The initial real sample reaches IPC consumers without waiting for the
+     * three-second read period or the independent 300-second report period. */
+    wait_cadence_callbacks(acquisition, &fixture, 1U, 1U);
+
+    const uint64_t quiet_until = first_read_ms + 1500U;
+    while (monotonic_ms() < quiet_until) {
+        struct pollfd next = {.fd = fd, .events = POLLIN};
+        assert(poll(&next, 1U, 20) == 0);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+        assert(fixture.samples == 1U && fixture.reports == 1U);
+    }
+    struct pollfd next = {.fd = fd, .events = POLLIN};
+    assert(poll(&next, 1U, 5000) == 1);
+    assert(monotonic_ms() - first_read_ms >= 2500U);
+    if (s7) {
+        receive_s7_request(fd, request);
+        assert(request[17] == 4U);
+        s7_send_read_response(fd, request, 1U, TEST_S7_RESPONSE_VALID);
+    } else {
+        receive_modbus_request(fd, request);
+        assert(request[7] == 3U);
+        send_modbus_read_response(fd, request, 101U);
+    }
+    wait_cadence_callbacks(acquisition, &fixture, 2U, explicit_interval ? 1U : 2U);
+    assert(fixture.last_sample_ms > 0);
+    struct pollfd reconnect = {.fd = listener, .events = POLLIN};
+    assert(poll(&reconnect, 1U, 0) == 0); /* Both reads reused the same session. */
+    edge_acquisition_destroy(acquisition);
+    close(fd);
+    close(listener);
 }
 
 static unsigned complete_modbus_records;
@@ -2578,6 +2706,9 @@ int main(void) {
     verify_command_expiry_while_serial_is_paused();
     verify_write_priority_across_devices();
     verify_modbus_incomplete_scan_not_reported();
+    for (unsigned s7 = 0U; s7 < 2U; ++s7)
+        for (unsigned explicit_interval = 0U; explicit_interval < 2U; ++explicit_interval)
+            verify_configured_cadence_over_loopback(s7 != 0U, explicit_interval != 0U);
     verify_sl651_commit();
     industrial_fail_second_read = true;
     verify_industrial_acquisition(iot_edge_v1_Protocol_PROTOCOL_MC, false);

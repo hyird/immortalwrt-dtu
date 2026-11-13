@@ -187,15 +187,22 @@ typedef struct _iot_edge_v1_Hello {
     bool supports_logs;
     char log_level[9];
     bool supports_firmware_stream;
+    /* Supports 300s probes and a >=900s application watchdog; absent preserves legacy timing. */
     bool supports_sparse_heartbeat;
+    /* Enables start_before_ms only when correlated database-time samples are usable; otherwise fail closed. */
     bool supports_command_start_before;
+    /* Reports status on a schedule; connection liveness is maintained only by WebSocket Ping/Pong. */
     bool supports_status_reporting;
+    /* Enables paired raw business requests/responses; field absent in deployed firmware. */
     bool supports_raw_telemetry;
+    /* Advertised only when this node can access the local IO service. */
     bool supports_external_io;
     bool supports_node_io;
+    /* Required to negotiate the mA external IO protocol. */
     bool supports_external_io_milliamps;
     bool supports_modbus_gateway;
     bool supports_modbus_gateway_order;
+    bool supports_modbus_gateway_config;
 } iot_edge_v1_Hello;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_HelloAck_assigned_node_id_t;
@@ -206,9 +213,14 @@ typedef struct _iot_edge_v1_HelloAck {
     uint32_t heartbeat_interval_sec;
     uint32_t max_message_size;
     int64_t platform_time_ms;
+    /* PostgreSQL clock_timestamp() sample (UTC Unix milliseconds), set only when the Hello negotiated
+ supports_command_start_before and sampled after that Hello, before this ack is sent.
+ This is not a monotonic guarantee: clients must bound RTT monotonically and fail closed if uncertain. */
     bool has_database_time_ms;
     int64_t database_time_ms;
+    /* Negotiated only with a node advertising supports_raw_telemetry. */
     bool raw_telemetry;
+    /* Both ends must opt in before IO configuration, commands or samples. */
     bool external_io;
     bool node_io;
 } iot_edge_v1_HelloAck;
@@ -298,6 +310,8 @@ typedef struct _iot_edge_v1_ExternalIoStatus {
     iot_edge_v1_ExternalIoChannel channels[15];
 } iot_edge_v1_ExternalIoStatus;
 
+/* Per-platform conntrack IP-byte deltas, including TCP/IP headers and retransmits.
+ A sample is repeated unchanged until acknowledged; not SIM billing bytes. */
 typedef struct _iot_edge_v1_TcpTraffic {
     uint64_t upload_bytes;
     uint64_t download_bytes;
@@ -333,6 +347,7 @@ typedef struct _iot_edge_v1_Heartbeat {
     iot_edge_v1_TcpTraffic tcp_traffic;
     bool has_vpn_traffic;
     iot_edge_v1_TcpTraffic vpn_traffic;
+    /* Nonzero per-request nonce; correlate a HeartbeatAck before using its database-time sample. */
     bool has_nonce;
     uint64_t nonce;
 } iot_edge_v1_Heartbeat;
@@ -343,8 +358,11 @@ typedef struct _iot_edge_v1_HeartbeatAck {
     bool request_device_status;
     uint64_t traffic_sample_id;
     uint64_t vpn_traffic_sample_id;
+    /* Echoed only for the corresponding Heartbeat; unsolicited acknowledgements have no nonce. */
     bool has_nonce;
     uint64_t nonce;
+    /* PostgreSQL clock_timestamp() sample for the echoed nonce; DB wall-clock jumps have no hard bound.
+ Clients must account for RTT with a monotonic upper bound and fail closed if they cannot bound it. */
     bool has_database_time_ms;
     int64_t database_time_ms;
 } iot_edge_v1_HeartbeatAck;
@@ -454,6 +472,8 @@ typedef struct _iot_edge_v1_EndpointConfig {
     bool has_serial;
     iot_edge_v1_SerialSettings serial;
     bool enabled;
+    /* The exact interface name reported by the node. TCP sockets bind to this
+ interface; serial endpoints use SerialSettings.channel as the device path. */
     char interface_name[33];
     bool debug_enabled;
 } iot_edge_v1_EndpointConfig;
@@ -489,7 +509,12 @@ typedef struct _iot_edge_v1_DeviceConfig {
     char name[101];
     iot_edge_v1_Protocol protocol;
     char timezone[65];
+    /* Southbound acquisition interval in milliseconds (1000..3600000).
+ Zero follows report_interval_sec on updated firmware. Legacy firmware accepts
+ zero/1000 only and keeps its historical one-second cadence until upgraded. */
     uint32_t io_interval_ms;
+    /* Each origin platform configures its own read/report interval in seconds.
+ An explicit nonzero io_interval_ms may override the acquisition interval. */
     uint32_t report_interval_sec;
     uint32_t online_timeout_sec;
     uint32_t modbus_slave_id;
@@ -506,6 +531,7 @@ typedef struct _iot_edge_v1_DeviceConfig {
     uint32_t command_fast_read_interval_sec;
     iot_edge_v1_DeviceConfig_heartbeat_payload_t heartbeat_payload;
     bool enabled;
+    /* 0 is the legacy default (M1); explicit modes use 1 through 4. */
     uint32_t sl651_response_mode;
     bool debug_enabled;
     bool has_industrial;
@@ -587,6 +613,7 @@ typedef struct _iot_edge_v1_Sl651ElementConfig {
     bool response_element;
     bool writable;
     bool fixed_position;
+    /* Zero-based offset from the reassembled body, including serial and report time. */
     uint32_t byte_offset;
 } iot_edge_v1_Sl651ElementConfig;
 
@@ -698,6 +725,7 @@ typedef struct _iot_edge_v1_ScalarValue {
         double double_value;
         char string_value[129];
         iot_edge_v1_ScalarValue_bytes_value_t bytes_value;
+        /* Exact decimal text for meter BCD; avoids binary floating-point rounding. */
         char decimal_value[33];
     } value;
 } iot_edge_v1_ScalarValue;
@@ -708,6 +736,7 @@ typedef struct _iot_edge_v1_TelemetryValue {
     char unit[33];
     bool has_value;
     iot_edge_v1_ScalarValue value;
+    /* Bounded binary SL651 elements; absent in deployed 0.3.44 firmware. */
     pb_bytes_array_t *encoded_value;
     char encoding[17];
     bool derived;
@@ -735,17 +764,26 @@ typedef struct _iot_edge_v1_TelemetryRecord {
     struct _iot_edge_v1_TelemetryValue *values;
     bool has_device_status;
     iot_edge_v1_DeviceStatus device_status;
+    /* Absent in deployed v1 firmware: never infer provenance from current config. */
     iot_edge_v1_TelemetryRecord_model_id_t model_id;
+    /* Ordered original protocol frames for this acquisition. */
     pb_size_t raw_payloads_count;
     pb_bytes_array_t **raw_payloads;
+    /* A bounded upload may contain only a subset of values or raw frames.
+ All parts must be assembled before publishing a historical record. */
     iot_edge_v1_TelemetryRecord_report_id_t report_id;
     uint32_t part_index;
     uint32_t part_count;
+    /* One immutable receive ID per original frame; absent in legacy firmware. */
     pb_size_t raw_packet_ids_count;
     pb_bytes_array_t **raw_packet_ids;
     bool derived_update;
+    /* Paired with raw_payloads (responses), including an empty request for unsolicited reports.
+ Presence selects platform parsing; values must be absent. Handshakes/debug are excluded. */
     pb_size_t raw_requests_count;
     pb_bytes_array_t **raw_requests;
+    /* SHA-256 of the exact applied configuration snapshot used for this sample.
+ Absent in existing firmware; such records keep their legacy parsing path. */
     iot_edge_v1_TelemetryRecord_configuration_sha256_t configuration_sha256;
 } iot_edge_v1_TelemetryRecord;
 
@@ -773,6 +811,7 @@ typedef struct _iot_edge_v1_RawPacket {
     char client_address[65];
     int64_t observed_at_ms;
     iot_edge_v1_RawPacket_payload_t payload;
+    /* Debug-only transport bytes; never enters historical telemetry. */
     bool debug;
     char direction[17];
     bool device_only;
@@ -782,6 +821,8 @@ typedef struct _iot_edge_v1_RawPacket {
     iot_edge_v1_RawPacket_reply_to_packet_id_t reply_to_packet_id;
     iot_edge_v1_RawPacket_acquisition_id_t acquisition_id;
     char acquisition_state[25];
+    /* Reuses the already-decoded value; no second protocol parser.
+ Separate debug update: no history upload or persistence prerequisite. */
     bool has_parsed_value;
     iot_edge_v1_TelemetryValue parsed_value;
 } iot_edge_v1_RawPacket;
@@ -808,9 +849,12 @@ typedef struct _iot_edge_v1_CommandRequest {
     uint32_t readback_count;
     uint32_t fast_read_duration_sec;
     uint32_t fast_read_interval_sec;
+    /* Optional UTC Unix epoch deadline, derived from the persisted command_attempt.deadline. */
     bool has_start_before_ms;
     int64_t start_before_ms;
+    /* Explicit source discriminator; valid only after external_io negotiation. */
     bool external_io;
+    /* Direct node IO is negotiated separately; device_id must be absent. */
     char node_io_channel[17];
 } iot_edge_v1_CommandRequest;
 
@@ -947,6 +991,7 @@ typedef struct _iot_edge_v1_ModemControlRequest {
     char apn[101];
     bool automatic_apn;
     char username[65];
+    /* Credentials and PIN are transport-only secrets. The server must not persist them in task JSON. */
     char password[129];
     iot_edge_v1_ModemPdpType pdp_type;
     iot_edge_v1_ModemAuthType auth_type;
@@ -1009,10 +1054,12 @@ typedef struct _iot_edge_v1_LogResult {
     iot_edge_v1_LogLine lines[48];
 } iot_edge_v1_LogResult;
 
+/* Node-wide gateway settings. Omitted request settings perform a read only query. */
 typedef struct _iot_edge_v1_ModbusGatewaySettings {
     bool enabled;
     uint32_t port;
     char interface_name[16];
+    uint32_t unit_id;
 } iot_edge_v1_ModbusGatewaySettings;
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_ModbusGatewayPoint_device_id_t;
@@ -1042,6 +1089,8 @@ typedef struct _iot_edge_v1_ModbusGatewayPoint {
 
 typedef PB_BYTES_ARRAY_T(32) iot_edge_v1_ModbusGatewayOrder_expected_digest_t;
 typedef PB_BYTES_ARRAY_T(13106) iot_edge_v1_ModbusGatewayOrder_addresses_t;
+/* Ordered zero-based source addresses, unsigned 16-bit big endian.
+ Only these slots are rearranged; every other reservation stays unchanged. */
 typedef struct _iot_edge_v1_ModbusGatewayOrder {
     iot_edge_v1_ModbusGatewayOrder_expected_digest_t expected_digest;
     iot_edge_v1_ModbusGatewayOrder_addresses_t addresses;
@@ -1134,6 +1183,8 @@ typedef struct _iot_edge_v1_TerminalClose {
 
 typedef PB_BYTES_ARRAY_T(16) iot_edge_v1_SerialDebugRequest_session_id_t;
 typedef PB_BYTES_ARRAY_T(1024) iot_edge_v1_SerialDebugRequest_data_t;
+/* Session-scoped serial diagnostics. OPEN only observes existing acquisition.
+ MANUAL pauses this physical port across platforms until MONITOR/CLOSE/expiry. */
 typedef struct _iot_edge_v1_SerialDebugRequest {
     iot_edge_v1_SerialDebugRequest_session_id_t session_id;
     uint64_t request_sequence;
@@ -1430,7 +1481,7 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define iot_edge_v1_Empty_init_default           {0}
-#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define iot_edge_v1_Hello_init_default           {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define iot_edge_v1_HelloAck_init_default        {{0, {0}}, 0, 0, 0, 0, 0, false, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_default {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_default {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1497,7 +1548,7 @@ extern "C" {
 #define iot_edge_v1_LogRequest_init_default      {{0, {0}}, 0, "", ""}
 #define iot_edge_v1_LogLine_init_default         {0, "", "", "", ""}
 #define iot_edge_v1_LogResult_init_default       {{0, {0}}, 0, "", 0, {iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default, iot_edge_v1_LogLine_init_default}}
-#define iot_edge_v1_ModbusGatewaySettings_init_default {0, 0, ""}
+#define iot_edge_v1_ModbusGatewaySettings_init_default {0, 0, "", 0}
 #define iot_edge_v1_ModbusGatewayPoint_init_default {{0, {0}}, "", "", "", "", "", "", 0, "", 0, 0, 0, 0, 0, "", "", 0, "", "", 0, 0}
 #define iot_edge_v1_ModbusGatewayOrder_init_default {{0, {0}}, {0, {0}}}
 #define iot_edge_v1_ModbusGatewayRequest_init_default {{0, {0}}, false, iot_edge_v1_ModbusGatewaySettings_init_default, 0, 0, 0, false, iot_edge_v1_ModbusGatewayOrder_init_default}
@@ -1517,7 +1568,7 @@ extern "C" {
 #define iot_edge_v1_Error_init_default           {"", "", 0}
 #define iot_edge_v1_Envelope_init_default        {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, 0, {iot_edge_v1_Hello_init_default}}
 #define iot_edge_v1_Empty_init_zero              {0}
-#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define iot_edge_v1_Hello_init_zero              {"", "", "", "", "", "", 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 0, 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, _iot_edge_v1_ModemSimState_MIN, "", "", 0, "", 0, 0, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define iot_edge_v1_HelloAck_init_zero           {{0, {0}}, 0, 0, 0, 0, 0, false, 0, 0, 0, 0}
 #define iot_edge_v1_EnrollmentStatus_init_zero   {"", ""}
 #define iot_edge_v1_InterfaceCapability_init_zero {"", "", {0, {0}}, 0, 0, "", 0, "", 0, {"", "", "", "", "", "", "", ""}}
@@ -1584,7 +1635,7 @@ extern "C" {
 #define iot_edge_v1_LogRequest_init_zero         {{0, {0}}, 0, "", ""}
 #define iot_edge_v1_LogLine_init_zero            {0, "", "", "", ""}
 #define iot_edge_v1_LogResult_init_zero          {{0, {0}}, 0, "", 0, {iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero, iot_edge_v1_LogLine_init_zero}}
-#define iot_edge_v1_ModbusGatewaySettings_init_zero {0, 0, ""}
+#define iot_edge_v1_ModbusGatewaySettings_init_zero {0, 0, "", 0}
 #define iot_edge_v1_ModbusGatewayPoint_init_zero {{0, {0}}, "", "", "", "", "", "", 0, "", 0, 0, 0, 0, 0, "", "", 0, "", "", 0, 0}
 #define iot_edge_v1_ModbusGatewayOrder_init_zero {{0, {0}}, {0, {0}}}
 #define iot_edge_v1_ModbusGatewayRequest_init_zero {{0, {0}}, false, iot_edge_v1_ModbusGatewaySettings_init_zero, 0, 0, 0, false, iot_edge_v1_ModbusGatewayOrder_init_zero}
@@ -1647,6 +1698,7 @@ extern "C" {
 #define iot_edge_v1_Hello_supports_external_io_milliamps_tag 41
 #define iot_edge_v1_Hello_supports_modbus_gateway_tag 42
 #define iot_edge_v1_Hello_supports_modbus_gateway_order_tag 43
+#define iot_edge_v1_Hello_supports_modbus_gateway_config_tag 44
 #define iot_edge_v1_HelloAck_assigned_node_id_tag 1
 #define iot_edge_v1_HelloAck_session_epoch_tag   2
 #define iot_edge_v1_HelloAck_negotiated_protocol_version_tag 3
@@ -2147,6 +2199,7 @@ extern "C" {
 #define iot_edge_v1_ModbusGatewaySettings_enabled_tag 1
 #define iot_edge_v1_ModbusGatewaySettings_port_tag 2
 #define iot_edge_v1_ModbusGatewaySettings_interface_name_tag 3
+#define iot_edge_v1_ModbusGatewaySettings_unit_id_tag 4
 #define iot_edge_v1_ModbusGatewayPoint_device_id_tag 1
 #define iot_edge_v1_ModbusGatewayPoint_element_id_tag 2
 #define iot_edge_v1_ModbusGatewayPoint_name_tag  3
@@ -2339,7 +2392,8 @@ X(a, STATIC,   SINGULAR, BOOL,     supports_external_io,  39) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_node_io,  40) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_external_io_milliamps,  41) \
 X(a, STATIC,   SINGULAR, BOOL,     supports_modbus_gateway,  42) \
-X(a, STATIC,   SINGULAR, BOOL,     supports_modbus_gateway_order,  43)
+X(a, STATIC,   SINGULAR, BOOL,     supports_modbus_gateway_order,  43) \
+X(a, STATIC,   SINGULAR, BOOL,     supports_modbus_gateway_config,  44)
 #define iot_edge_v1_Hello_CALLBACK NULL
 #define iot_edge_v1_Hello_DEFAULT NULL
 
@@ -3144,7 +3198,8 @@ X(a, STATIC,   REPEATED, MESSAGE,  lines,             4)
 #define iot_edge_v1_ModbusGatewaySettings_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, BOOL,     enabled,           1) \
 X(a, STATIC,   SINGULAR, UINT32,   port,              2) \
-X(a, STATIC,   SINGULAR, STRING,   interface_name,    3)
+X(a, STATIC,   SINGULAR, STRING,   interface_name,    3) \
+X(a, STATIC,   SINGULAR, UINT32,   unit_id,           4)
 #define iot_edge_v1_ModbusGatewaySettings_CALLBACK NULL
 #define iot_edge_v1_ModbusGatewaySettings_DEFAULT NULL
 
@@ -3641,7 +3696,7 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_HeartbeatAck_size            59
 #define iot_edge_v1_Heartbeat_size               461
 #define iot_edge_v1_HelloAck_size                75
-#define iot_edge_v1_Hello_size                   742
+#define iot_edge_v1_Hello_size                   745
 #define iot_edge_v1_IndustrialConnectionConfig_size 93
 #define iot_edge_v1_IndustrialPointConfig_size   346
 #define iot_edge_v1_InterfaceCapability_size     424
@@ -3652,9 +3707,9 @@ extern const pb_msgdesc_t iot_edge_v1_Envelope_msg;
 #define iot_edge_v1_LogResult_size               13126
 #define iot_edge_v1_ModbusGatewayOrder_size      13143
 #define iot_edge_v1_ModbusGatewayPoint_size      698
-#define iot_edge_v1_ModbusGatewayRequest_size    13205
-#define iot_edge_v1_ModbusGatewayResult_size     5964
-#define iot_edge_v1_ModbusGatewaySettings_size   25
+#define iot_edge_v1_ModbusGatewayRequest_size    13211
+#define iot_edge_v1_ModbusGatewayResult_size     5970
+#define iot_edge_v1_ModbusGatewaySettings_size   31
 #define iot_edge_v1_ModbusRegisterConfig_size    332
 #define iot_edge_v1_ModemControlRequest_size     337
 #define iot_edge_v1_ModemControlResult_size      383

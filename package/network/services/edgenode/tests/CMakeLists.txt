@@ -257,6 +257,23 @@ if(UNIX)
     if(EDGENODE_GATEWAY_NETWORK_TESTS)
         find_path(GATEWAY_LIBEV_INCLUDE_DIR ev.h REQUIRED)
         find_library(GATEWAY_LIBEV_LIBRARY ev REQUIRED)
+        find_path(GATEWAY_UCI_INCLUDE_DIR uci.h REQUIRED)
+        find_path(GATEWAY_UBUS_INCLUDE_DIR libubus.h REQUIRED)
+        find_library(GATEWAY_UCI_LIBRARY uci REQUIRED)
+        find_library(GATEWAY_UBUS_LIBRARY ubus REQUIRED)
+        find_library(GATEWAY_UBOX_LIBRARY ubox REQUIRED)
+        add_executable(edge_modbus_gateway_config_test edge_modbus_gateway_config_test.c
+            "${EDGENODE_ROOT}/src/edge_config.c" "${EDGENODE_ROOT}/src/edge_network.c"
+            "${EDGENODE_ROOT}/src/edge_interface.c" "${EDGENODE_ROOT}/src/edge_process.c"
+            "${EDGENODE_ROOT}/src/edge_protocol.c" "${EDGENODE_ROOT}/src/edge_url.c")
+        target_compile_options(edge_modbus_gateway_config_test PRIVATE -UNDEBUG)
+        target_link_options(edge_modbus_gateway_config_test PRIVATE -Wl,--wrap=uci_alloc_context)
+        target_include_directories(edge_modbus_gateway_config_test PRIVATE
+            "${EDGENODE_ROOT}/src" "${GATEWAY_UCI_INCLUDE_DIR}"
+            "${GATEWAY_UBUS_INCLUDE_DIR}" "${GATEWAY_LIBEV_INCLUDE_DIR}")
+        target_link_libraries(edge_modbus_gateway_config_test PRIVATE edgenode_nanopb
+            "${GATEWAY_UCI_LIBRARY}" "${GATEWAY_UBUS_LIBRARY}" "${GATEWAY_UBOX_LIBRARY}" "${GATEWAY_LIBEV_LIBRARY}" m)
+        add_test(NAME edge_modbus_gateway_config COMMAND edge_modbus_gateway_config_test)
         add_executable(edge_modbus_gateway_fixture edge_modbus_gateway_fixture.c
             "${EDGENODE_ROOT}/src/edge_modbus_gateway.c"
             "${EDGENODE_ROOT}/src/edge_modbus_gateway_transport.c"
@@ -334,10 +351,9 @@ if(UNIX)
     target_link_libraries(edge_log_test PRIVATE edgenode_nanopb)
     add_test(NAME edge_log COMMAND edge_log_test)
 
-    add_executable(edge_acquisition_test
+    set(EDGENODE_ACQUISITION_TEST_SOURCES
         edge_external_io_stub.c
         "${EDGENODE_ROOT}/src/edge_sl651.c"
-        edge_acquisition_test.c
         "${EDGENODE_ROOT}/src/edge_acquisition.c"
         "${EDGENODE_ROOT}/src/edge_dtu.c"
         "${EDGENODE_ROOT}/src/edge_industrial.c"
@@ -349,6 +365,8 @@ if(UNIX)
         "${EDGENODE_ROOT}/src/edge_protocol.c"
         "${EDGENODE_ROOT}/src/edge_process.c"
         "${EDGENODE_ROOT}/src/log.c")
+    add_executable(edge_acquisition_test edge_acquisition_test.c
+        ${EDGENODE_ACQUISITION_TEST_SOURCES})
     target_compile_definitions(edge_acquisition_test PRIVATE
         EDGE_LOG_ROOT=\"/tmp/edgenode-test-acquisition\"
         EDGE_LOG_SPACE_PATH=\"/tmp\")
@@ -357,6 +375,27 @@ if(UNIX)
     add_test(NAME edge_acquisition COMMAND edge_acquisition_test)
     add_test(NAME edge_acquisition_external_io COMMAND edge_acquisition_test)
     set_tests_properties(edge_acquisition_external_io PROPERTIES ENVIRONMENT "EDGE_TEST_EXTERNAL_IO_ONLY=1" TIMEOUT 20)
+    if(EDGENODE_GATEWAY_NETWORK_TESTS)
+        find_path(GATEWAY_LWS_INCLUDE_DIR libwebsockets.h REQUIRED)
+        find_path(GATEWAY_LWS_CONFIG_INCLUDE_DIR lws_config.h REQUIRED)
+        add_executable(edge_modbus_gateway_write_test edge_modbus_gateway_write_test.c
+            ${EDGENODE_ACQUISITION_TEST_SOURCES}
+            "${EDGENODE_ROOT}/src/edge_modbus_gateway.c"
+            "${EDGENODE_ROOT}/src/edge_modbus_gateway_transport.c")
+        target_compile_options(edge_modbus_gateway_write_test PRIVATE
+            -ffunction-sections -fdata-sections -UNDEBUG)
+        target_link_options(edge_modbus_gateway_write_test PRIVATE -Wl,--gc-sections)
+        target_compile_definitions(edge_modbus_gateway_write_test PRIVATE
+            EDGE_LOG_ROOT=\"gateway-write-log\" EDGE_LOG_SPACE_PATH=\".\")
+        target_include_directories(edge_modbus_gateway_write_test PRIVATE
+            "${EDGENODE_ROOT}/src" "${GATEWAY_LIBEV_INCLUDE_DIR}"
+            "${GATEWAY_LWS_INCLUDE_DIR}" "${GATEWAY_LWS_CONFIG_INCLUDE_DIR}")
+        target_link_libraries(edge_modbus_gateway_write_test PRIVATE
+            edgenode_nanopb edgenode_gateway_crypto "${GATEWAY_LIBEV_LIBRARY}" m)
+        add_test(NAME edge_modbus_gateway_write COMMAND edge_modbus_gateway_write_test)
+        set_tests_properties(edge_modbus_gateway_write PROPERTIES TIMEOUT 60
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
 endif()
 
 add_executable(edge_sl651_test edge_sl651_test.c "${EDGENODE_ROOT}/src/edge_sl651.c")

@@ -118,6 +118,7 @@ typedef struct {
     uint8_t platform_id[16];
     uint8_t device_id[16];
     uint32_t report_interval_sec;
+    /* Nonzero configured override, otherwise report_interval_sec * 1000. */
     uint64_t io_interval_ms;
     uint64_t next_io_at_ms;
     uint64_t next_report_at_ms;

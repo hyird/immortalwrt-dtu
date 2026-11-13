@@ -3655,10 +3655,7 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
             if (!edge_device_runtime_init(&runtime->runtime, protocol,
                                           source->platform_id,
                                           device->device_id.bytes,
-                                          protocol == EDGE_DEVICE_S7 &&
-                                                  runtime->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&
-                                                  runtime->endpoint->mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_CLIENT
-                                              ? EDGE_ACQUISITION_TICK_MS : device->io_interval_ms,
+                                          device->io_interval_ms,
                                           device->report_interval_sec, now_ms,
                                           &kDriver, runtime)) {
                 free_devices(devices, output + 1U);
@@ -3667,8 +3664,7 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                           "device runtime initialization failed");
                 return false;
             }
-            /* S7 TCP Client scans always use the short polling interval independently
-             * of the platform reporting interval, retaining the session. */
+            /* Retain the S7 TCP Client session across configured read periods. */
             runtime->runtime.s7_tcp_client =
                 protocol == EDGE_DEVICE_S7 &&
                 runtime->endpoint->transport == iot_edge_v1_Transport_TRANSPORT_ETHERNET &&

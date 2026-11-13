@@ -161,6 +161,13 @@ bool edge_config_load(edge_app_config *config, char *error, size_t error_size) {
             }
             config->modbus_gateway = bool_option(context, section, "modbus_gateway", false);
             config->modbus_gateway_port = (uint16_t)number_option(context, section, "modbus_gateway_port", 502U, 1U, 65535U);
+            const char *unit = uci_lookup_option_string(context, section, "modbus_gateway_unit_id");
+            const unsigned long unit_id = number_option(context, section, "modbus_gateway_unit_id", 0U, 1U, 247U);
+            if (unit != NULL && unit[0] != '\0' && unit_id == 0U) {
+                set_error(error, error_size, "modbus_gateway_unit_id must be between 1 and 247");
+                goto fail;
+            }
+            config->modbus_gateway_unit_id = unit_id ? (uint8_t)unit_id : 1U;
             if (!copy_option(context, section, "modbus_gateway_interface", config->modbus_gateway_interface,
                              sizeof(config->modbus_gateway_interface), false, error, error_size))
                 goto fail;
@@ -264,12 +271,13 @@ bool edge_config_save_modbus_gateway(const edge_app_config *config) {
             if (!strcmp(section->type, "node")) { node = section; break; }
         }
     }
-    char port[6];
+    char port[6], unit[4];
     snprintf(port, sizeof(port), "%u", config->modbus_gateway_port);
-    const char *names[] = {"modbus_gateway", "modbus_gateway_port", "modbus_gateway_interface"};
-    const char *values[] = {config->modbus_gateway ? "1" : "0", port, config->modbus_gateway_interface};
-    ok = ok && node;
-    for (size_t i = 0; ok && i < 3; ++i) {
+    snprintf(unit, sizeof(unit), "%u", config->modbus_gateway_unit_id);
+    const char *names[] = {"modbus_gateway", "modbus_gateway_port", "modbus_gateway_interface", "modbus_gateway_unit_id"};
+    const char *values[] = {config->modbus_gateway ? "1" : "0", port, config->modbus_gateway_interface, unit};
+    ok = ok && node && config->modbus_gateway_unit_id >= 1U && config->modbus_gateway_unit_id <= 247U;
+    for (size_t i = 0; ok && i < sizeof(names) / sizeof(names[0]); ++i) {
         struct uci_ptr ptr = {.p = package, .s = node, .option = names[i], .value = values[i]};
         ok = uci_set(context, &ptr) == UCI_OK;
     }

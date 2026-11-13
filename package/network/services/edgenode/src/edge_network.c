@@ -12,6 +12,10 @@
 #include <unistd.h>
 
 #include <uci.h>
+#include <ev.h>
+#include <libubus.h>
+#include <libubox/blobmsg.h>
+#include <stdlib.h>
 
 #include "edge_interface.h"
 #include "edge_process.h"
@@ -210,6 +214,169 @@ static size_t option_devices(struct uci_context *context, struct uci_section *se
         }
     }
     return count;
+}
+
+bool edge_network_interface_device(struct uci_context *context, struct uci_section *section,
+                                    char device[33]) {
+    if (!section || strcmp(section->type, "interface") ||
+        !valid_section_name(section->e.name) || !strcmp(section->e.name, "loopback"))
+        return false;
+    const char *proto = uci_lookup_option_string(context, section, "proto");
+    if (!proto || (strcmp(proto, "static") && strcmp(proto, "dhcp"))) return false;
+    char devices[8][33] = {{0}};
+    size_t count = option_devices(context, section, "device", devices, 8U, 0U);
+    if (!count) count = option_devices(context, section, "ifname", devices, 8U, 0U);
+    const char *type = uci_lookup_option_string(context, section, "type");
+    if (type && !strcmp(type, "bridge"))
+        snprintf(device, 33U, "br-%s", section->e.name);
+    else if (count == 1U)
+        snprintf(device, 33U, "%s", devices[0]);
+    else return false;
+    return valid_device_name(device);
+}
+
+typedef struct { char device[33], l3_device[33]; bool up; } edge_network_status;
+
+static void network_status_reply(struct ubus_request *request, int type, struct blob_attr *message) {
+    (void)type;
+    static const struct blobmsg_policy policy[] = {
+        {.name = "device", .type = BLOBMSG_TYPE_STRING},
+        {.name = "l3_device", .type = BLOBMSG_TYPE_STRING},
+        {.name = "up", .type = BLOBMSG_TYPE_BOOL},
+    };
+    struct blob_attr *fields[3] = {0};
+    if (!message) return;
+    blobmsg_parse(policy, 3, fields, blob_data(message), blob_len(message));
+    edge_network_status *status = request->priv;
+    if (fields[0] && strlen(blobmsg_get_string(fields[0])) < sizeof(status->device))
+        snprintf(status->device, sizeof(status->device), "%s", blobmsg_get_string(fields[0]));
+    if (fields[1] && strlen(blobmsg_get_string(fields[1])) < sizeof(status->l3_device))
+        snprintf(status->l3_device, sizeof(status->l3_device), "%s", blobmsg_get_string(fields[1]));
+    status->up = fields[2] && blobmsg_get_bool(fields[2]);
+}
+
+bool edge_network_gateway_resolve(const char *logical_name, bool runtime,
+                                   char device[33], char *error, size_t error_size) {
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    bool found = false;
+    if (context && valid_section_name(logical_name) &&
+        uci_load(context, "network", &package) == UCI_OK) {
+        struct uci_section *section = uci_lookup_section(context, package, logical_name);
+        found = edge_network_interface_device(context, section, device);
+    }
+    if (package) uci_unload(context, package);
+    if (context) uci_free_context(context);
+    if (!found) {
+        set_error(error, error_size, "gateway requires an existing UCI logical interface");
+        return false;
+    }
+    if (!runtime) return true;
+    struct ubus_context *bus = ubus_connect(NULL);
+    char object[64];
+    snprintf(object, sizeof(object), "network.interface.%s", logical_name);
+    uint32_t id = 0;
+    edge_network_status status = {0};
+    const bool ok = bus && !ubus_lookup_id(bus, object, &id) &&
+        !ubus_invoke(bus, id, "status", NULL, network_status_reply, &status, 1000);
+    if (bus) ubus_free(bus);
+    /* During reload netifd can still report the old device. Never keep serving
+     * that device once UCI has assigned a different one to this identity. */
+    if (!ok || !status.up || strcmp(status.device, device)) {
+        set_error(error, error_size, "logical interface is down or its runtime device does not match UCI");
+        return false;
+    }
+    const char *resolved = status.l3_device[0] ? status.l3_device : status.device;
+    if (!valid_device_name(resolved) || strlen(resolved) >= IFNAMSIZ || !if_nametoindex(resolved)) {
+        set_error(error, error_size, "logical interface has no usable L3 device");
+        return false;
+    }
+    snprintf(device, 33U, "%s", resolved);
+    return true;
+}
+
+bool edge_network_gateway_migrate(const char *previous, char logical_name[33],
+                                   char *error, size_t error_size) {
+    char device[33];
+    if (edge_network_gateway_resolve(previous, false, device, NULL, 0U)) {
+        snprintf(logical_name, 33U, "%s", previous);
+        return true;
+    }
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    size_t matches = 0U;
+    if (context && previous && previous[0] &&
+        uci_load(context, "network", &package) == UCI_OK) {
+        struct uci_element *element;
+        uci_foreach_element(&package->sections, element) {
+            if (edge_network_interface_device(context, uci_to_section(element), device) &&
+                !strcmp(device, previous)) {
+                ++matches;
+                snprintf(logical_name, 33U, "%s", element->name);
+            }
+        }
+    }
+    if (package) uci_unload(context, package);
+    if (context) uci_free_context(context);
+    if (matches == 1U) return true;
+    logical_name[0] = '\0';
+    set_error(error, error_size, matches ? "legacy gateway device has ambiguous logical interfaces" :
+        "legacy gateway device has no configured logical interface");
+    return false;
+}
+
+struct edge_network_watch {
+    struct ev_loop *loop;
+    ev_io io;
+    struct ubus_context bus;
+    struct ubus_event_handler interface_event, config_event;
+    void (*changed)(void *context, bool available);
+    void *context;
+};
+
+static void network_event(struct ubus_context *bus, struct ubus_event_handler *handler,
+                           const char *type, struct blob_attr *message) {
+    (void)handler; (void)type; (void)message;
+    edge_network_watch *watch = container_of(bus, edge_network_watch, bus);
+    watch->changed(watch->context, true);
+}
+
+static void network_lost(struct ubus_context *bus) {
+    edge_network_watch *watch = container_of(bus, edge_network_watch, bus);
+    ev_io_stop(watch->loop, &watch->io);
+    watch->changed(watch->context, false);
+}
+
+static void network_ready(struct ev_loop *loop, ev_io *io, int events) {
+    (void)loop;
+    edge_network_watch *watch = io->data;
+    if (events & EV_ERROR) network_lost(&watch->bus);
+    else ubus_handle_event(&watch->bus);
+}
+
+edge_network_watch *edge_network_watch_open(struct ev_loop *loop,
+    void (*changed)(void *context, bool available), void *context) {
+    edge_network_watch *watch = calloc(1U, sizeof(*watch));
+    if (!watch) return NULL;
+    if (ubus_connect_ctx(&watch->bus, NULL)) { free(watch); return NULL; }
+    watch->loop = loop; watch->changed = changed; watch->context = context;
+    watch->bus.connection_lost = network_lost;
+    watch->interface_event.cb = watch->config_event.cb = network_event;
+    if (ubus_register_event_handler(&watch->bus, &watch->interface_event, "network.interface") ||
+        ubus_register_event_handler(&watch->bus, &watch->config_event, "config.change")) {
+        ubus_shutdown(&watch->bus); free(watch); return NULL;
+    }
+    ev_io_init(&watch->io, network_ready, watch->bus.sock.fd, EV_READ);
+    watch->io.data = watch;
+    ev_io_start(loop, &watch->io);
+    return watch;
+}
+
+void edge_network_watch_close(edge_network_watch *watch) {
+    if (!watch) return;
+    ev_io_stop(watch->loop, &watch->io);
+    ubus_shutdown(&watch->bus);
+    free(watch);
 }
 
 static bool validate_existing_ownership(

@@ -843,7 +843,8 @@ static void test_gateway_request_presence(void) {
         input.payload.modbus_gateway_request.has_settings = apply != 0;
         input.payload.modbus_gateway_request.settings.enabled = false;
         input.payload.modbus_gateway_request.settings.port = 1502;
-        strcpy(input.payload.modbus_gateway_request.settings.interface_name, "br-lan");
+        strcpy(input.payload.modbus_gateway_request.settings.interface_name, "lan");
+        input.payload.modbus_gateway_request.settings.unit_id = apply ? 247U : 0U;
         uint8_t wire[EDGENODE_MAX_WS_MESSAGE]; size_t size = 0; const char *error = NULL;
         require(edge_protocol_encode(&input, wire, sizeof(wire), &size, &error), "gateway request encoding failed");
         iot_edge_v1_Envelope output = iot_edge_v1_Envelope_init_zero;
@@ -851,6 +852,8 @@ static void test_gateway_request_presence(void) {
         require(output.which_payload == iot_edge_v1_Envelope_modbus_gateway_request_tag, "gateway request tag changed");
         require(output.payload.modbus_gateway_request.has_settings == (apply != 0), "read request confused with explicit disable");
         if (apply) require(!output.payload.modbus_gateway_request.settings.enabled && output.payload.modbus_gateway_request.settings.port == 1502, "explicit disable settings lost");
+        require(output.payload.modbus_gateway_request.settings.unit_id == (apply ? 247U : 0U),
+                "gateway Unit ID field or legacy omitted default changed");
         edge_protocol_release(&output);
     }
     input.payload.modbus_gateway_request.has_settings = false;

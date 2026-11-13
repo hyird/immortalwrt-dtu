@@ -16,6 +16,7 @@
 #include "edge_runtime_config.h"
 #include "edge_spool.h"
 #include "edge_vpn.h"
+#include "edge_network.h"
 
 typedef struct edge_ws_app edge_ws_app;
 
@@ -94,6 +95,12 @@ typedef struct {
 typedef struct edge_modbus_gateway edge_modbus_gateway;
 typedef struct edge_modbus_gateway_server edge_modbus_gateway_server;
 
+typedef struct {
+    bool active;
+    bool external_io;
+    uint8_t command_id[16], platform_id[16], device_id[16];
+} edge_ws_gateway_command;
+
 struct edge_ws_app {
     struct ev_loop *loop;
     const edge_app_config *config;
@@ -106,6 +113,10 @@ struct edge_ws_app {
     edge_acquisition *acquisition;
     edge_modbus_gateway *gateway;
     edge_modbus_gateway_server *gateway_server;
+    edge_network_watch *gateway_network_watch;
+    bool gateway_network_available;
+    char gateway_device[33], gateway_error[257];
+    edge_ws_gateway_command gateway_commands[8];
     edge_ws_session sessions[EDGE_MAX_PLATFORMS];
     iot_edge_v1_Envelope envelope;
     uint8_t wire[EDGENODE_MAX_WS_MESSAGE];

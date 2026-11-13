@@ -30,6 +30,7 @@ typedef struct {
     char modem_status_path[129];
     bool modbus_gateway;
     uint16_t modbus_gateway_port;
+    uint8_t modbus_gateway_unit_id;
     char modbus_gateway_interface[33];
     bool bridge;
     bool serial_rs485;

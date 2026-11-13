@@ -6,23 +6,27 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 ## Modbus TCP 采集网关
 
-支持的管理平台可通过“边缘节点 → Modbus 网关”读取和保存节点的开关、监听接口及端口，无需重启。Hello 的 `supports_modbus_gateway = 42` 声明远程配置能力，新增消息字段 `91/92` 保持旧协议兼容。设置先校验监听器和地址表，再持久化 UCI 并切换；失败保留旧配置。
+支持的管理平台可通过“边缘节点 → Modbus 网关”读取和保存节点的开关、OpenWrt 逻辑接口、端口及从站 ID，无需重启。Hello 的 `supports_modbus_gateway = 42` 保留既有读取能力，`supports_modbus_gateway_config = 44` 同时声明逻辑接口配置与可配置从站 ID 能力；新增设置字段 `unit_id = 4`，消息字段 `91/92` 及协议版本不变，兼容旧平台与 0.3.70 的其他协议。旧平台省略 `unit_id`（线值 0）按 1 应用，非零必须为 1..247，不截断。设置先校验监听器和地址表，再持久化 UCI 并切换；失败保留旧配置。
 
-平台还能分页读取自己已下发的全部点位信息及实际地址预留，包括未映射的派生点、停用点及文本/图片点。每页最多 8 项；不返回其他平台的点位，查询不触发采集或写入地址表。数值以字符串回传，保留 64 位整数精度。页面按需读取，不新增轮询。
+平台还能分页读取自己已下发的全部点位信息及真实主映射，包括未映射的派生点、停用点及文本/图片点。主映射不存在时 `hasMapping=false`、`valueWords=0`、`registerType` 为空，不把内部持久身份展示成主地址。每页最多 8 项；不返回其他平台的点位，查询不触发采集或写入地址表。数值以字符串回传，保留 64 位整数精度。页面按需读取，不新增轮询；网关关闭时仍保留点位列表及准确状态。
 
-`supports_modbus_gateway_order = 43` 单独声明手动排序能力。支持的平台按寄存器区分组展示表格，组内拖放后立即保存目标顺序；节点按当前平台映射 SHA-256 拒绝旧快照，校验全部地址后原子保存并切换。只在同一寄存器区的参与点位原有槽位间排列，拒绝 1X/4X 混排，其他平台和未参与点位地址不变，缓存随点位移动。成功后关闭旧 Modbus 连接，PLC/组态需同步更新地址；日常显示排序与分组仍不改变地址。
+`supports_modbus_gateway_order = 43` 单独声明手动排序能力。支持的平台按寄存器区分组展示表格，组内拖放确认后保存目标顺序；节点按包含真实主地址的当前平台映射 SHA-256 拒绝旧快照，校验全部地址和布局后原子保存并切换，失败不切换且不丢缓存。排序请求仍用旧持久身份 token，只在同一寄存器区的参与身份槽位间排列，拒绝 Bool/数值混排；未参与身份的内部 token 不变，但两个连续数值视图会重新压紧，因此后续点位（包括其他平台）的主地址可能变化，旧摘要随之失效。缓存随身份移动。成功后关闭旧 Modbus 连接，PLC/组态需同步更新地址；普通页面排序与分组不改变映射。
 
-设置 `edgenode.node.modbus_gateway='1'` 并重启服务后，节点把下发配置中的物理测点和设备绑定 IO 自动映射成只读寄存器。默认关闭，监听 `edgenode.node.modbus_gateway_interface` 指定的接口，留空时使用 `hardware.lan_interface`；网桥 LAN 必须指定承载地址的桥接口（例如 `br-lan`），不能指定桥成员网口。端口由 `edgenode.node.modbus_gateway_port` 指定，默认 `502`；Unit ID 为 `1`，默认数值为 `4X/03` 原生类型映射，Bool 为 `1X/02` 按位映射，`3X/04` 保留旧版 64 位兼容视图。不会修改防火墙。派生点、图片及文本不转换为数值。
+0.3.87 起，`edgenode.node.modbus_gateway_interface` 只能保存已配置的 OpenWrt UCI 逻辑接口名（如 `lan`），不能提交物理设备名（如 `br-lan`、`eth0`），关闭网关时也执行相同校验。复用网络能力枚举的 static/dhcp 逻辑接口及设备解析，运行时通过 netifd ubus 的 `l3_device`/`device` 绑定真实设备；接口未上线、删除、改名或 UCI 与运行态设备尚不一致时停止监听，并返回具体原因。网络配置提交及 `network.interface`/`config.change` 事件驱动重新解析，不增加定时轮询；事件订阅断开时关闭监听，需重启服务恢复订阅。启动时，旧物理设备配置（包括旧的空值硬件 LAN 回退）仅在唯一已配置逻辑接口匹配时迁移，并以一次 UCI 提交原子保存，保留启停状态；未知或歧义配置保持原值并停止监听，绝不选择其他接口。新安装默认逻辑接口为 `lan`。端口 `modbus_gateway_port` 默认 `502`；从站 ID `modbus_gateway_unit_id` 默认 `1`，允许 `1..247`，非法 UCI 值拒绝加载。全部功能码均校验配置 ID，响应保留请求 ID；错误 ID 沿用关闭 TCP 连接的契约。切换 ID/映射会关闭旧连接和排队请求，在途命令完成后不得继续执行旧 PDU 的后续写点。默认关闭，不修改防火墙；03/04 仅映射紧凑原生数值，01/02 仅映射紧凑 Bool 数据值，派生、图片及文本不转换为数值。
 
-当前地址表为 `/tmp/edgenode-modbus.csv`，按平台、设备、测点身份分配零基地址。每点预留 10 个寄存器：类型（1）、质量（1）、最多四字数值区（4）、UTC 毫秒时间（4），多字高位在前。4X 的 Int16/UInt16 使用 1 字，Int32/UInt32/Float32 使用 2 字，Int64/UInt64/Double 使用 4 字，未使用的数值预留字为 0；Bool 在数值区使用单字 0/1，并以槽位序号提供 1X 位地址。类型码 2/3/4/5/6/7/8/9/10 分别为 Bool/Int64/UInt64/Double/Int16/UInt16/Int32/UInt32/Float32。质量 `0/1/2/3` 分别为未采集/有效/无效/超时，客户端必须检查质量。超时采用设备 `online_timeout_sec`，缺省 900 秒。整数保留完整精度；有倍率换算的 16/32 位整数及十进制结果映射为 Double，防止小数截断；越界或浮点溢出标记无效。
+0.3.86 起，03/04 仅按配置类型为已启用、受支持的非 Bool 数值从零连续分配：Int16/UInt16 为 1 字，Int32/UInt32/Float32 为 2 字，Int64/UInt64/Double 为 4 字；多字高位在前，南向源字节序不影响网关输出，也不再作为网关展示列。01/02 单独为 Bool 从位地址 0 连续分配，不占数值寄存器，也没有数值区 Bool 镜像。没有整点预留区间，类型宽度由配置确定，不随首次采样或无效样本漂移。CSV `/tmp/edgenode-modbus.csv` 导出实际 `register_type,address,words`（零基地址，Bool 的 words=1 表示一位）。整数保留完整精度；有倍率换算的 16/32 位整数及十进制结果映射为 Double，防止小数截断；越界或浮点溢出标记无效。质量与采样时间仅作为平台点位信息，不占寄存器；质量 `0/1/2/3` 分别为未采集/有效/无效/超时，超时采用设备 `online_timeout_sec`，缺省 900 秒。
 
-0.3.84 起改正 4X/03 的数值编码，升级前需导出映射并调整 PLC/组态的数据类型和读取数量。数值起始位置及持久文件格式不变，3X/04 保留旧版四字 64 位格式用于分步迁移；不要在新 4X 视图中继续把所有值按 64 位解释。
+这是对旧 03/02/04 外部地址布局的明确变更，旧 04 十字类型/质量/时间视图已移除，不再作为迁移寄存器区保留。升级前导出映射，并按升级后节点实际返回的 `valueAddress/valueWords/registerType` 更新 PLC/组态；不要按旧 `address+2`、`address/10` 或统一 64 位推算。内部 `address/words` 的十字数值仅兼容已部署排序协议的身份 token，不是实际从站区间。旧 0.3.70 的其他设备协议保持原样。
 
-地址预留持久化在 `/etc/edgenode-modbus.map` 并列入包配置保留清单；删除点位不挪用旧地址，恢复相同身份继续使用原地址，最多保留 6553 个身份。不要删除或重排该文件。文件损坏、写入失败、容量耗尽或与南向监听端口冲突时拒绝新配置。重启或配置切换后值缓存重新采集，寄存器地址保留。采集进程异常退出会使已有值失效；本地样本事件受阻会记录错误，旧值按超时规则失效。
+01、02、03、04 在完整 `0..65535` 范围内，所有合法的未映射、禁用、删除范围均成功返回零；允许跨已映射区末尾/空区读取，空表也如此。03/04 每次 1–125 字，01/02 每次 1–2000 位；起址加数量大于 65536 返回异常 02，零数量、超量或错误 PDU 长度返回异常 03。不能仅凭零值判断采集质量。
 
-寄存器读取在主事件循环完成，不触发南向请求；最多 8 条连接，支持分包及连续请求，30 秒未完成请求/响应时关闭连接。原始上报模式复用固件解码器更新缓存，平台报文保持原格式。主机测试入口为 `edge_modbus_gateway`；发布前还需 Linux 网络测试及实际固件验收。
+支持 05/06/0F/10 写入，与 Bool/数值紧凑地址对应。只读点及未映射地址忽略写入并正常响应，原样本/零值不变；可写点经节点真实命令与回读链完成后响应，不能改缓存冒充成功。05 只接受 0000/FF00，0F 每次 1–1968 位，10 每次 1–123 字，字节数必须精确匹配。部分字写使用有效的已采样原生值合成其余字；没有有效历史样本则异常 04，完整覆盖不要求历史样本，NaN/Inf 异常 03。整个 PDU 先验证，再逐点执行真实写入；多点写不承诺原子回滚，不自动重放已提交写入。真实执行失败异常 04，资源/队列忙异常 06，未知功能异常 01。网关缓存始终只跟随实际采集/回读样本更新。
 
-Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON`（需要 libev 开发文件和 Python），随后运行 `ctest --output-on-failure -R 'edge_modbus_gateway|edge_acquisition'`，覆盖实际 TCP 分包、连续请求、异常响应和采集进程的本地样本事件。
+`/etc/edgenode-modbus.map` 持久化内部排序身份并列入包配置保留清单，最多保留 6553 个身份；删除后恢复相同身份可重用内部 token。不要删除或手工重排该文件。实际主映射按当前启用、受支持身份顺序重新压紧，配置增删、停启、类型宽度变化及重排可能改变后续主地址；没有主映射的身份不制造空洞。文件损坏、写入失败、容量耗尽或与南向监听端口冲突时拒绝新配置。重启或配置切换后重新采集值缓存；配置未变时重算的主地址保持一致。采集进程异常退出会使已有值失效；本地样本事件受阻会记录错误，旧值按超时规则失效。
+
+寄存器读取在主事件循环完成，只读缓存，不触发南向请求，也不另设每秒刷新。普通采集读取间隔优先使用非零 `io_interval_ms`，否则使用平台下发的 `report_interval_sec * 1000`；每次真实采集完成后经本地样本事件立即更新网关，写后回读及快读窗口的真实样本同样更新缓存，窗口结束恢复普通周期。最多 8 条连接，支持分包及连续请求，30 秒未完成请求/响应时关闭连接。原始上报模式复用固件解码器更新缓存，平台报文保持原格式。主机测试入口为 `edge_modbus_gateway`；发布前还需 Linux 网络测试及实际固件验收。
+
+Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON`（需要 libev、libuci、libubus、libubox 开发文件和 Python），随后运行 `ctest --output-on-failure -R 'edge_modbus_gateway|edge_acquisition|edge_protocol'`。网关回归覆盖混合原生宽度、01/02 与 03/04 数值镜像、空表与跨尾部零值、65535 边界、停用/删除/重启/重排、旧快照与保存失败、写 PDU/类型/部分字预验证、实际 TCP 分包及只读忽略写入；新增实际 MBAP ID 247 各功能码响应、错误 ID 断连、非法 ID 不截断、真实 UCI 默认值/持久化回读/物理名拒绝/唯一迁移/歧义/逻辑删除改名边界，以及 ID 切换时排队与在途写不重放。真实可写点还须经过 TCP→采集命令→南向写及回读链路。发布前仍需三个 profile 的完整固件构建和实际设备验收。
 
 ## 平台传输故障隔离（0.3.80）
 
@@ -73,12 +77,12 @@ Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON
 - 未发送且已过期或无法验证的命令拒绝（`REJECTED`）；可能已发送但无 ACK、或已获 ACK 而回读失败均记为 `UNKNOWN`，不自动重放。
 - 启用该能力前须先升级平台。保留 `0.3.44` 兼容路径，但该旧固件不提供新截止保证。
 
-## 主动轮询与首次遥测调度（0.3.70）
+## 主动轮询与首次遥测调度（0.3.86）
 
-- 主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 使用 `EDGE_ACQUISITION_TICK_MS=1000ms` 为目标读取间隔；平台下发更慢的 `io_interval_ms` 不再降低读取频率。该值是调度目标，不是严格实时承诺；超时、共享物理链路和平台优先级会造成延迟。迟到调度跳过过期轮次，不补跑堆积读取。
+- 主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 普通读取间隔优先采用设备非零 `io_interval_ms`，否则采用 `report_interval_sec * 1000`，不再固定每秒读取。平台常规下发 `io_interval_ms=0`，此时读取跟随平台读取间隔。该值是调度目标，不是严格实时承诺；超时、共享物理链路和平台优先级会造成延迟。迟到调度跳过过期轮次，不补跑堆积读取。
 - `report_interval_sec` 独立控制普通遥测。配置应用后，首次完整新点集在本轮立即尝试入队；不会仅因收到配置应用确认、单独主动采集或已有旧样本而上报。首次读取失败、写命令占用或遥测入队失败时保留首次待报状态，每个后续采集轮只在读到完整新点集后重试；成功入队后才从成功时刻起算 `report_interval_sec`。
 - Worker 在每次开始下一项读取前先有限量消费控制队列，并按既有平台优先级顺序优先执行已入队写任务；每轮最多插队 4 项写任务，随后仍处理当前扫描索引（同一设备刚执行过写时跳过该设备的重复普通读），不会因写任务跳过其他设备或被动 SL651 收帧。预算耗尽时，仍有待写命令的设备不执行普通读。单 Worker 的同步协议交换不可抢占：已发出的请求必须先完成或超时，之后才能写入；写请求只发送一次，不自动重放。共享物理资源仍由同一 Worker 串行操作，SL651 被动确认、DTU 透传及平台优先级规则不变。
-- 经验证的写命令可以启动快读窗口；快窗口仅在 fast due 轮成功取得新样本后上报。写入仍即时返回命令结果，不因写后回读额外发送自动遥测，也不会把写入占用到期轮的旧遥测补报。
+- 经验证的写命令可以启动快读窗口；快窗口到期会实际读取，不因较慢普通周期推迟到普通轮。仅在 fast due 轮成功取得新样本后上报，窗口结束恢复普通周期且不补跑迟到轮。写入仍即时返回命令结果，不因写后回读额外发送自动遥测，也不会把写入占用到期轮的旧遥测补报。网关只发布这些真实读取产生的缓存，不自行加快采集。
 - 静默扫描不发自动 RawPacket、解析值或报文 debug；必要故障状态和命令结果即时上报，到期轮和显式人工调试按原路径处理。S7 TCP Client 持连及断线重连、共享串口资源和平台优先级保持原机制。
 - 被动 SL651 的确认、分包和主动上送，DTU 透传及串口监听不属于主动轮询；其既有行为不变、不受此扫描节奏约束，不丢帧。协议字段、固件身份及 0.3.44 升级兼容路径保持不变。
 - 行为变化：首次完整点集在配置应用后的首个成功采集轮立即尝试入队，普通后续周期从首次成功入队时起算；入队失败或采集失败时继续逐轮重试。快读窗口仍按原有到期规则运行；本版本保持协议字段、固件身份和 0.3.44 兼容升级路径。
@@ -223,7 +227,7 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
   `/tmp/edgenode/<platform_id>/`; process restarts recover them, device reboots do not;
 - before every tmpfs write, the daemon preserves 15% free space by rolling the oldest
   outbox message across all platforms; active and staging config are never rolled;
-- 采集 Worker 每秒检查调度；主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 均以 1000ms 为目标读取周期，忽略更慢的 `io_interval_ms`，迟到轮次跳过且不追赶。普通遥测独立遵循 `report_interval_sec`：配置应用后首个完整新点集立即尝试入队，成功入队后才开始计算后续周期；失败时逐轮重试，不用旧样本补报。命令结果即时返回。IPC 由 `ev_io` 就绪事件消费，设备 I/O 不阻塞 WebSocket 事件循环；
+- 主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 普通读取优先使用非零 `io_interval_ms`，否则使用 `report_interval_sec * 1000`；迟到轮次跳过且不追赶。快读窗口到期仍实际读取，结束后恢复普通周期。普通遥测遵循 `report_interval_sec`：配置应用后首个完整新点集立即尝试入队，成功入队后才开始计算后续周期；失败时逐轮重试，不用旧样本补报。命令结果即时返回。IPC 由 `ev_io` 就绪事件消费，每次实际采集完成即更新 Modbus 网关缓存，无独立刷新间隔；设备 I/O 不阻塞 WebSocket 事件循环；
 - platforms may share a physical serial channel and use different baud/parity settings;
   the worker drains the prior request, applies the next task's serial settings, clears
   stale input, observes the RTU quiet interval, and then performs that task. TCP Server
@@ -371,6 +375,12 @@ The package, daemon, init service, UCI configuration, and runtime paths are all 
 The nanopb C files generated from `proto/edge.proto` are committed under `generated/`.
 This keeps the OpenWrt 18.06 build independent of host Python and protobuf packages.
 Regenerate both files with nanopb 0.4.9.1 whenever the protocol changes.
+
+```sh
+python3 "$NANOPB_ROOT/generator/nanopb_generator.py" -I proto -D generated proto/edge.proto
+```
+
+需使用已安装 `protobuf`、`grpcio-tools` 的 Python 环境；`NANOPB_ROOT` 指向 0.4.9.1。三个固件 profile 的现有入口分别为 `configs/tastek-mt76x8.config`、`configs/it-694-s3.config`、`configs/ebyte-ecm30.config`：在 OpenWrt 根目录将所选文件复制为 `.config`，运行 `make defconfig`，再运行 `make package/network/services/edgenode/compile V=s`（包构建）或 `make -j$(nproc)`（完整固件）；切换不同 target 前按现有发布流程清理目标产物。
 
 Node-side protocol, runtime, and configuration tests are kept under `tests/` beside
 the implementation instead of in the platform repository. They can be run on a host

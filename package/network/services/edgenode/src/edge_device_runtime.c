@@ -277,8 +277,8 @@ bool edge_device_runtime_init(edge_device_runtime *runtime,
     memcpy(runtime->platform_id, platform_id, 16U);
     memcpy(runtime->device_id, device_id, 16U);
     runtime->report_interval_sec = report_interval_sec;
-    (void)io_interval_ms;
-    runtime->io_interval_ms = EDGE_ACQUISITION_TICK_MS;
+    runtime->io_interval_ms = io_interval_ms != 0U
+        ? io_interval_ms : (uint64_t)report_interval_sec * 1000U;
     runtime->next_io_at_ms = now_ms;
     runtime->next_report_at_ms = deadline_after_seconds(now_ms, report_interval_sec);
     runtime->initial_report_pending = true;
@@ -441,9 +441,12 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
     }
     runtime->debug_read = report_due || runtime->write_count != 0U;
 
-    const bool io_due = schedule_ms >= runtime->next_io_at_ms;
+    const bool ordinary_io_due = schedule_ms >= runtime->next_io_at_ms;
+    /* Fast reads collect a fresh sample even when the ordinary period is slow;
+     * they do not move the ordinary acquisition deadline. */
+    const bool io_due = ordinary_io_due || fast_report_due;
     if (io_due || runtime->write_count != 0U) {
-        if (io_due)
+        if (ordinary_io_due)
             runtime->next_io_at_ms = advance_deadline(runtime->next_io_at_ms,
                                                       runtime->io_interval_ms, schedule_ms);
         runtime->silent_background_read = !runtime->debug_read && runtime->write_count == 0U;

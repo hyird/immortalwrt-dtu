@@ -44,6 +44,7 @@
 static void send_pending_modem_result(edge_ws_session *session);
 static bool send_capability_report(edge_ws_session *session, bool force);
 static bool send_io_status(edge_ws_session *session);
+static void gateway_commands_stopped(edge_ws_app *app);
 
 static void invalidate_command_clock(edge_ws_session *session) {
     const bool was_valid = session->command_clock.valid;
@@ -413,6 +414,8 @@ static void acquisition_sample(void *context, const uint8_t platform[16],
     const edge_acquisition_sample *sample) {
     edge_ws_app *app = context;
     edge_modbus_gateway_update(app->gateway, platform, sample, monotonic_ms());
+    if (sample == NULL)
+        gateway_commands_stopped(app);
 }
 
 static edge_modbus_gateway *prepare_gateway(const edge_acquisition_source *sources, size_t count, uint16_t port) {
@@ -477,10 +480,106 @@ static bool acquisition_telemetry(void *context,
     return queued;
 }
 
+static uint8_t gateway_write(void *context, const edge_modbus_gateway_write *write,
+                              uint8_t command_id[16], uint64_t deadline_ms) {
+    edge_ws_app *app = context;
+    const uint64_t now = monotonic_ms();
+    if (now == 0U || now >= deadline_ms)
+        return 4U;
+    edge_ws_gateway_command *pending = NULL;
+    for (size_t i = 0U; i < 8U; ++i) {
+        /* A rebound listener can still have an old real command outstanding.
+         * Do not merge another partial write with its pre-readback cache. */
+        if (app->gateway_commands[i].active)
+            return 6U;
+        if (!pending)
+            pending = &app->gateway_commands[i];
+    }
+    if (!random_bytes(command_id, 16U))
+        return 4U;
+    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
+    request.command_id.size = request.device_id.size = 16U;
+    memcpy(request.command_id.bytes, command_id, 16U);
+    memcpy(request.device_id.bytes, write->device_id, 16U);
+    request.values_count = 1U;
+    safe_copy(request.values[0].element_id, sizeof(request.values[0].element_id), write->element_id);
+    request.values[0].has_expected = true;
+    request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
+    request.values[0].expected.which_value = iot_edge_v1_ScalarValue_string_value_tag;
+    safe_copy(request.values[0].expected.value.string_value,
+              sizeof(request.values[0].expected.value.string_value), write->value);
+    request.external_io = write->external_io;
+    const uint64_t remaining = deadline_ms - now;
+    request.timeout_ms = remaining > UINT32_MAX ? UINT32_MAX : (uint32_t)remaining;
+    request.readback_count = 1U;
+    request.has_start_before_ms = true;
+    /* This is a trusted local monotonic deadline, not a remote DB timestamp.
+     * The public acquisition API still stamps/checks the current generation. */
+    request.start_before_ms = 1;
+    pending->active = true;
+    pending->external_io = write->external_io;
+    memcpy(pending->command_id, command_id, 16U);
+    memcpy(pending->platform_id, write->platform_id, 16U);
+    memcpy(pending->device_id, write->device_id, 16U);
+    char error[256] = {0};
+    if (!edge_acquisition_command_for_platform_until(app->acquisition, write->platform_id,
+            &request, deadline_ms, deadline_ms, error, sizeof(error))) {
+        pending->active = false;
+        return 6U;
+    }
+    return 0U;
+}
+
+static bool consume_gateway_result(edge_ws_app *app, const uint8_t platform_id[16],
+                                     const iot_edge_v1_CommandResult *result) {
+    if (!result || result->command_id.size != 16U || result->device_id.size != 16U)
+        return false;
+    for (size_t i = 0U; i < 8U; ++i) {
+        edge_ws_gateway_command *pending = &app->gateway_commands[i];
+        if (!pending->active || memcmp(pending->command_id, result->command_id.bytes, 16U) ||
+            memcmp(pending->platform_id, platform_id, 16U) ||
+            memcmp(pending->device_id, result->device_id.bytes, 16U))
+            continue;
+        const bool success = result->state == iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED;
+        const bool external_io = pending->external_io;
+        pending->active = false; /* Release before completion can submit the next point. */
+        if (success && external_io) {
+            /* Protocol reads already publish samples while parsing. External IO
+             * reports the real output readback here, ahead of its ordinary period. */
+            for (pb_size_t value = 0U; value < result->actual_values_count; ++value) {
+                const iot_edge_v1_TelemetryValue *actual = &result->actual_values[value];
+                edge_acquisition_sample sample = {.valid = actual->has_value,
+                    .observed_at_ms = result->completed_at_ms, .value = actual->value};
+                memcpy(sample.device_id, result->device_id.bytes, 16U);
+                safe_copy(sample.element_id, sizeof(sample.element_id), actual->element_id);
+                edge_modbus_gateway_update(app->gateway, platform_id, &sample, monotonic_ms());
+            }
+        }
+        /* A replaced/destroyed server has no matching random command ID. */
+        edge_modbus_gateway_write_result(app->gateway_server, result->command_id.bytes, success);
+        return true;
+    }
+    return false;
+}
+
+static void gateway_commands_stopped(edge_ws_app *app) {
+    /* Only after the old worker is definitely stopped and its IPC is closed:
+     * no further result can arrive, so these IDs may now be retired. */
+    for (size_t i = 0U; i < 8U; ++i) {
+        edge_ws_gateway_command *pending = &app->gateway_commands[i];
+        if (!pending->active)
+            continue;
+        pending->active = false;
+        edge_modbus_gateway_write_result(app->gateway_server, pending->command_id, false);
+    }
+}
+
 static bool acquisition_command_result(void *context,
                                        const uint8_t platform_id[16],
                                        const iot_edge_v1_CommandResult *result) {
     edge_ws_app *app = context;
+    if (consume_gateway_result(app, platform_id, result))
+        return true;
     edge_ws_session *session = session_for_platform(app, platform_id);
     const uint8_t *device_id = result != NULL && result->device_id.size == 16U
         ? result->device_id.bytes : NULL;
@@ -591,6 +690,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_external_io_milliamps = hello->supports_external_io;
     hello->supports_modbus_gateway = true;
     hello->supports_modbus_gateway_order = true;
+    hello->supports_modbus_gateway_config = true;
     hello->supports_node_io = hello->supports_external_io;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -943,20 +1043,68 @@ static size_t build_acquisition_sources(
     return count;
 }
 
+static void gateway_network_changed(void *context, bool available) {
+    edge_ws_app *app = context;
+    app->gateway_network_available = available;
+    char device[33] = {0};
+    const bool resolved = available && edge_network_gateway_resolve(
+        app->config->modbus_gateway_interface, true, device,
+        app->gateway_error, sizeof(app->gateway_error));
+    if (!available)
+        safe_copy(app->gateway_error, sizeof(app->gateway_error), "network event subscription unavailable; restart required");
+    if (resolved && app->config->modbus_gateway &&
+        edge_modbus_gateway_listening(app->gateway_server) && !strcmp(device, app->gateway_device)) {
+        app->gateway_error[0] = '\0';
+        return;
+    }
+    edge_modbus_gateway_close(app->gateway_server);
+    app->gateway_server = NULL;
+    app->gateway_device[0] = '\0';
+    if (!resolved) return;
+    app->gateway_error[0] = '\0';
+    if (!app->config->modbus_gateway) return;
+    if (!app->gateway) {
+        edge_acquisition_source sources[EDGE_MAX_PLATFORMS];
+        const size_t count = build_acquisition_sources(app, NULL, NULL, sources);
+        app->gateway = prepare_gateway(sources, count, app->config->modbus_gateway_port);
+        if (!app->gateway) {
+            safe_copy(app->gateway_error, sizeof(app->gateway_error), "gateway map unavailable");
+            return;
+        }
+    }
+    if (!edge_modbus_gateway_set_unit_id(app->gateway, app->config->modbus_gateway_unit_id)) {
+        safe_copy(app->gateway_error, sizeof(app->gateway_error), "gateway Unit ID must be between 1 and 247");
+        return;
+    }
+    app->gateway_server = edge_modbus_gateway_listen(app->loop, app->gateway, device,
+        app->config->modbus_gateway_port);
+    if (!app->gateway_server) {
+        safe_copy(app->gateway_error, sizeof(app->gateway_error), "cannot bind logical interface L3 device");
+        return;
+    }
+    safe_copy(app->gateway_device, sizeof(app->gateway_device), device);
+    app->gateway_error[0] = '\0';
+    edge_modbus_gateway_set_writer(app->gateway_server, gateway_write, app);
+}
+
 static bool apply_gateway_settings(edge_ws_app *app, const iot_edge_v1_ModbusGatewaySettings *settings,
     char *error, size_t error_size) {
-    if (!settings->port || settings->port > 65535 || !settings->interface_name[0] ||
-        strspn(settings->interface_name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-") != strlen(settings->interface_name)) {
-        snprintf(error, error_size, "监听接口或端口无效"); return false;
+    if (!settings->port || settings->port > 65535U || settings->unit_id > 247U) {
+        snprintf(error, error_size, "监听端口或从站 ID 无效（ID 必须为 1..247）"); return false;
+    }
+    char device[33] = {0};
+    if (!edge_network_gateway_resolve(settings->interface_name, settings->enabled,
+                                      device, error, error_size)) return false;
+    if (settings->enabled && !app->gateway_network_available) {
+        snprintf(error, error_size, "网络事件监听不可用，请重启服务"); return false;
     }
     edge_app_config candidate = app->config_storage;
     candidate.modbus_gateway = settings->enabled;
     candidate.modbus_gateway_port = (uint16_t)settings->port;
+    candidate.modbus_gateway_unit_id = settings->unit_id ? (uint8_t)settings->unit_id : 1U;
     safe_copy(candidate.modbus_gateway_interface, sizeof(candidate.modbus_gateway_interface), settings->interface_name);
-    const char *previous_interface = app->config->modbus_gateway_interface[0]
-        ? app->config->modbus_gateway_interface : app->config->lan_interface;
     const bool reuse = settings->enabled && edge_modbus_gateway_listening(app->gateway_server) &&
-        app->config->modbus_gateway_port == settings->port && !strcmp(previous_interface, settings->interface_name);
+        app->config->modbus_gateway_port == settings->port && !strcmp(app->gateway_device, device);
     edge_modbus_gateway *map = NULL;
     edge_modbus_gateway_server *server = NULL;
     if (settings->enabled) {
@@ -964,9 +1112,13 @@ static bool apply_gateway_settings(edge_ws_app *app, const iot_edge_v1_ModbusGat
         const size_t count = build_acquisition_sources(app, NULL, NULL, sources);
         map = prepare_gateway(sources, count, candidate.modbus_gateway_port);
         if (!map) { snprintf(error, error_size, "地址映射不可用、容量已满或监听端口冲突"); return false; }
+        if (!edge_modbus_gateway_set_unit_id(map, candidate.modbus_gateway_unit_id)) {
+            edge_modbus_gateway_free(map); snprintf(error, error_size, "从站 ID 无效"); return false;
+        }
         server = reuse ? app->gateway_server : edge_modbus_gateway_listen(app->loop, map,
-            candidate.modbus_gateway_interface, candidate.modbus_gateway_port);
+            device, candidate.modbus_gateway_port);
         if (!server) { edge_modbus_gateway_free(map); snprintf(error, error_size, "无法绑定监听接口或端口"); return false; }
+        edge_modbus_gateway_set_writer(server, gateway_write, app);
     }
     if (!edge_acquisition_set_gateway_enabled(app->acquisition, settings->enabled)) {
         if (!reuse) edge_modbus_gateway_close(server);
@@ -985,6 +1137,8 @@ static bool apply_gateway_settings(edge_ws_app *app, const iot_edge_v1_ModbusGat
     edge_modbus_gateway_free(app->gateway);
     app->gateway = map; app->gateway_server = server;
     app->config_storage = candidate;
+    safe_copy(app->gateway_device, sizeof(app->gateway_device), settings->enabled ? device : "");
+    app->gateway_error[0] = '\0';
     export_gateway(app);
     return true;
 }
@@ -1048,8 +1202,11 @@ static void handle_gateway_request(edge_ws_session *session, const iot_edge_v1_E
     result->has_settings = true;
     result->settings.enabled = session->app->config->modbus_gateway;
     result->settings.port = session->app->config->modbus_gateway_port;
+    result->settings.unit_id = session->app->config->modbus_gateway_unit_id;
     safe_copy(result->settings.interface_name, sizeof(result->settings.interface_name),
-        session->app->config->modbus_gateway_interface[0] ? session->app->config->modbus_gateway_interface : session->app->config->lan_interface);
+        session->app->config->modbus_gateway_interface);
+    if (success && !request.has_settings && session->app->gateway_error[0])
+        safe_copy(result->message, sizeof(result->message), session->app->gateway_error);
     if (result->success && request.include_points)
         result->success = gateway_points(session, &request, result);
     if (!send_envelope(session, output)) syslog(LOG_WARNING, "Modbus gateway configuration reply was not sent");
@@ -1145,7 +1302,9 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     ev_io_stop(session->app->loop, &session->app->acquisition_io);
     for (size_t i = 0; i < session->app->config->platform_count; ++i)
         close_serial_debug(&session->app->sessions[i], "device configuration changed; reopen serial debug");
+    edge_modbus_gateway_replace(session->app->gateway_server, session->app->gateway);
     edge_acquisition_stop(session->app->acquisition);
+    gateway_commands_stopped(session->app);
     if (!edge_acquisition_start(candidate_acquisition,
                                 apply_error, sizeof(apply_error))) {
         char restart_error[128] = {0};
@@ -1181,6 +1340,8 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     edge_acquisition_destroy(session->app->acquisition);
     edge_runtime_config_free(&session->runtime_config);
     session->app->acquisition = candidate_acquisition;
+    if (candidate_gateway)
+        (void)edge_modbus_gateway_set_unit_id(candidate_gateway, session->app->config->modbus_gateway_unit_id);
     edge_modbus_gateway_replace(session->app->gateway_server, candidate_gateway);
     edge_modbus_gateway_free(session->app->gateway);
     session->app->gateway = candidate_gateway;
@@ -1492,6 +1653,9 @@ static void handle_network_config(edge_ws_session *session,
     else
         success = edge_network_prepare(request, session->app->config->wan_interface,
                                        message, sizeof(message));
+    /* UCI is already committed: stop serving a removed/reassigned identity
+     * before the asynchronous network reload begins. */
+    if (success) gateway_network_changed(session->app, session->app->gateway_network_available);
     if (success &&
         !edge_network_activate(request->rollback_timeout_sec,
                                session->config->id, request_id)) {
@@ -2586,9 +2750,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
                                       sizeof(acquisition_error)) ||
         (config->modbus_gateway &&
          (!(app->gateway = prepare_gateway(sources, source_count, config->modbus_gateway_port)) ||
-          !(app->gateway_server = edge_modbus_gateway_listen(loop, app->gateway,
-              config->modbus_gateway_interface[0] ? config->modbus_gateway_interface : config->lan_interface,
-              config->modbus_gateway_port)))) ||
+          !edge_modbus_gateway_set_unit_id(app->gateway, config->modbus_gateway_unit_id))) ||
         !edge_acquisition_start(app->acquisition, acquisition_error,
                                 sizeof(acquisition_error))) {
         syslog(LOG_ERR, "acquisition or Modbus gateway initialization rejected: %s", acquisition_error[0] ? acquisition_error : "gateway map unavailable or LAN listener cannot bind");
@@ -2604,6 +2766,25 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         }
         return false;
     }
+    edge_modbus_gateway_set_writer(app->gateway_server, gateway_write, app);
+    char logical_name[33] = {0};
+    const char *previous = config->modbus_gateway_interface[0] ?
+        config->modbus_gateway_interface : config->lan_interface;
+    if (edge_network_gateway_migrate(previous, logical_name, app->gateway_error, sizeof(app->gateway_error))) {
+        if (strcmp(logical_name, config->modbus_gateway_interface)) {
+            edge_app_config candidate = app->config_storage;
+            safe_copy(candidate.modbus_gateway_interface, sizeof(candidate.modbus_gateway_interface), logical_name);
+            if (edge_config_save_modbus_gateway(&candidate))
+                app->config_storage = candidate;
+            else safe_copy(app->gateway_error, sizeof(app->gateway_error), "cannot atomically persist legacy gateway interface migration");
+        }
+    }
+    app->gateway_network_watch = edge_network_watch_open(loop, gateway_network_changed, app);
+    app->gateway_network_available = app->gateway_network_watch != NULL;
+    if (!app->gateway_error[0])
+        gateway_network_changed(app, app->gateway_network_watch != NULL);
+    if (app->gateway_error[0])
+        syslog(LOG_ERR, "Modbus gateway stopped: %s", app->gateway_error);
     export_gateway(app);
     return true;
 }
@@ -2638,14 +2819,18 @@ void edge_ws_app_stop(edge_ws_app *app) {
     if (app == NULL)
         return;
     if (app->traffic.event_fd >= 0) ev_io_stop(app->loop, &app->traffic_io);
+    edge_network_watch_close(app->gateway_network_watch);
+    app->gateway_network_watch = NULL;
     edge_traffic_close(&app->traffic);
     ev_timer_stop(app->loop, &app->acquisition_timer);
     ev_timer_stop(app->loop, &app->status_timer);
     edge_status_remove();
     ev_io_stop(app->loop, &app->acquisition_io);
-    edge_acquisition_destroy(app->acquisition);
-    app->acquisition = NULL;
     edge_modbus_gateway_close(app->gateway_server);
+    app->gateway_server = NULL;
+    edge_acquisition_destroy(app->acquisition);
+    gateway_commands_stopped(app);
+    app->acquisition = NULL;
     edge_modbus_gateway_free(app->gateway);
     app->gateway_server = NULL; app->gateway = NULL;
     remove("/tmp/edgenode-modbus.csv");

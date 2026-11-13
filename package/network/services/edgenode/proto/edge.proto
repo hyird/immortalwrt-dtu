@@ -146,6 +146,7 @@ message Empty {}
 message Hello {
   bool supports_modbus_gateway = 42;
   bool supports_modbus_gateway_order = 43;
+  bool supports_modbus_gateway_config = 44;
   // Required to negotiate the mA external IO protocol.
   bool supports_external_io_milliamps = 41;
   bool supports_node_io = 40;
@@ -954,6 +955,7 @@ message ModbusGatewaySettings {
   bool enabled = 1;
   uint32 port = 2;
   string interface_name = 3 [(nanopb).max_length = 15];
+  uint32 unit_id = 4;
 }
 message ModbusGatewayPoint {
   bytes device_id = 1 [(nanopb).max_size = 16];

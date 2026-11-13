@@ -696,39 +696,39 @@ static void test_fast_reporting_after_write(void) {
 }
 
 static void test_configured_read_interval(void) {
-    uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
-    edge_device_driver driver = {.connect = fake_connect, .handshake = fake_handshake,
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {.connect = fake_connect, .handshake = fake_handshake,
         .read = fake_read, .write_readback = fake_write, .disconnect = fake_disconnect,
         .report = fake_report, .command_complete = fake_complete};
     for (unsigned protocol = EDGE_DEVICE_MODBUS; protocol <= EDGE_DEVICE_DLT645; ++protocol) {
-        fake_device fake = {0};
-        edge_device_runtime runtime;
-        require_true(edge_device_runtime_init(&runtime, (edge_device_protocol)protocol,
-            platform_id, device_id, 0U, 30U, 0U, &driver, &fake), "configured runtime init failed");
-        for (uint64_t now = 0; now < 30000U; now += 1000U)
-            edge_device_runtime_tick(&runtime, now, (int64_t)now);
-        require_true(fake.reads == 30U, "one-second scan cycle was not applied to a slow configured interval");
-        edge_device_runtime_tick(&runtime, 30000U, 30000);
-        require_true(fake.reads == 31U, "slow configured interval suppressed the 1-second scan cycle");
-        edge_device_runtime_tick(&runtime, 100000U, 100000);
-        require_true(fake.reads == 32U && runtime.next_io_at_ms == 101000U,
-            "late scheduling produced catch-up reads or lost the 1-second period");
-        edge_write_command command = {.value = {0x55U}, .value_size = 1U};
-        require_true(enqueue_write_for_test(&runtime, &command), "write enqueue failed");
-        edge_device_runtime_tick(&runtime, 101000U, 101000);
-        require_true(fake.writes == 1U && runtime.next_io_at_ms == 102000U,
-            "configured read interval delayed a control command or changed its 1-second schedule");
-        edge_device_runtime_close(&runtime);
-        memset(&fake, 0, sizeof(fake));
-        require_true(edge_device_runtime_init(&runtime, (edge_device_protocol)protocol,
-            platform_id, device_id, 5000U, 30U, 0U, &driver, &fake), "explicit interval rejected");
-        edge_device_runtime_tick(&runtime, 0U, 0);
-        edge_device_runtime_tick(&runtime, 1000U, 1000);
-        require_true(fake.reads == 2U, "explicit slow interval was not covered by 1-second scanning");
-        for (uint64_t now = 2000U; now <= 5000U; now += 1000U)
-            edge_device_runtime_tick(&runtime, now, (int64_t)now);
-        require_true(fake.reads == 6U, "explicit slow interval stopped the 1-second scan cycle");
-        edge_device_runtime_close(&runtime);
+        for (unsigned explicit_interval = 0U; explicit_interval < 2U; ++explicit_interval) {
+            fake_device fake = {0};
+            edge_device_runtime runtime;
+            const uint64_t period = explicit_interval ? 5000U : 30000U;
+            require_true(edge_device_runtime_init(&runtime, (edge_device_protocol)protocol,
+                platform_id, device_id, explicit_interval ? 5000U : 0U, 30U, 0U,
+                &driver, &fake), "configured runtime init failed");
+            for (uint64_t now = 0U; now < period; now += 1000U)
+                edge_device_runtime_tick(&runtime, now, (int64_t)now);
+            require_true(fake.reads == 1U && fake.reports == 1U,
+                "maintenance ticks ignored the configured period or delayed the initial report");
+            edge_device_runtime_tick(&runtime, period, (int64_t)period);
+            require_true(fake.reads == 2U && fake.reports == (explicit_interval ? 1U : 2U),
+                "configured read deadline or independent ordinary report deadline was ignored");
+            edge_device_runtime_tick(&runtime, 100000U, 100000);
+            require_true(fake.reads == 3U && fake.reports == (explicit_interval ? 2U : 3U) &&
+                runtime.next_io_at_ms == (explicit_interval ? 105000U : 120000U),
+                "late scheduling produced catch-up reads or lost the configured period");
+            edge_device_runtime_tick(&runtime, 100000U, 100000);
+            require_true(fake.reads == 3U, "late scheduling performed a catch-up burst");
+            edge_write_command command = {.value = {0x55U}, .value_size = 1U};
+            require_true(enqueue_write_for_test(&runtime, &command), "write enqueue failed");
+            edge_device_runtime_tick(&runtime, 101000U, 101000);
+            require_true(fake.writes == 1U && fake.completions == 1U && fake.reads == 3U &&
+                runtime.next_io_at_ms == (explicit_interval ? 105000U : 120000U),
+                "slow acquisition delayed a priority write or moved the ordinary schedule");
+            edge_device_runtime_close(&runtime);
+        }
     }
 }
 
@@ -785,7 +785,7 @@ static void test_s7_failed_fast_report_is_suppressed(void) {
     fake_device fake = {0};
     edge_device_runtime runtime;
     require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
-        platform_id, device_id, EDGE_ACQUISITION_TICK_MS, 300U, 0U, &driver, &fake),
+        platform_id, device_id, 0U, 300U, 0U, &driver, &fake),
         "S7 fast-report runtime init failed");
     edge_device_runtime_tick(&runtime, 0U, 0);
     edge_write_command command = {.value = {0x55U}, .value_size = 1U,
@@ -899,7 +899,7 @@ static void test_failed_fast_due_retries_next_cycle(void) {
     fake_device fake = {0};
     edge_device_runtime runtime;
     require_true(edge_device_runtime_init(&runtime, EDGE_DEVICE_S7,
-        platform_id, device_id, EDGE_ACQUISITION_TICK_MS, 300U, 0U, &driver, &fake),
+        platform_id, device_id, 0U, 300U, 0U, &driver, &fake),
         "S7 fast retry runtime init failed");
     edge_device_runtime_tick(&runtime, 0U, 0);
     edge_write_command command = {.value = {0x55U}, .value_size = 1U,
@@ -1081,11 +1081,12 @@ static void test_s7_tcp_client_scan_and_report_intervals(void) {
     runtime.s7_tcp_client = true;
     edge_device_runtime_tick(&runtime, 0U, 0);
     edge_device_runtime_tick(&runtime, 1000U, 1000);
-    require_true(explicit_interval.reads == 2U && explicit_interval.reports == 1U,
-        "explicit slow S7 interval was not covered by 1-second scanning");
+    require_true(explicit_interval.reads == 1U && explicit_interval.reports == 1U,
+        "S7 TCP Client replaced its explicit slow interval with 1-second scanning");
     edge_device_runtime_tick(&runtime, 300000U, 300000);
-    require_true(explicit_interval.reads == 3U && explicit_interval.reports == 2U,
-        "S7 ordinary report deadline was not respected independently of scan cadence");
+    require_true(explicit_interval.reads == 2U && explicit_interval.reports == 2U &&
+        explicit_interval.connects == 1U && explicit_interval.handshakes == 1U,
+        "S7 configured read did not report a fresh sample on the retained session");
     edge_device_runtime_close(&runtime);
 }
 
@@ -1105,16 +1106,16 @@ static void test_universal_scan_reporting_and_fast_due(void) {
         fake.runtime = &runtime;
         for (uint64_t now = 0; now < 300000U; now += EDGE_ACQUISITION_TICK_MS)
             edge_device_runtime_tick(&runtime, now, (int64_t)now);
-        require_true(fake.reads == 300U && fake.reports == 1U &&
-                     fake.silent_reads == 299U && fake.debug_reads == 1U,
-            "first complete sample was not reported while background polling stayed silent");
+        require_true(fake.reads == 1U && fake.reports == 1U &&
+                     fake.silent_reads == 0U && fake.debug_reads == 1U,
+            "slow configured acquisition read between deadlines or missed its initial report");
         edge_device_runtime_tick(&runtime, 300000U, 300000);
-        require_true(fake.reads == 301U && fake.reports == 2U &&
-                     fake.debug_reads == 2U && fake.silent_reads == 299U,
+        require_true(fake.reads == 2U && fake.reports == 2U &&
+                     fake.debug_reads == 2U && fake.silent_reads == 0U,
             "ordinary due did not debug/report exactly its fresh sample");
         edge_device_runtime_tick(&runtime, 900000U, 900000);
-        require_true(fake.reads == 302U && fake.reports == 3U &&
-                     runtime.next_io_at_ms == 901000U,
+        require_true(fake.reads == 3U && fake.reports == 3U &&
+                     runtime.next_io_at_ms == 1200000U,
             "late tick caused catch-up reads or missed its due report");
         edge_device_runtime_close(&runtime);
     }
@@ -1139,9 +1140,20 @@ static void test_universal_scan_reporting_and_fast_due(void) {
     edge_device_runtime_tick(&runtime, 9000U, 9000);
     require_true(fake.reads == 3U && fake.reports == 2U,
         "failed fast-due scan reported stale data");
+    edge_device_runtime_tick(&runtime, 10000U, 10000);
+    require_true(fake.reads == 4U && fake.reports == 3U &&
+        runtime.next_fast_report_at_ms == 14000U && runtime.next_io_at_ms == 300000U,
+        "failed fast read did not retry with a fresh sample independently of ordinary reads");
     edge_device_runtime_tick(&runtime, 20000U, 20000);
-    require_true(fake.reads == 4U && fake.reports == 2U,
-        "expired fast window reported outside a due round");
+    require_true(fake.reads == 4U && fake.reports == 3U &&
+        runtime.fast_report_until_ms == 0U && runtime.next_io_at_ms == 300000U,
+        "expired fast window continued reading or changed the ordinary acquisition deadline");
+    edge_device_runtime_tick(&runtime, 299000U, 299000);
+    require_true(fake.reads == 4U && fake.reports == 3U,
+        "fast window expiry reverted to fixed 1-second acquisition");
+    edge_device_runtime_tick(&runtime, 300000U, 300000);
+    require_true(fake.reads == 5U && fake.reports == 4U,
+        "ordinary acquisition/reporting did not resume after fast reads");
     edge_device_runtime_close(&runtime);
 
     fake = (fake_device){0};

@@ -1,6 +1,7 @@
 #include "edge_capability.h"
 
 #include "edge_interface.h"
+#include "edge_network.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -228,18 +229,17 @@ static void collect_logical_networks(iot_edge_v1_CapabilityReport *report,
         network->mode = mode;
         network->bridge = bridge;
         char runtime_name[33] = {0};
+        if (!edge_network_interface_device(context, section, runtime_name)) {
+            --report->networks_count;
+            continue;
+        }
+        safe_copy(network->device, sizeof(network->device), runtime_name);
         if (bridge) {
-            snprintf(runtime_name, sizeof(runtime_name), "br-%s", element->name);
-            safe_copy(network->device, sizeof(network->device), runtime_name);
             for (size_t index = 0; index < device_count; ++index) {
                 safe_copy(network->bridge_ports[network->bridge_ports_count],
-                          sizeof(network->bridge_ports[network->bridge_ports_count]),
-                          devices[index]);
+                          sizeof(network->bridge_ports[network->bridge_ports_count]), devices[index]);
                 ++network->bridge_ports_count;
             }
-        } else {
-            safe_copy(runtime_name, sizeof(runtime_name), devices[0]);
-            safe_copy(network->device, sizeof(network->device), devices[0]);
         }
         const iot_edge_v1_InterfaceCapability *runtime =
             find_interface(report, runtime_name);
