@@ -273,6 +273,9 @@ size_t edge_derived_count(const edge_derived *state) { return state ? state->cou
 void edge_derived_values(const edge_derived *state, iot_edge_v1_TelemetryValue *output) {
     for (size_t i = 0; state && i < state->count; ++i) output[i] = state->rules[i].output;
 }
+const iot_edge_v1_TelemetryValue *edge_derived_value(const edge_derived *state, size_t index) {
+    return state && index < state->count ? &state->rules[index].output : NULL;
+}
 bool edge_derived_update(edge_derived *state, const iot_edge_v1_TelemetryValue *values, size_t count, int64_t at) {
     if (!state) return false;
     for (size_t i = 0; i < state->latest_count; ++i) state->latest[i].updated = false;

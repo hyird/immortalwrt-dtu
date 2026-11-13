@@ -72,13 +72,15 @@ with tempfile.TemporaryDirectory(prefix="edge-gateway-", dir="build") as tempora
     # The same map survives process restarts, disable/delete/empty configurations,
     # rejected saves and an explicitly persisted permutation.
     for mode, sorted_view in [("normal", False), ("normal", False),
-                              ("disabled", False), ("deleted", False), ("empty", False),
+                              ("derived-failure", False), ("disabled", False), ("deleted", False), ("empty", False),
                               ("save-failure", False), ("sorted", True), ("normal", True)]:
         with fixture(directory, mode) as port:
             empty = mode in {"disabled", "deleted", "empty"}
             native = (struct.pack(">QdIH", 0xffffffffffffffff, 1.5, 0x12345678, 0x1234)
                       if sorted_view else
                       struct.pack(">QHId", 0xffffffffffffffff, 0x1234, 0x12345678, 1.5))
+            native += struct.pack(">d", 0.0 if mode == "derived-failure" else 3.0)
+            flags = b"\x01\x00" if mode == "derived-failure" else b"\x03\x00"
             with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
                 packet = request(7)
                 # Retain every fragment, then pipeline later frames before reading.
@@ -95,21 +97,24 @@ with tempfile.TemporaryDirectory(prefix="edge-gateway-", dir="build") as tempora
                     assert read(connection, 2, 0, 2000) == b"\x00" * 250
                     assert read(connection, 4, 0, 60) == b"\x00" * 120
                 else:
-                    assert read(connection, 3, 0, 15) == native + b"\x00" * 8
-                    assert read(connection, 3, 2, 12) == native[4:] + b"\x00" * 6
-                    assert read(connection, 2, 0, 10) == b"\x01\x00"
-                    assert read(connection, 2, 1, 10) == b"\x00\x00"
-                    assert read(connection, 1, 0, 10) == b"\x01\x00"
-                    assert read(connection, 4, 0, 15) == native + b"\x00" * 8
+                    assert read(connection, 3, 0, 19) == native + b"\x00" * 8
+                    assert read(connection, 3, 2, 16) == native[4:] + b"\x00" * 6
+                    assert read(connection, 2, 0, 10) == flags
+                    assert read(connection, 2, 1, 10) == bytes([flags[0] >> 1, 0])
+                    assert read(connection, 1, 0, 10) == flags
+                    assert read(connection, 4, 0, 19) == native + b"\x00" * 8
                 # All fixture points are source-read-only: writes acknowledge
                 # normally without replacing actual samples or filling holes.
                 ignored_write(connection, 5, 0, 1, b"\x00\x00")
                 ignored_write(connection, 6, 4, 1, b"\xab\xcd")
                 ignored_write(connection, 15, 0, 10, b"\x00\x00")
                 ignored_write(connection, 16, 0, 3, b"\x00" * 6)
+                ignored_write(connection, 6, 11, 1, b"\xff\xff")
+                ignored_write(connection, 5, 1, 1, b"\x00\x00")
+                ignored_write(connection, 16, 11, 4, b"\x7f\xf8" + b"\x00" * 6)
                 ignored_write(connection, 6, 65535, 1, b"\x12\x34")
-                assert read(connection, 3, 0, 15) == (b"\x00" * 30 if empty else native + b"\x00" * 8)
-                assert read(connection, 2, 0, 10) == (b"\x00\x00" if empty else b"\x01\x00")
+                assert read(connection, 3, 0, 19) == (b"\x00" * 38 if empty else native + b"\x00" * 8)
+                assert read(connection, 2, 0, 10) == (b"\x00\x00" if empty else flags)
                 for function in (1, 2, 3, 4):
                     bits = function in (1, 2)
                     assert read(connection, function, 65535, 1) == b"\x00" * (1 if bits else 2)

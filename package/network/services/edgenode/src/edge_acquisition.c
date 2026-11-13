@@ -323,6 +323,20 @@ static void publish_gateway_value(edge_acquisition_device *device,
     } else owner->sample_callback(owner->callback_context, device->platform_id, &sample);
 }
 
+static bool update_derived(edge_acquisition_device *device,
+    const iot_edge_v1_TelemetryValue *values, size_t count, int64_t now) {
+    if (device->raw_telemetry && !device->owner->gateway_enabled) return false;
+    const bool changed = edge_derived_update(device->derived, values, count, now);
+    device->derived_deadline = edge_derived_deadline(device->derived, now);
+    if (changed && device->owner->gateway_enabled) {
+        for (size_t i = 0; i < edge_derived_count(device->derived); ++i) {
+            const iot_edge_v1_TelemetryValue *value = edge_derived_value(device->derived, i);
+            publish_gateway_value(device, value, value->sample_time_ms);
+        }
+    }
+    return changed;
+}
+
 static void serial_observe(edge_acquisition *acquisition, const char *path,
     const iot_edge_v1_SerialSettings *settings, const char *direction,
     const uint8_t *bytes, size_t size);
@@ -2348,7 +2362,7 @@ static edge_io_result write_acquisition(void *context,
 }
 
 static void update_derived_samples(edge_acquisition_device *device) {
-    if (device->raw_telemetry || !device->derived) return;
+    if (!device->derived || (device->raw_telemetry && !device->owner->gateway_enabled)) return;
     iot_edge_v1_TelemetryValue *values = calloc(device->point_count ? device->point_count : 1, sizeof(*values));
     if (!values) {
         syslog(LOG_ERR, "cannot allocate derived input snapshot");
@@ -2360,8 +2374,7 @@ static void update_derived_samples(edge_acquisition_device *device) {
     size_t count = 0;
     for (size_t i = 0; i < device->point_count; ++i) if (device->points[i].valid) values[count++] = device->points[i].value;
     const int64_t now = current_ms();
-    (void)edge_derived_update(device->derived, values, count, now);
-    device->derived_deadline = edge_derived_deadline(device->derived, now);
+    (void)update_derived(device, values, count, now);
     free(values);
 }
 
@@ -2652,15 +2665,15 @@ static bool sl651_report(void *context, uint64_t token, const edge_sl651_frame *
     for (size_t index = 0; index < count; ++index) values[index].sample_time_ms = sl651_observed(device, frame->body);
     for (size_t index = 0; index < count; ++index)
         publish_gateway_value(device, &values[index], values[index].sample_time_ms);
+    const bool derived_enabled = !raw_report || device->owner->gateway_enabled;
+    if (derived_enabled)
+        (void)update_derived(device, values, count, current_ms());
     if (raw_report) {
         for (size_t index = 0; index < count; ++index) free(values[index].encoded_value);
         memset(values, 0, count * sizeof(*values));
         count = 0;
     }
     if (!raw_report) {
-    const int64_t derived_at = current_ms();
-    (void)edge_derived_update(device->derived, values, count, derived_at);
-    device->derived_deadline = edge_derived_deadline(device->derived, derived_at);
     edge_derived_values(device->derived, values + count);
     count += edge_derived_count(device->derived);
     }
@@ -2945,15 +2958,19 @@ static bool publish_acquisition_cycle(edge_acquisition_device *device,
 
 static bool publish_derived_expiry(edge_acquisition_device *device) {
     const int64_t now = current_ms();
-    if (device->raw_telemetry || !device->derived) return true;
+    if (!device->derived) return true;
+    if (device->raw_telemetry) {
+        if (device->owner->gateway_enabled && now >= device->derived_deadline)
+            (void)update_derived(device, NULL, 0, now);
+        return true;
+    }
     if (!device->derived_pending && now >= device->derived_deadline) {
         iot_edge_v1_TelemetryRecord *record = calloc(1, sizeof(*record));
         if (!record) return false;
         record->values_count = (pb_size_t)edge_derived_count(device->derived);
         record->values = calloc(record->values_count, sizeof(*record->values));
         if (!record->values) { free(record); return false; }
-        const bool changed = edge_derived_update(device->derived, NULL, 0, now);
-        device->derived_deadline = edge_derived_deadline(device->derived, now);
+        const bool changed = update_derived(device, NULL, 0, now);
         if (!changed) { free(record->values); free(record); return true; }
         edge_derived_values(device->derived, record->values);
         record->record_id.size = record->device_id.size = record->endpoint_id.size = 16;
@@ -4505,7 +4522,8 @@ static void set_device_telemetry_format(edge_acquisition_device *device, bool ra
     device->raw_telemetry = raw;
     for (size_t i = 0; i < device->point_count; ++i) device->points[i].valid = false;
     if (raw) {
-        device->derived_deadline = INT64_MAX;
+        device->derived_deadline = device->owner->gateway_enabled
+            ? edge_derived_deadline(device->derived, current_ms()) : INT64_MAX;
         if (device->derived_pending) {
             free(device->derived_pending->values);
             free(device->derived_pending);
@@ -4611,6 +4629,8 @@ static bool external_io_command(edge_acquisition *acquisition, const edge_acquis
         value->value.kind = iot_edge_v1_ValueKind_VALUE_BOOL;
         value->value.which_value = iot_edge_v1_ScalarValue_bool_value_tag;
         value->value.value.bool_value = actual;
+        if (!node_command)
+            (void)update_derived(device, value, 1U, result->completed_at_ms);
     }
     if (node_command) {
         acquisition->node_io[platform].result=*result;
@@ -4902,6 +4922,7 @@ static bool prepare_external_io(edge_acquisition_device *device, const edge_exte
     }
     for (size_t i = 0; i < device->external_io_count; ++i)
         publish_gateway_value(device, &values[i], current_ms());
+    (void)update_derived(device, values, device->external_io_count, current_ms());
     const uint64_t interval = device->config->io_interval_ms ? device->config->io_interval_ms : (uint64_t)device->config->report_interval_sec * 1000U;
     device->external_io_next_ms = now + interval;
     if (!any_available && device->external_io_unavailable) return true;

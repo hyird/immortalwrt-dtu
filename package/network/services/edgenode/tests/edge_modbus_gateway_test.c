@@ -599,7 +599,125 @@ static void test_unit_id(void) {
     remove(path);
 }
 
+static void test_derived_lifecycle(void) {
+    const char *path = "gateway-derived-test.map";
+    remove(path);
+    uint8_t platform[16] = {1}, device[16] = {2};
+    iot_edge_v1_ConfigItem items[6] = {0};
+    iot_edge_v1_DerivedPointInput inputs[2] = {0};
+    items[0].which_item = iot_edge_v1_ConfigItem_endpoint_tag;
+    items[0].item.endpoint.endpoint_id.size = 16;
+    items[0].item.endpoint.endpoint_id.bytes[0] = 3;
+    items[0].item.endpoint.enabled = true;
+    items[1].which_item = iot_edge_v1_ConfigItem_device_tag;
+    items[1].item.device.device_id.size = 16;
+    memcpy(items[1].item.device.device_id.bytes, device, 16);
+    items[1].item.device.endpoint_id.size = 16;
+    items[1].item.device.endpoint_id.bytes[0] = 3;
+    items[1].item.device.enabled = true;
+    items[2].which_item = iot_edge_v1_ConfigItem_modbus_register_tag;
+    items[2].item.modbus_register.device_id.size = 16;
+    memcpy(items[2].item.modbus_register.device_id.bytes, device, 16);
+    strcpy(items[2].item.modbus_register.element_id, "physical");
+    strcpy(items[2].item.modbus_register.data_type, "UINT16");
+    items[2].item.modbus_register.scale = 1;
+    items[2].item.modbus_register.writable = true;
+    for (unsigned i = 3; i < 5; ++i) {
+        items[i].which_item = iot_edge_v1_ConfigItem_derived_point_tag;
+        iot_edge_v1_DerivedPointConfig *rule = &items[i].item.derived_point;
+        rule->device_id.size = 16;
+        memcpy(rule->device_id.bytes, device, 16);
+        strcpy(rule->point_id, i == 3 ? "derived-number" : "derived-bool");
+        strcpy(rule->name, i == 3 ? "派生电压" : "派生状态");
+        strcpy(rule->unit, i == 3 ? "V" : "");
+        strcpy(rule->kind, "expression");
+        strcpy(rule->expression, i == 3 ? "x * 2" : "x > 0");
+        rule->boolean_result = i == 4;
+        rule->max_age_seconds = 60;
+        rule->inputs_count = 1;
+        rule->inputs = &inputs[i - 3];
+        strcpy(rule->inputs[0].alias, "x");
+        strcpy(rule->inputs[0].point_id, "physical");
+    }
+    items[5].which_item = iot_edge_v1_ConfigItem_external_io_tag;
+    items[5].item.external_io.device_id.size = 16;
+    memcpy(items[5].item.external_io.device_id.bytes, device, 16);
+    strcpy(items[5].item.external_io.point_id, "analog");
+    items[5].item.external_io.kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI;
+    edge_runtime_config config = {.items = items, .item_count = 6};
+    edge_acquisition_source source = {.platform_id = platform, .config = &config};
+    edge_modbus_gateway *gateway = edge_modbus_gateway_prepare(path, &source, 1);
+    CHECK(gateway);
+    iot_edge_v1_ModbusGatewayRequest request = {.limit = 8};
+    iot_edge_v1_ModbusGatewayResult result = iot_edge_v1_ModbusGatewayResult_init_zero;
+    CHECK(edge_modbus_gateway_points(gateway, platform, &config, true, true, &request, &result, 1));
+    CHECK(result.points_count == 4 && result.points[0].value_address == 0 &&
+          result.points[1].has_mapping && result.points[1].value_address == 1 &&
+          result.points[1].value_words == 4 && result.points[1].value_type == 5 &&
+          !result.points[1].writable && result.points[1].quality == 0 &&
+          !strcmp(result.points[1].name, "派生电压") && !strcmp(result.points[1].unit, "V") &&
+          result.points[2].has_mapping && result.points[2].value_address == 0 &&
+          result.points[2].value_words == 1 && result.points[2].value_type == 2 &&
+          !strcmp(result.points[2].register_type, "DISCRETE_INPUT") &&
+          result.points[3].value_address == 5 && result.points[3].value_words == 4);
+    uint8_t response[260];
+    CHECK(read_native(gateway, 3, 0, 9, response) == 27);
+    for (unsigned i = 9; i < 27; ++i) CHECK(response[i] == 0);
+    edge_acquisition_sample sample = {.valid = true, .observed_at_ms = 1000};
+    memcpy(sample.device_id, device, 16);
+    strcpy(sample.element_id, "derived-number");
+    sample.value.which_value = iot_edge_v1_ScalarValue_double_value_tag;
+    sample.value.value.double_value = 12.5;
+    edge_modbus_gateway_update(gateway, platform, &sample, 1);
+    iot_edge_v1_ModbusGatewayOrder order = iot_edge_v1_ModbusGatewayOrder_init_zero;
+    order.expected_digest.size = 32;
+    order.addresses.size = 4;
+    order.addresses.bytes[1] = 10;
+    CHECK(edge_modbus_gateway_digest(gateway, platform, order.expected_digest.bytes));
+    CHECK(edge_modbus_gateway_reorder(gateway, path, platform, &order));
+    iot_edge_v1_ModbusGatewayPoint point = iot_edge_v1_ModbusGatewayPoint_init_zero;
+    CHECK(edge_modbus_gateway_describe(gateway, platform, device, "derived-number", &point, 1) &&
+          point.value_address == 0 && !strcmp(point.value, "12.5"));
+    edge_modbus_gateway_update(gateway, (const uint8_t[16]){9}, NULL, 2);
+    CHECK(read_native(gateway, 3, 0, 4, response) == 17 && word(response + 9) == 0x4029);
+    edge_modbus_gateway_update(gateway, platform, NULL, 2);
+    CHECK(read_native(gateway, 3, 0, 4, response) == 17);
+    for (unsigned i = 9; i < 17; ++i) CHECK(response[i] == 0);
+    edge_modbus_gateway_free(gateway);
+    strcpy(items[3].item.derived_point.name, "新名称");
+    strcpy(items[3].item.derived_point.unit, "mV");
+    gateway = edge_modbus_gateway_prepare(path, &source, 1); CHECK(gateway);
+    result = (iot_edge_v1_ModbusGatewayResult)iot_edge_v1_ModbusGatewayResult_init_zero;
+    CHECK(edge_modbus_gateway_points(gateway, platform, &config, true, true, &request, &result, 1));
+    CHECK(result.points[1].value_address == 0 && result.points[1].quality == 0 &&
+          !result.points[1].value[0] && !strcmp(result.points[1].name, "新名称") &&
+          !strcmp(result.points[1].unit, "mV"));
+    CHECK(read_native(gateway, 3, 0, 4, response) == 17 && !word(response + 9));
+    edge_modbus_gateway_free(gateway);
+    items[1].item.device.enabled = false;
+    gateway = edge_modbus_gateway_prepare(path, &source, 1); CHECK(gateway);
+    result = (iot_edge_v1_ModbusGatewayResult)iot_edge_v1_ModbusGatewayResult_init_zero;
+    CHECK(edge_modbus_gateway_points(gateway, platform, &config, true, true, &request, &result, 1));
+    CHECK(!result.points[1].has_mapping && !strcmp(result.points[1].state, "disabled") &&
+          !result.points[2].has_mapping);
+    edge_modbus_gateway_free(gateway);
+    items[1].item.device.enabled = true;
+    items[3].which_item = items[4].which_item = 0;
+    gateway = edge_modbus_gateway_prepare(path, &source, 1); CHECK(gateway);
+    CHECK(edge_modbus_gateway_describe(gateway, platform, device, "analog", &point, 1) &&
+          point.value_address == 1);
+    CHECK(read_native(gateway, 2, 0, 8, response) == 10 && !response[9]);
+    edge_modbus_gateway_free(gateway);
+    items[3].which_item = items[4].which_item = iot_edge_v1_ConfigItem_derived_point_tag;
+    gateway = edge_modbus_gateway_prepare(path, &source, 1); CHECK(gateway);
+    CHECK(edge_modbus_gateway_describe(gateway, platform, device, "derived-number", &point, 1) &&
+          point.address == 0 && point.value_address == 0 && point.quality == 0);
+    edge_modbus_gateway_free(gateway);
+    remove(path);
+}
+
 int main(void) {
+    test_derived_lifecycle();
     test_unit_id();
     test_write_plans();
     test_cross_platform_reorder();

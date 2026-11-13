@@ -1,4 +1,5 @@
 #include "edge_modbus_gateway.h"
+#include "edge_derived.h"
 #include "edge_sha256.h"
 
 #include <errno.h>
@@ -51,6 +52,9 @@ static unsigned configured_type(const iot_edge_v1_ConfigItem *item) {
     case iot_edge_v1_ConfigItem_external_io_tag:
         return item->item.external_io.kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI
             ? EDGE_GATEWAY_DOUBLE : EDGE_GATEWAY_BOOL;
+    case iot_edge_v1_ConfigItem_derived_point_tag:
+        return edge_derived_validate(&item->item.derived_point)
+            ? (item->item.derived_point.boolean_result ? EDGE_GATEWAY_BOOL : EDGE_GATEWAY_DOUBLE) : 0;
     default: return 0;
     }
     if (!strcmp(type, "BOOL")) return EDGE_GATEWAY_BOOL;
@@ -71,7 +75,7 @@ static unsigned configured_type(const iot_edge_v1_ConfigItem *item) {
 typedef struct {
     uint8_t platform[16], device[16];
     char element[65];
-    bool active, writable, external_io;
+    bool active, writable, external_io, derived;
     uint32_t timeout_sec;
     uint16_t type, native_quality, native_type, value_address;
     uint64_t bits, native_bits, observed_at_ms, received_at_ms;
@@ -288,6 +292,7 @@ static bool add_point(edge_modbus_gateway *gateway, const uint8_t platform[16],
     gateway->points[slot].active = true;
     gateway->points[slot].native_type = (uint16_t)configured_type(item);
     gateway->points[slot].external_io = item->which_item == iot_edge_v1_ConfigItem_external_io_tag;
+    gateway->points[slot].derived = item->which_item == iot_edge_v1_ConfigItem_derived_point_tag;
     switch (item->which_item) {
     case iot_edge_v1_ConfigItem_modbus_register_tag:
         gateway->points[slot].writable = item->item.modbus_register.writable; break;
@@ -352,6 +357,11 @@ edge_modbus_gateway *edge_modbus_gateway_prepare(const char *path,
             case iot_edge_v1_ConfigItem_external_io_tag:
                 device = item->item.external_io.device_id.bytes;
                 element = item->item.external_io.point_id;
+                break;
+            case iot_edge_v1_ConfigItem_derived_point_tag:
+                if (!configured_type(item)) break;
+                device = item->item.derived_point.device_id.bytes;
+                element = item->item.derived_point.point_id;
                 break;
             default:
                 break;
@@ -568,6 +578,10 @@ void edge_modbus_gateway_update(edge_modbus_gateway *gateway, const uint8_t plat
         for (size_t i = 0; i < gateway->count; ++i)
             if (!memcmp(gateway->points[i].platform, platform, 16)) {
                 gateway->points[i].native_quality = 2;
+                if (gateway->points[i].derived) {
+                    gateway->points[i].native_bits = gateway->points[i].bits = 0;
+                    gateway->points[i].type = 0;
+                }
             }
         return;
     }
@@ -802,7 +816,6 @@ static bool gateway_point_metadata(const edge_runtime_config *config,
         gateway_point_definition(point, value->point_id, value->name, value->unit,
                                  value->boolean_result ? "BOOL" : "FLOAT64");
         gateway_text(point->source_address, sizeof(point->source_address), value->kind);
-        gateway_text(point->state, sizeof(point->state), "unsupported");
         break;
     }
     default:
@@ -847,25 +860,23 @@ bool edge_modbus_gateway_points(const edge_modbus_gateway *map, const uint8_t pl
         const uint32_t index = result->total++;
         if (index < request->offset || result->points_count >= request->limit)
             continue;
-        if (config->items[i].which_item != iot_edge_v1_ConfigItem_derived_point_tag) {
-            const bool unsupported = !strcmp(point.state, "unsupported");
-            const bool disabled = !strcmp(point.state, "disabled");
-            (void)edge_modbus_gateway_describe(map, platform, point.device_id.bytes,
-                                               point.element_id, &point, now_ms);
-            if (unsupported)
-                gateway_text(point.state, sizeof(point.state), "unsupported");
-            else if (disabled)
-                gateway_text(point.state, sizeof(point.state), "disabled");
-            if (unsupported || disabled) {
-                point.has_mapping = false;
-                point.value_address = point.value_words = 0;
-                point.register_type[0] = 0;
-            }
-            else if (!enabled)
-                gateway_text(point.state, sizeof(point.state), "gateway_disabled");
-            else if (!listening)
-                gateway_text(point.state, sizeof(point.state), "listener_error");
+        const bool unsupported = !strcmp(point.state, "unsupported");
+        const bool disabled = !strcmp(point.state, "disabled");
+        (void)edge_modbus_gateway_describe(map, platform, point.device_id.bytes,
+                                           point.element_id, &point, now_ms);
+        if (unsupported)
+            gateway_text(point.state, sizeof(point.state), "unsupported");
+        else if (disabled)
+            gateway_text(point.state, sizeof(point.state), "disabled");
+        if (unsupported || disabled) {
+            point.has_mapping = false;
+            point.value_address = point.value_words = 0;
+            point.register_type[0] = 0;
         }
+        else if (!enabled)
+            gateway_text(point.state, sizeof(point.state), "gateway_disabled");
+        else if (!listening)
+            gateway_text(point.state, sizeof(point.state), "listener_error");
         result->points[result->points_count++] = point;
     }
     return true;

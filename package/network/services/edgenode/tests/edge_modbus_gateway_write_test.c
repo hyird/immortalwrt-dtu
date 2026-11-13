@@ -18,12 +18,13 @@ typedef struct {
     int plc_listener, plc_fd;
     uint16_t plc_port, gateway_port;
     uint16_t registers[64];
-    bool coil, hold_writes, fail_write, mismatch_write;
+    bool coil, hold_writes, fail_write, mismatch_write, derived, raw;
     uint8_t input[260], held[260];
     size_t used, held_size;
-    unsigned reads, writes, samples, reports, results;
+    unsigned reads, writes, samples, reports, results, derived_samples, derived_failures;
     char directory[64], map_path[96];
-    iot_edge_v1_ConfigItem items[7];
+    iot_edge_v1_ConfigItem items[9];
+    iot_edge_v1_DerivedPointInput derived_inputs[2];
     edge_runtime_config config;
     uint8_t platform[16];
 } fixture;
@@ -174,8 +175,12 @@ static bool store_record(void *context, const uint8_t platform[16],
                           const iot_edge_v1_TelemetryRecord *record) {
     (void)context;
     assert(!memcmp(platform, current_fixture->platform, 16U));
-    assert(record->values_count ==
-        (record->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO ? 1U : 4U));
+    assert(record->values_count == (current_fixture->raw ? 0U :
+        record->derived_update ? 2U :
+        record->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO ? 1U :
+        current_fixture->derived ? 6U : 4U));
+    if (current_fixture->raw)
+        assert(!record->derived_update && record->raw_payloads_count > 0);
     ++current_fixture->reports;
     return true;
 }
@@ -183,8 +188,13 @@ static bool store_record(void *context, const uint8_t platform[16],
 static void store_sample(void *context, const uint8_t platform[16],
                            const edge_acquisition_sample *sample) {
     if (sample != NULL) {
-        assert(sample->valid);
-        ++current_fixture->samples;
+        if (!strncmp(sample->element_id, "derived-", 8U)) {
+            if (sample->valid) ++current_fixture->derived_samples;
+            else ++current_fixture->derived_failures;
+        } else {
+            assert(sample->valid);
+            ++current_fixture->samples;
+        }
     }
     acquisition_sample(context, platform, sample);
 }
@@ -210,8 +220,10 @@ static unsigned pending_count(const fixture *test) {
     return count;
 }
 
-static void setup(fixture *test, bool short_period, bool external_io) {
+static void setup(fixture *test, bool short_period, bool external_io, bool derived, bool raw) {
     memset(test, 0, sizeof(*test));
+    test->derived = derived;
+    test->raw = raw;
     test->plc_fd = -1;
     test->platform[0] = 3U;
     test->loop = ev_loop_new(0);
@@ -277,8 +289,30 @@ static void setup(fixture *test, bool short_period, bool external_io) {
     }
     test->config = (edge_runtime_config){.items = test->items, .item_count = external_io ? 7U : 6U,
         .endpoint_count = 1U, .device_count = 1U, .revision = 1U};
+    if (derived) {
+        for (unsigned i = 0; i < 2; ++i) {
+            iot_edge_v1_ConfigItem *item = &test->items[test->config.item_count++];
+            item->kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT;
+            item->which_item = iot_edge_v1_ConfigItem_derived_point_tag;
+            iot_edge_v1_DerivedPointConfig *rule = &item->item.derived_point;
+            id(&rule->device_id, 2U);
+            strcpy(rule->point_id, i ? "derived-flag" : "derived-number");
+            strcpy(rule->name, i ? "派生状态" : "派生数值");
+            strcpy(rule->unit, i ? "" : "V");
+            strcpy(rule->kind, "expression");
+            strcpy(rule->expression, external_io ? (i ? "x != 0" : "x * 2")
+                                                 : (i ? "x > 9" : "x / (x - 10)"));
+            rule->boolean_result = i != 0;
+            rule->max_age_seconds = 1U;
+            rule->inputs_count = 1U;
+            rule->inputs = &test->derived_inputs[i];
+            strcpy(rule->inputs[0].alias, "x");
+            strcpy(rule->inputs[0].point_id, external_io
+                ? "00000000-0000-4000-8000-000000000004" : "word");
+        }
+    }
     edge_acquisition_source source = {.platform_id = test->platform, .config = &test->config,
-        .external_io = external_io};
+        .external_io = external_io, .raw_telemetry = raw};
     test->app->gateway = edge_modbus_gateway_prepare(test->map_path, &source, 1U);
     assert(test->app->gateway != NULL);
     test->app->gateway_server = edge_modbus_gateway_listen(test->loop, test->app->gateway,
@@ -404,7 +438,7 @@ static void release_write(fixture *test) {
 
 static void verify_reads_follow_acquisition(void) {
     fixture test;
-    setup(&test, true, false);
+    setup(&test, true, false, false, false);
     const int north = connect_north(&test);
     const uint16_t original[] = {7U, 0x1122U, 0x3344U, 9U};
     const uint64_t until = monotonic_ms() + 1300U;
@@ -430,7 +464,7 @@ static void verify_reads_follow_acquisition(void) {
 
 static void verify_write_chain(void) {
     fixture test;
-    setup(&test, false, false);
+    setup(&test, false, false, false, false);
     int first = connect_north(&test);
     int second = connect_north(&test);
     int reader = connect_north(&test);
@@ -592,7 +626,7 @@ static void verify_write_chain(void) {
 
 static void verify_external_output_readback(void) {
     fixture test;
-    setup(&test, false, true);
+    setup(&test, false, true, false, false);
     const int north = connect_north(&test);
     /* The protocol Bool is bit 0; the external output is the next dense bit. */
     request(north, 1U, 5U, 1U, 0xff00U, NULL, 0U);
@@ -607,7 +641,72 @@ static void verify_external_output_readback(void) {
     teardown(&test);
 }
 
+static void verify_derived_gateway(bool raw) {
+    fixture test;
+    setup(&test, false, false, true, raw);
+    const int north = connect_north(&test);
+    const uint16_t initial[] = {0xc022, 0, 0, 0}; /* -9.0 */
+    expect_read(&test, north, 100U, 4U, 4U, initial);
+    uint8_t bytes[260];
+    request(north, 101U, 2U, 1U, 1U, NULL, 0U);
+    assert(response(&test, north, 101U, bytes) == 10U && !bytes[9]);
+    request(north, 102U, 6U, 3U, 11U, NULL, 0U);
+    expect_echo(&test, north, 102U, 6U, 3U, 11U);
+    const uint16_t updated[] = {0x4026, 0, 0, 0}; /* 11.0 */
+    expect_read(&test, north, 103U, 4U, 4U, updated);
+    request(north, 104U, 2U, 1U, 1U, NULL, 0U);
+    assert(response(&test, north, 104U, bytes) == 10U && bytes[9] == 1U);
+    const unsigned writes = test.writes, results = test.results;
+    request(north, 105U, 6U, 4U, 0xffffU, NULL, 0U);
+    expect_echo(&test, north, 105U, 6U, 4U, 0xffffU);
+    request(north, 106U, 5U, 1U, 0U, NULL, 0U);
+    expect_echo(&test, north, 106U, 5U, 1U, 0U);
+    assert(test.writes == writes && test.results == results);
+    expect_read(&test, north, 107U, 4U, 4U, updated);
+    request(north, 108U, 6U, 3U, 10U, NULL, 0U);
+    expect_echo(&test, north, 108U, 6U, 3U, 10U);
+    const uint16_t invalid[] = {0, 0, 0, 0};
+    expect_read(&test, north, 109U, 4U, 4U, invalid);
+    iot_edge_v1_ModbusGatewayPoint point = iot_edge_v1_ModbusGatewayPoint_init_zero;
+    assert(edge_modbus_gateway_describe(test.app->gateway, test.platform,
+        test.items[1].item.device.device_id.bytes, "derived-number", &point, monotonic_ms()));
+    assert(point.quality == 2U && !point.value[0] && test.derived_samples &&
+        test.derived_failures && test.writes > writes);
+    request(north, 110U, 6U, 3U, 11U, NULL, 0U);
+    expect_echo(&test, north, 110U, 6U, 3U, 11U);
+    expect_read(&test, north, 111U, 4U, 4U, updated);
+    const unsigned reports = test.reports;
+    spin(&test, 1300U);
+    expect_read(&test, north, 112U, 4U, 4U, invalid);
+    request(north, 113U, 2U, 1U, 1U, NULL, 0U);
+    assert(response(&test, north, 113U, bytes) == 10U && !bytes[9]);
+    assert(!raw || test.reports == reports); /* Local expiry never changes raw frames. */
+    close(north);
+    teardown(&test);
+}
+
+static void verify_derived_external_io(void) {
+    fixture test;
+    setup(&test, false, true, true, false);
+    const int north = connect_north(&test);
+    const uint16_t initial[] = {0, 0, 0, 0};
+    expect_read(&test, north, 120U, 4U, 4U, initial);
+    request(north, 121U, 5U, 1U, 0xff00U, NULL, 0U);
+    expect_echo(&test, north, 121U, 5U, 1U, 0xff00U);
+    const uint16_t readback[] = {0x4000, 0, 0, 0}; /* 2.0 from actual DO readback. */
+    expect_read(&test, north, 122U, 4U, 4U, readback);
+    uint8_t bytes[260];
+    request(north, 123U, 2U, 2U, 1U, NULL, 0U);
+    assert(response(&test, north, 123U, bytes) == 10U && bytes[9] == 1U);
+    assert(test.writes == 0U && test.results == 1U && test.derived_samples);
+    close(north);
+    teardown(&test);
+}
+
 int main(void) {
+    verify_derived_gateway(false);
+    verify_derived_gateway(true);
+    verify_derived_external_io();
     verify_reads_follow_acquisition();
     verify_write_chain();
     verify_external_output_readback();

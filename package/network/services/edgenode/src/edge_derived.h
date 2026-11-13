@@ -12,6 +12,7 @@ void edge_derived_free(edge_derived *state);
 bool edge_derived_update(edge_derived *state, const iot_edge_v1_TelemetryValue *values, size_t count, int64_t at);
 size_t edge_derived_count(const edge_derived *state);
 void edge_derived_values(const edge_derived *state, iot_edge_v1_TelemetryValue *output);
+const iot_edge_v1_TelemetryValue *edge_derived_value(const edge_derived *state, size_t index);
 int64_t edge_derived_deadline(const edge_derived *state, int64_t now);
 
 /* Same bounded expression grammar as the platform; no script execution. */
