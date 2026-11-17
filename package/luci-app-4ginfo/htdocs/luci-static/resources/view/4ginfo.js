@@ -79,7 +79,7 @@ function row(label, value) {
 function section(title, rows) {
 	return E('div', { 'class': 'cbi-section' }, [
 		E('h3', { 'class': 'cbi-section-title' }, title),
-		E('table', { 'class': 'table cbi-section-table' }, [
+		E('table', { 'class': 'table cbi-section-table cbi-4g-status', 'aria-label': title }, [
 			E('tbody', {}, rows)
 		])
 	]);
@@ -155,6 +155,7 @@ function tabStyles() {
 		'.cbi-4g-tab-active a { margin-bottom: -1px; border-color: #888; background: #fff; color: #0069c0; font-weight: 600; }',
 		'.cbi-4g-tabpanel { padding-top: .25rem; }',
 		'.cbi-4g-tabs .cbi-4g-tabs { margin-top: 1rem; }',
+		'.cbi-4g-status td { overflow-wrap: anywhere; }',
 		'@media screen and (max-width: 600px) { .cbi-4g-tablist { flex-wrap: nowrap; } }'
 	]);
 }
@@ -174,15 +175,86 @@ function removePageActions(node) {
 }
 
 function moduleSimRows(status) {
+	var simStates = [ '未知', '未知', '就绪', '未插卡', '需要 PIN', '需要 PUK', '已锁定' ];
+
 	return [
 		row('模块可用', boolText(status.available, '已发现', '未发现')),
 		row('模块厂商', text(status.manufacturer)),
 		row('模块型号', text(status.model)),
 		row('固件版本', text(status.firmware)),
 		row('模块 IMEI', text(status.imei)),
-		row('SIM 状态', text(status.sim_state_name)),
+		row('SIM 状态', text(status.sim_state_name || simStates[status.sim_state])),
 		row('SIM ICCID', text(status.iccid)),
-		row('注册状态', registrationText(status))
+		row('SIM IMSI', text(status.imsi))
+	].concat(optionalRows(status, [
+		[ 'sim_presence', 'SIM 插卡检测' ], [ 'msisdn', 'SIM 号码（MSISDN）' ],
+		[ 'radio_function', '射频功能模式（CFUN）' ],
+		[ 'battery_percent', '模块电量', '%' ], [ 'battery_voltage_mv', '模块电压', ' mV' ],
+		[ 'battery_status', '模块电池状态' ]
+	]));
+}
+
+function optionalRows(status, fields) {
+	return fields.filter(function(field) {
+		return status[field[0]] != null && status[field[0]] !== '';
+	}).map(function(field) {
+		return row(field[1], field[2] ? withUnit(status[field[0]], field[2]) : text(status[field[0]]));
+	});
+}
+
+function networkRows(status) {
+	var tech = status.access_technology || status.registration_act;
+	var technologies = [ 'GSM', 'GSM Compact', 'UMTS', 'EDGE', 'HSDPA', 'HSUPA', 'HSPA', 'LTE', 'EC-GSM-IoT', 'NB-IoT' ];
+	var selectionModes = [ '自动', '手动', '注销', '仅设置显示格式', '手动优先，失败后自动' ];
+	var registrationFields = [ [ 'cereg_status', 'LTE 注册（CEREG）' ],
+		[ 'creg_status', '电路域注册（CREG）' ], [ 'cgreg_status', '分组域注册（CGREG）' ] ];
+	var registrationRows = registrationFields.filter(function(field) {
+		return status[field[0]] != null && status[field[0]] !== '';
+	}).map(function(field) {
+		var code = status[field[0]];
+		return row(field[1], /^\d+$/.test(code) ? registrationText({ registration_status: code }) : text(code));
+	});
+
+	return [
+		row('注册状态', registrationText(status)),
+		row('注册状态码', text(status.registration_status)),
+		row('运营商', text(status.mobile_operator || status.operator_name)),
+		row('运营商代码（MCC/MNC）', text(status.operator_mccmnc || status.plmn)),
+		row('选网方式', text(selectionModes[status.operator_selection_mode] || status.operator_selection_mode)),
+		row('接入技术', text(technologies[tech] ? technologies[tech] + '（' + tech + '）' : tech)),
+		row('注册通知模式', text(status.registration_mode))
+	].concat(registrationRows, optionalRows(status, [
+		[ 'registration_act', '注册接入技术码' ], [ 'network_type', '网络类型' ], [ 'network_mode', '网络模式' ],
+		[ 'mcc', '移动国家码（MCC）' ], [ 'mnc', '移动网络码（MNC）' ],
+		[ 'location_area_code', '位置区码（LAC/TAC）' ], [ 'tracking_area_code', '跟踪区码（TAC）' ],
+		[ 'cell_id', '小区 ID' ], [ 'pci', '物理小区 ID（PCI）' ], [ 'serving_state', '服务小区状态' ],
+		[ 'serving_rat', '服务小区制式' ], [ 'serving_duplex', '双工模式' ],
+		[ 'band', '频段' ], [ 'serving_band', '服务小区频段' ], [ 'channel', '信道' ], [ 'earfcn', 'LTE 频点（EARFCN）' ],
+		[ 'uplink_bandwidth', '上行带宽码' ], [ 'downlink_bandwidth', '下行带宽码' ]
+	]));
+}
+
+function dataRows(status) {
+	// CGCONTRDP reports CID, bearer, APN, local address, gateway and DNS in order.
+	var dynamic = /^\+CGCONTRDP:\s*(.+)$/.exec(status.cgcontrdp || '');
+	var fields = dynamic ? dynamic[1].split(',').map(function(field) {
+		return field.trim().replace(/^"|"$/g, '');
+	}) : [];
+	var active = /^(\d+)\s*,\s*([01])$/.exec(status.pdp_active || '');
+
+	return [
+		row('分组网络附着', boolText(status.packet_attached, '已附着', '未附着')),
+		row('接口 IPv4 状态', boolText(status.connected, '已获取', '未获取')),
+		row('接口 IPv4 地址', text(status.mobile_ipv4)),
+		row('APN', text(fields[2] || status.apn)),
+		row('PDP 类型', text(status.pdp_type)),
+		row('PDP 激活状态', active ? boolText(active[2], '已激活', '未激活') + '（CID ' + active[1] + '）' : text(status.pdp_active)),
+		row('PDP 上下文 ID', text(fields[0])),
+		row('承载 ID', text(fields[1])),
+		row('PDP 地址', text(fields[3] || status.pdp_address)),
+		row('PDP 网关', text(fields[4])),
+		row('主 DNS', text(fields[5])),
+		row('备用 DNS', text(fields[6]))
 	];
 }
 
@@ -190,8 +262,37 @@ function signalRows(status) {
 	return [
 		row('信号质量（CSQ）', status.csq === '99' ? '未知' : withUnit(status.csq, ' / 31')),
 		row('接收信号（RSSI）', withUnit(status.rssi_dbm, ' dBm')),
-		row('信号百分比', withUnit(status.signal_percent, '%'))
-	];
+		row('信号百分比', withUnit(status.signal_percent, '%')),
+		row('误码率等级（BER）', status.ber === '99' ? '未知' : text(status.ber))
+	].concat(optionalRows(status, [
+		[ 'rsrp_dbm', '参考信号接收功率（RSRP）', ' dBm' ], [ 'rsrq_db', '参考信号接收质量（RSRQ）', ' dB' ],
+		[ 'sinr_db', '信号与干扰加噪声比（SINR）', ' dB' ], [ 'qcsq_rssi', '模块接收信号（QCSQ RSSI）', ' dBm' ],
+		[ 'cesq_rsrp', 'RSRP 等级（CESQ）' ], [ 'cesq_rsrq', 'RSRQ 等级（CESQ）' ], [ 'cesq_sinr', '信号等级（CESQ 扩展）' ]
+	]));
+}
+
+function diagnosticsRows(status) {
+	var time = new Date(Number(status.updated_at) * 1000);
+	var updated = time.getTime() > 0 ? E('time', { 'datetime': time.toISOString() },
+		time.toLocaleString('zh-CN', { hour12: false, timeZoneName: 'short' })) : '-';
+
+	return [
+		row('模块探测', boolText(status.probe_ok, '成功', '失败')),
+		row('AT 端口', text(status.at_port)),
+		row('模块适配类型', text(status.at_profile)),
+		row('采集时间', updated)
+	].concat(optionalRows(status, [
+		[ 'cgcontrdp', 'PDP 动态参数（CGCONTRDP）' ], [ 'pdp_config', 'PDP 配置（CGDCONT）' ],
+		[ 'cesq', '扩展信号读数（CESQ）' ], [ 'network_info_raw', '模块网络信息（QNWINFO）' ],
+		[ 'registration', '注册探测' ], [ 'signal', '信号探测' ], [ 'operator', '运营商探测' ],
+		[ 'cgatt', '附着探测' ], [ 'cgact', 'PDP 激活探测' ], [ 'cgpaddr', 'PDP 地址探测' ],
+		[ 'qiact', '模块数据会话（QIACT）' ], [ 'cgnapn', '网络下发 APN（CGNAPN）' ],
+		[ 'preferred_mode', '首选网络模式' ], [ 'preferred_band', '首选频段' ], [ 'qca_info', '载波聚合信息' ],
+		[ 'serving_cell', '服务小区参数' ], [ 'neighbour_cell', '邻区参数' ],
+		[ 'gps_status', 'GPS 状态' ], [ 'gps_location', 'GPS 定位' ],
+		[ 'cpms', '短信存储（CPMS）' ], [ 'cscs', '字符集（CSCS）' ],
+		[ 'cmgf', '短信格式（CMGF）' ], [ 'cnmi', '短信通知配置（CNMI）' ]
+	]));
 }
 
 function commandMessage(result, fallback) {
@@ -343,8 +444,11 @@ return view.extend({
 			content.push(E('div', { 'class': 'alert-message warning' },
 				'暂时无法读取 4G 状态，请检查 4ginfo 服务、AT 端口和权限。'));
 
-		content.push(section('模块、SIM 与网络', moduleSimRows(data.status)));
+		content.push(section('移动网络', networkRows(data.status)));
+		content.push(section('数据连接', dataRows(data.status)));
 		content.push(section('信号', signalRows(data.status)));
+		content.push(section('模块与 SIM', moduleSimRows(data.status)));
+		content.push(section('采集诊断', diagnosticsRows(data.status)));
 
 		return content;
 	},
@@ -375,7 +479,7 @@ return view.extend({
 				tabStyles(),
 				E('h2', { 'class': 'cbi-map-title' }, '4G信息'),
 				E('div', { 'class': 'cbi-map-descr' },
-					'显示必要的 4G 模块状态，并提供按模块型号适配的 APN 设置。'),
+					'查看移动网络、数据连接、信号和 SIM 状态，或在 APN 设置中调整连接参数。'),
 				topTabs
 			]);
 		});
