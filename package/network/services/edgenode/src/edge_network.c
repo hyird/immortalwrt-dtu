@@ -31,7 +31,7 @@ typedef struct {
     uint8_t request_id[16];
 } edge_network_marker;
 
-static void restore_network(void);
+static bool restore_network(void);
 
 static void set_error(char *output, size_t capacity, const char *message) {
     edge_set_error(output, capacity, message != NULL ? message : "network error");
@@ -522,8 +522,10 @@ static bool backup_network(void) {
     const int fd = open(NETWORK_BACKUP, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     FILE *output = fd >= 0 ? fdopen(fd, "w") : NULL;
     if (output == NULL) {
-        if (fd >= 0)
+        if (fd >= 0) {
             close(fd);
+            unlink(NETWORK_BACKUP);
+        }
         uci_unload(context, package);
         uci_free_context(context);
         return false;
@@ -533,6 +535,8 @@ static bool backup_network(void) {
     const bool closed = fclose(output) == 0;
     uci_unload(context, package);
     uci_free_context(context);
+    if (!exported || !closed)
+        unlink(NETWORK_BACKUP);
     return exported && closed;
 }
 
@@ -658,6 +662,10 @@ bool edge_network_prepare(const iot_edge_v1_NetworkConfigRequest *request,
         set_error(error, error_size, "another network change is waiting for confirmation");
         return false;
     }
+    if (access(NETWORK_BACKUP, F_OK) == 0) {
+        set_error(error, error_size, "previous network backup requires recovery");
+        return false;
+    }
     if (!validate_request(request, protected_device_name, error, error_size))
         return false;
     if (!backup_network()) {
@@ -677,33 +685,53 @@ bool edge_network_prepare(const iot_edge_v1_NetworkConfigRequest *request,
     if (context != NULL)
         uci_free_context(context);
     if (!applied) {
-        restore_network();
-        unlink(NETWORK_BACKUP);
-        set_error(error, error_size, "UCI rejected the network configuration");
+        if (restore_network()) {
+            unlink(NETWORK_BACKUP);
+            set_error(error, error_size, "UCI rejected the network configuration");
+        } else {
+            set_error(error, error_size,
+                      "UCI rejected the network configuration; rollback failed, backup retained");
+        }
         return false;
     }
     return true;
 }
 
-static void restore_network(void) {
+static bool restore_network(void) {
     FILE *input = fopen(NETWORK_BACKUP, "r");
-    if (input != NULL) {
-        struct uci_context *context = uci_alloc_context();
-        struct uci_package *package = NULL;
-        if (context != NULL) {
-            if (uci_import(context, input, "network", &package, true) == UCI_OK &&
-                package != NULL) {
-                (void)uci_save(context, package);
-                (void)uci_commit(context, &package, false);
-            }
-            if (package != NULL)
-                uci_unload(context, package);
-            uci_free_context(context);
-        }
-        fclose(input);
+    if (input == NULL)
+        return false;
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    bool restored = context != NULL &&
+                    uci_import(context, input, "network", &package, true) == UCI_OK &&
+                    package != NULL && !ferror(input);
+    const bool closed = fclose(input) == 0;
+    /* Imported packages have no path or delta backing. Overwrite commit assigns
+     * the configured path and writes the complete backup, rather than merging
+     * the rejected transaction's changes back into it. */
+    if (restored && closed)
+        restored = uci_commit(context, &package, true) == UCI_OK;
+    else
+        restored = false;
+    if (package != NULL) {
+        uci_unload(context, package);
+        package = NULL;
     }
+    if (restored) {
+        /* A failed prepare commit can leave saved deltas. Drop those too, or
+         * the next UCI load would reapply the rejected configuration. */
+        struct uci_ptr ptr = {.package = "network"};
+        restored = uci_revert(context, &ptr) == UCI_OK;
+        if (ptr.p != NULL)
+            uci_unload(context, ptr.p);
+    }
+    if (context != NULL)
+        uci_free_context(context);
+    if (!restored)
+        return false;
     const char *reload[] = {"/etc/init.d/network", "reload", NULL};
-    (void)edge_process_run(reload, -1, -1);
+    return edge_process_run(reload, -1, -1) == 0;
 }
 
 static bool write_marker(const char *path, const edge_network_marker *marker) {
@@ -737,15 +765,18 @@ bool edge_network_activate(uint32_t rollback_timeout_sec,
     memcpy(marker.request_id, request_id, sizeof(marker.request_id));
     unlink(NETWORK_CONFIRMED);
     if (!write_marker(NETWORK_PENDING, &marker)) {
-        restore_network();
-        unlink(NETWORK_BACKUP);
+        if (restore_network()) {
+            unlink(NETWORK_PENDING);
+            unlink(NETWORK_BACKUP);
+        }
         return false;
     }
     const int worker = edge_process_detach();
     if (worker < 0) {
-        restore_network();
-        unlink(NETWORK_PENDING);
-        unlink(NETWORK_BACKUP);
+        if (restore_network()) {
+            unlink(NETWORK_PENDING);
+            unlink(NETWORK_BACKUP);
+        }
         return false;
     }
     if (worker == 0) {
@@ -762,10 +793,12 @@ bool edge_network_activate(uint32_t rollback_timeout_sec,
             }
         }
         if (!confirmed) {
-            restore_network();
+            if (!restore_network())
+                _exit(1);
             unlink(NETWORK_PENDING);
+            if (!write_marker(NETWORK_ROLLED_BACK, &marker))
+                _exit(1);
             unlink(NETWORK_BACKUP);
-            (void)write_marker(NETWORK_ROLLED_BACK, &marker);
         } else {
             unlink(NETWORK_PENDING);
             unlink(NETWORK_BACKUP);

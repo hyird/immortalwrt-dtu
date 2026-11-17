@@ -25,7 +25,8 @@ _Static_assert(sizeof(float) == sizeof(uint32_t), "gateway requires 32-bit float
 enum {
     EDGE_GATEWAY_BOOL = 2, EDGE_GATEWAY_INT64 = 3, EDGE_GATEWAY_UINT64 = 4,
     EDGE_GATEWAY_DOUBLE = 5, EDGE_GATEWAY_INT16 = 6, EDGE_GATEWAY_UINT16 = 7,
-    EDGE_GATEWAY_INT32 = 8, EDGE_GATEWAY_UINT32 = 9, EDGE_GATEWAY_FLOAT32 = 10
+    EDGE_GATEWAY_INT32 = 8, EDGE_GATEWAY_UINT32 = 9, EDGE_GATEWAY_FLOAT32 = 10,
+    EDGE_GATEWAY_BCD = 11, EDGE_GATEWAY_BCD_SIGNED = 12
 };
 
 static unsigned native_words(unsigned type) {
@@ -35,6 +36,22 @@ static unsigned native_words(unsigned type) {
     case EDGE_GATEWAY_INT64: case EDGE_GATEWAY_UINT64: case EDGE_GATEWAY_DOUBLE: return 4;
     default: return 0;
     }
+}
+
+static unsigned scalar_type(const char *type, double scale) {
+    if (!strcmp(type, "BOOL")) return EDGE_GATEWAY_BOOL;
+    if (!strcmp(type, "INT8")) return EDGE_GATEWAY_INT16;
+    if (!strcmp(type, "UINT8") || !strcmp(type, "BYTE")) return EDGE_GATEWAY_UINT16;
+    if (!strcmp(type, "INT16")) return scale == 1 ? EDGE_GATEWAY_INT16 : EDGE_GATEWAY_DOUBLE;
+    if (!strcmp(type, "UINT16") || !strcmp(type, "WORD")) return scale == 1 ? EDGE_GATEWAY_UINT16 : EDGE_GATEWAY_DOUBLE;
+    if (!strcmp(type, "INT32")) return scale == 1 ? EDGE_GATEWAY_INT32 : EDGE_GATEWAY_DOUBLE;
+    if (!strcmp(type, "UINT32") || !strcmp(type, "DWORD")) return scale == 1 ? EDGE_GATEWAY_UINT32 : EDGE_GATEWAY_DOUBLE;
+    if (!strcmp(type, "INT64")) return EDGE_GATEWAY_INT64;
+    if (!strcmp(type, "UINT64")) return EDGE_GATEWAY_UINT64;
+    if (!strcmp(type, "FLOAT32") || !strcmp(type, "FLOAT") || !strcmp(type, "REAL")) return EDGE_GATEWAY_FLOAT32;
+    if (!strcmp(type, "DOUBLE") || !strcmp(type, "FLOAT64") || !strcmp(type, "LREAL") ||
+        !strcmp(type, "BCD") || !strcmp(type, "BCD_SIGNED")) return EDGE_GATEWAY_DOUBLE;
+    return 0;
 }
 
 static unsigned configured_type(const iot_edge_v1_ConfigItem *item) {
@@ -59,19 +76,7 @@ static unsigned configured_type(const iot_edge_v1_ConfigItem *item) {
         break;
     default: return 0;
     }
-    if (!strcmp(type, "BOOL")) return EDGE_GATEWAY_BOOL;
-    if (!strcmp(type, "INT8")) return EDGE_GATEWAY_INT16;
-    if (!strcmp(type, "UINT8") || !strcmp(type, "BYTE")) return EDGE_GATEWAY_UINT16;
-    if (!strcmp(type, "INT16")) return scale == 1 ? EDGE_GATEWAY_INT16 : EDGE_GATEWAY_DOUBLE;
-    if (!strcmp(type, "UINT16") || !strcmp(type, "WORD")) return scale == 1 ? EDGE_GATEWAY_UINT16 : EDGE_GATEWAY_DOUBLE;
-    if (!strcmp(type, "INT32")) return scale == 1 ? EDGE_GATEWAY_INT32 : EDGE_GATEWAY_DOUBLE;
-    if (!strcmp(type, "UINT32") || !strcmp(type, "DWORD")) return scale == 1 ? EDGE_GATEWAY_UINT32 : EDGE_GATEWAY_DOUBLE;
-    if (!strcmp(type, "INT64")) return EDGE_GATEWAY_INT64;
-    if (!strcmp(type, "UINT64")) return EDGE_GATEWAY_UINT64;
-    if (!strcmp(type, "FLOAT32") || !strcmp(type, "FLOAT") || !strcmp(type, "REAL")) return EDGE_GATEWAY_FLOAT32;
-    if (!strcmp(type, "DOUBLE") || !strcmp(type, "FLOAT64") || !strcmp(type, "LREAL") ||
-        !strcmp(type, "BCD") || !strcmp(type, "BCD_SIGNED")) return EDGE_GATEWAY_DOUBLE;
-    return 0;
+    return scalar_type(type, scale);
 }
 
 #define EDGE_GATEWAY_HASH_BUCKETS 256U
@@ -85,6 +90,10 @@ typedef struct {
     uint16_t type, native_quality, native_type, value_address;
     uint16_t hash_next;
     uint64_t bits, native_bits, observed_at_ms, received_at_ms;
+    /* Owned conversion metadata; never retain pointers into a config snapshot. */
+    double write_scale;
+    int32_t write_decimals;
+    uint16_t write_type, write_width, write_digits;
 } edge_gateway_point;
 
 struct edge_modbus_gateway {
@@ -325,6 +334,52 @@ static bool save_map(const edge_modbus_gateway *gateway, const char *path) {
     return ok;
 }
 
+static void configure_write(edge_gateway_point *point, const iot_edge_v1_ConfigItem *item) {
+    const char *type = "";
+    double scale = 1;
+    int32_t decimals = -1;
+    point->write_digits = 0;
+    point->write_width = 0;
+    switch (item->which_item) {
+    case iot_edge_v1_ConfigItem_modbus_register_tag:
+        type = item->item.modbus_register.data_type;
+        scale = item->item.modbus_register.scale;
+        decimals = item->item.modbus_register.decimals;
+        break;
+    case iot_edge_v1_ConfigItem_s7_area_tag:
+        type = item->item.s7_area.data_type;
+        scale = item->item.s7_area.scale;
+        decimals = item->item.s7_area.decimals;
+        break;
+    case iot_edge_v1_ConfigItem_industrial_point_tag:
+        type = item->item.industrial_point.data_type;
+        scale = item->item.industrial_point.scale;
+        decimals = item->item.industrial_point.decimals;
+        point->write_width = item->item.industrial_point.length;
+        point->write_digits = item->item.industrial_point.digits;
+        break;
+    default:
+        break;
+    }
+    point->write_type = (uint16_t)scalar_type(type, 1);
+    if (!strcmp(type, "BCD") || !strcmp(type, "BCD_SIGNED")) {
+        point->write_type = !strcmp(type, "BCD") ? EDGE_GATEWAY_BCD : EDGE_GATEWAY_BCD_SIGNED;
+        scale = 1;
+        decimals = -1; /* Meter BCD uses digits, not scalar scale/decimals. */
+    } else {
+        point->write_width = (!strcmp(type, "INT8") || !strcmp(type, "UINT8") || !strcmp(type, "BYTE"))
+            ? 1 : (uint16_t)(native_words(point->write_type) * 2);
+        /* Match acquisition decoding: Bool, 8-bit and 64-bit integers are raw. */
+        if (point->write_type == EDGE_GATEWAY_BOOL || point->write_width == 1 ||
+            point->write_type == EDGE_GATEWAY_INT64 || point->write_type == EDGE_GATEWAY_UINT64) {
+            scale = 1;
+            decimals = -1;
+        }
+    }
+    point->write_scale = scale;
+    point->write_decimals = decimals;
+}
+
 static bool add_point(edge_modbus_gateway *gateway, const uint8_t platform[16],
                       const edge_runtime_config *config, const uint8_t device[16],
                       const char *element, const iot_edge_v1_ConfigItem *item) {
@@ -366,6 +421,7 @@ static bool add_point(edge_modbus_gateway *gateway, const uint8_t platform[16],
     default:
         gateway->points[slot].writable = false; break;
     }
+    configure_write(&gateway->points[slot], item);
     gateway->points[slot].value_address = 0;
     gateway->points[slot].timeout_sec = owner->online_timeout_sec ? owner->online_timeout_sec : 900;
     return true;
@@ -1021,6 +1077,94 @@ static int write_bounds(const uint8_t *request, size_t size, uint32_t *start,
     return *start + *quantity <= 65536U ? 0 : -2;
 }
 
+/* Inverse scaling belongs only to the gateway's engineering-value API.
+ * CommandRequest and its shared raw-value encoder retain their old semantics. */
+static bool format_write_value(const edge_gateway_point *point, uint64_t bits,
+                                char *output, size_t size) {
+    const unsigned type = point->write_type;
+    if (type == EDGE_GATEWAY_INT64 || type == EDGE_GATEWAY_UINT64)
+        return format_native_value(point->native_type, bits, output, size);
+    double engineering;
+    switch (point->native_type) {
+    case EDGE_GATEWAY_DOUBLE:
+        memcpy(&engineering, &bits, sizeof(engineering)); break;
+    case EDGE_GATEWAY_FLOAT32: {
+        const uint32_t words = (uint32_t)bits;
+        float value; memcpy(&value, &words, sizeof(value));
+        engineering = value; break;
+    }
+    case EDGE_GATEWAY_INT16: {
+        const uint16_t word = (uint16_t)bits;
+        int16_t value; memcpy(&value, &word, sizeof(value));
+        engineering = value; break;
+    }
+    case EDGE_GATEWAY_INT32: {
+        const uint32_t words = (uint32_t)bits;
+        int32_t value; memcpy(&value, &words, sizeof(value));
+        engineering = value; break;
+    }
+    case EDGE_GATEWAY_UINT16: case EDGE_GATEWAY_UINT32:
+        engineering = (double)bits; break;
+    default:
+        return false;
+    }
+    if (!isfinite(engineering) || !isfinite(point->write_scale) || point->write_scale == 0)
+        return false;
+    double raw = engineering / point->write_scale;
+    if (!isfinite(raw)) return false;
+    double decoded;
+    if (type == EDGE_GATEWAY_BCD || type == EDGE_GATEWAY_BCD_SIGNED) {
+        if (!point->write_width || point->write_width > 8 || point->write_digits > 8)
+            return false;
+        const double factor = pow(10.0, point->write_digits);
+        raw = round(engineering * factor);
+        const double limit = type == EDGE_GATEWAY_BCD_SIGNED
+            ? 8 * pow(10.0, point->write_width * 2 - 1)
+            : pow(10.0, point->write_width * 2);
+        if (!isfinite(raw) || fabs(raw) >= limit ||
+            (type == EDGE_GATEWAY_BCD && raw < 0)) return false;
+        decoded = raw / factor;
+    } else {
+        if (type == EDGE_GATEWAY_INT16 || type == EDGE_GATEWAY_INT32 ||
+            type == EDGE_GATEWAY_UINT16 || type == EDGE_GATEWAY_UINT32) {
+            const bool signed_type = type == EDGE_GATEWAY_INT16 || type == EDGE_GATEWAY_INT32;
+            const double limit = ldexp(1.0, point->write_width * 8 - (signed_type ? 1 : 0));
+            raw = round(raw);
+            if (raw < (signed_type ? -limit : 0) || raw >= limit) return false;
+        } else if (type == EDGE_GATEWAY_FLOAT32) {
+            if (fabs(raw) > FLT_MAX) return false;
+            raw = (float)raw;
+        } else if (type == EDGE_GATEWAY_DOUBLE) {
+            /* The raw encoder rejects strtod ERANGE, including subnormals. */
+            if (raw != 0 && fabs(raw) < DBL_MIN) return false;
+        } else {
+            return false;
+        }
+        decoded = raw * point->write_scale;
+        if (point->write_decimals >= 0 && point->write_decimals <= 9) {
+            const double factor = pow(10.0, point->write_decimals);
+            decoded = round(decoded * factor) / factor;
+        }
+    }
+    if (!isfinite(decoded)) return false;
+    /* Check what acquisition will expose, including decimal rounding and
+     * Float32 narrowing, instead of silently truncating a requested setpoint. */
+    if (point->native_type == EDGE_GATEWAY_FLOAT32) {
+        if (fabs(decoded) > FLT_MAX || (double)(float)decoded != engineering) return false;
+    } else if (fabs(decoded - engineering) >
+               4 * DBL_EPSILON * fmax(fabs(decoded), fabs(engineering))) {
+        return false;
+    }
+    if (type == EDGE_GATEWAY_BCD || type == EDGE_GATEWAY_BCD_SIGNED)
+        snprintf(output, size, "%.*f", (int)point->write_digits, decoded);
+    else if (type == EDGE_GATEWAY_INT16 || type == EDGE_GATEWAY_INT32 ||
+             type == EDGE_GATEWAY_UINT16 || type == EDGE_GATEWAY_UINT32)
+        snprintf(output, size, "%.0f", raw == 0 ? 0.0 : raw);
+    else
+        snprintf(output, size, type == EDGE_GATEWAY_FLOAT32 ? "%.9g" : "%.17g", raw);
+    return true;
+}
+
 static void write_identity(const edge_gateway_point *point, edge_modbus_gateway_write *write) {
     memcpy(write->platform_id, point->platform, 16);
     memcpy(write->device_id, point->device, 16);
@@ -1070,7 +1214,7 @@ int edge_modbus_gateway_next_write(const edge_modbus_gateway *gateway,
                 bits = (bits & ~(UINT64_C(0xffff) << shift)) | ((uint64_t)value << shift);
             }
             write_identity(point, write);
-            if (!format_native_value(point->native_type, bits, write->value, sizeof(write->value))) return -3;
+            if (!format_write_value(point, bits, write->value, sizeof(write->value))) return -3;
             return 1;
         }
     }

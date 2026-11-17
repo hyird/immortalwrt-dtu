@@ -6,6 +6,36 @@
 #include <string.h>
 #include <time.h>
 
+typedef struct {
+    edge_modbus_gateway_server *server;
+    ev_timer completion;
+    FILE *journal;
+    uint8_t command_id[16];
+    unsigned sequence;
+} write_fixture;
+
+static void complete_write(struct ev_loop *loop, ev_timer *watcher, int events) {
+    (void)loop;
+    (void)events;
+    write_fixture *writer = watcher->data;
+    edge_modbus_gateway_write_result(writer->server, writer->command_id, true);
+}
+
+static uint8_t submit_write(void *context, const edge_modbus_gateway_write *write,
+                            uint8_t command_id[16], uint64_t deadline_ms) {
+    (void)deadline_ms;
+    write_fixture *writer = context;
+    memset(command_id, 0, 16);
+    command_id[0] = (uint8_t)++writer->sequence;
+    memcpy(writer->command_id, command_id, 16);
+    if (fprintf(writer->journal, "%s %s\n", write->element_id, write->value) < 0 ||
+        fflush(writer->journal))
+        return 4;
+    ev_timer_set(&writer->completion, 0.01, 0);
+    ev_timer_start(EV_DEFAULT, &writer->completion);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3)
         return 2;
@@ -30,6 +60,7 @@ int main(int argc, char **argv) {
         point->device_id.size = 16; point->device_id.bytes[0] = 2;
         strcpy(point->element_id, elements[i]); strcpy(point->data_type, types[i]);
         point->scale = 1;
+        point->writable = !strcmp(mode, "writable");
     }
     for (unsigned i = 0; i < 2; ++i) {
         items[7 + i].which_item = iot_edge_v1_ConfigItem_derived_point_tag;
@@ -107,9 +138,25 @@ int main(int argc, char **argv) {
         edge_modbus_gateway_free(gateway);
         return 4;
     }
+    write_fixture writer = {.server = server};
+    if (!strcmp(mode, "writable")) {
+        writer.journal = fopen("writes.log", "w");
+        if (!writer.journal) {
+            edge_modbus_gateway_close(server);
+            edge_modbus_gateway_free(gateway);
+            return 10;
+        }
+        ev_timer_init(&writer.completion, complete_write, 0, 0);
+        writer.completion.data = &writer;
+        edge_modbus_gateway_set_writer(server, submit_write, &writer);
+    }
     puts("READY");
     fflush(stdout);
     ev_run(EV_DEFAULT, 0);
+    if (writer.journal) {
+        ev_timer_stop(EV_DEFAULT, &writer.completion);
+        fclose(writer.journal);
+    }
     edge_modbus_gateway_close(server);
     edge_modbus_gateway_free(gateway);
     return 0;

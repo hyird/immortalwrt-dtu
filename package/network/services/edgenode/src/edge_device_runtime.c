@@ -537,9 +537,15 @@ void edge_device_runtime_tick(edge_device_runtime *runtime, uint64_t schedule_ms
         runtime->driver.report(runtime->driver_context, runtime->platform_id,
                                runtime->device_id, &runtime->latest)) {
         const uint64_t reported_at_ms = runtime_now(runtime, schedule_ms);
-        if (initial_report_due || (regular_report_due && !fast_window_active))
+        if (initial_report_due || (regular_report_due && !fast_window_active)) {
             runtime->next_report_at_ms = deadline_after_seconds(
                 reported_at_ms, runtime->report_interval_sec);
+            /* Use the same completion-time origin for ordinary acquisition and
+             * reporting. Otherwise a read can precede the report deadline by
+             * its I/O latency and leave that report waiting a whole extra scan. */
+            runtime->next_io_at_ms = runtime->io_interval_ms > UINT64_MAX - reported_at_ms
+                ? UINT64_MAX : reported_at_ms + runtime->io_interval_ms;
+        }
         if (fast_report_due && runtime->fast_report_until_ms != 0U)
             runtime->next_fast_report_at_ms = deadline_after_seconds(
                 reported_at_ms, runtime->fast_report_interval_sec);

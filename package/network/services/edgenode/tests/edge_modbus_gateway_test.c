@@ -1,4 +1,5 @@
 #include "edge_modbus_gateway.h"
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -456,7 +457,7 @@ static void test_write_plans(void) {
         iot_edge_v1_ModbusRegisterConfig *point = &items[i+2].item.modbus_register;
         point->device_id.size = 16; memcpy(point->device_id.bytes, device, 16);
         snprintf(point->element_id, sizeof(point->element_id), "write-%u", i);
-        strcpy(point->data_type, types[i]); point->scale = 1;
+        strcpy(point->data_type, types[i]); point->scale = 1; point->decimals = -1;
         point->writable = i != 1 && i != 8;
     }
     edge_runtime_config config = {.items = items, .item_count = 11};
@@ -567,6 +568,163 @@ static void test_write_plans(void) {
     check_write_reply(gateway, request, size, 0);
     cursor = 0; CHECK(!edge_modbus_gateway_next_write(gateway, request, size, &cursor, &write));
     edge_modbus_gateway_free(gateway); remove(path);
+}
+
+static void test_scaled_write_plans(void) {
+    static const struct {
+        const char *type;
+        double scale, engineering;
+        int32_t decimals;
+        const char *raw;
+        bool scalar_only;
+    } cases[] = {
+        {"UINT16",0.1,20,-1,"200",false},
+        {"UINT16",0.1,12.5,-1,"125",false},
+        {"UINT16",0.1,6553.5,-1,"65535",false},
+        {"UINT16",0.1,6553.6,-1,NULL,false},
+        {"UINT16",0.1,-0.1,-1,NULL,false},
+        {"UINT16",0.1,12.55,-1,NULL,false},
+        {"UINT16",0,0,-1,NULL,false},
+        {"UINT16",0.1,0.3,-1,"3",false},
+        {"UINT16",0.1,12.5,0,NULL,false},
+        {"UINT16",-0.1,-12.5,-1,"125",false},
+        {"INT16",0.1,-3276.8,-1,"-32768",false},
+        {"INT16",0.1,3276.8,-1,NULL,false},
+        {"UINT32",0.1,429496729.5,-1,"4294967295",false},
+        {"UINT32",0.1,429496729.6,-1,NULL,false},
+        {"INT32",0.1,-214748364.8,-1,"-2147483648",false},
+        {"INT32",0.1,214748364.8,-1,NULL,false},
+        {"FLOAT32",0.1,12.5,-1,"125",false},
+        {"FLOAT32",1e38,FLT_MIN,-1,NULL,false},
+        {"FLOAT32",1e-38,FLT_MAX,-1,NULL,false},
+        {"FLOAT32",0,0,-1,NULL,false},
+        {"FLOAT32",1,12.5,0,NULL,false},
+        {"DOUBLE",0.1,12.5,-1,"125",false},
+        {"DOUBLE",0,0,-1,NULL,false},
+        {"DOUBLE",0.1,12.55,1,NULL,false},
+        {"DOUBLE",0.1,12.5,1,"125",false},
+        {"DOUBLE",0.1,DBL_MAX,-1,NULL,false},
+        {"DOUBLE",1,DBL_MIN / 2,-1,NULL,false},
+        /* Decoding deliberately leaves 8/64-bit integer scale unused. */
+        {"INT8",0.1,127,-1,"127",true},
+        {"INT8",0.1,128,-1,NULL,true},
+        {"UINT8",0.1,255,-1,"255",true},
+        {"UINT8",0.1,256,-1,NULL,true},
+        {"INT64",0.1,7,-1,"7",false},
+        {"UINT64",0.1,7,-1,"7",false},
+        {"WORD",0.1,12.5,-1,"125",true},
+        {"DWORD",0.1,12.5,-1,"125",true},
+        {"REAL",0.1,12.5,-1,"125",true},
+        {"LREAL",0.1,12.5,-1,"125",true},
+    };
+    const char *path = "gateway-scale-test.map";
+    remove(path);
+    uint8_t platform[16] = {1}, device[16] = {4};
+    iot_edge_v1_ConfigItem items[3] = {0};
+    items[0].which_item = iot_edge_v1_ConfigItem_endpoint_tag;
+    items[0].item.endpoint.endpoint_id.size = 16;
+    items[0].item.endpoint.endpoint_id.bytes[0] = 3;
+    items[0].item.endpoint.enabled = true;
+    items[1].which_item = iot_edge_v1_ConfigItem_device_tag;
+    items[1].item.device.device_id.size = 16;
+    memcpy(items[1].item.device.device_id.bytes, device, 16);
+    items[1].item.device.endpoint_id.size = 16;
+    items[1].item.device.endpoint_id.bytes[0] = 3;
+    items[1].item.device.enabled = true;
+    edge_runtime_config config = {.items = items, .item_count = 3};
+    edge_acquisition_source source = {.platform_id = platform, .config = &config};
+    for (unsigned protocol = 0; protocol < 3; ++protocol) {
+        for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+            if (protocol == 2 && cases[c].scalar_only) continue;
+            items[2] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+            if (protocol == 0) {
+                items[2].which_item = iot_edge_v1_ConfigItem_modbus_register_tag;
+                iot_edge_v1_ModbusRegisterConfig *p = &items[2].item.modbus_register;
+                p->device_id.size = 16; memcpy(p->device_id.bytes, device, 16);
+                strcpy(p->element_id, "scaled"); strcpy(p->data_type, cases[c].type);
+                p->writable = true; p->scale = cases[c].scale; p->decimals = cases[c].decimals;
+            } else if (protocol == 1) {
+                items[2].which_item = iot_edge_v1_ConfigItem_s7_area_tag;
+                iot_edge_v1_S7AreaConfig *p = &items[2].item.s7_area;
+                p->device_id.size = 16; memcpy(p->device_id.bytes, device, 16);
+                strcpy(p->element_id, "scaled"); strcpy(p->data_type, cases[c].type);
+                p->writable = true; p->scale = cases[c].scale; p->decimals = cases[c].decimals;
+            } else {
+                items[2].which_item = iot_edge_v1_ConfigItem_industrial_point_tag;
+                iot_edge_v1_IndustrialPointConfig *p = &items[2].item.industrial_point;
+                p->device_id.size = 16; memcpy(p->device_id.bytes, device, 16);
+                strcpy(p->element_id, "scaled"); strcpy(p->data_type, cases[c].type);
+                p->writable = true; p->scale = cases[c].scale; p->decimals = cases[c].decimals;
+            }
+            edge_modbus_gateway *gateway = edge_modbus_gateway_prepare(path, &source, 1);
+            CHECK(gateway);
+            iot_edge_v1_ModbusGatewayPoint point = iot_edge_v1_ModbusGatewayPoint_init_zero;
+            CHECK(edge_modbus_gateway_describe(gateway, platform, device, "scaled", &point, 1));
+            /* No config storage may be consulted after prepare. */
+            memset(&items[2], 0, sizeof(items[2]));
+            uint64_t bits;
+            if (point.value_type == 5) memcpy(&bits, &cases[c].engineering, sizeof(bits));
+            else if (point.value_type == 10) {
+                const float number = (float)cases[c].engineering;
+                uint32_t words; memcpy(&words, &number, sizeof(words)); bits = words;
+            } else if (cases[c].engineering < 0)
+                bits = (uint64_t)(int64_t)cases[c].engineering;
+            else bits = (uint64_t)cases[c].engineering;
+            uint8_t data[8], request[260];
+            for (unsigned b = 0; b < point.value_words * 2; ++b)
+                data[b] = (uint8_t)(bits >> ((point.value_words * 2 - 1 - b) * 8));
+            size_t size = write_adu(request, 16, 0, point.value_words, data);
+            check_write_reply(gateway, request, size, cases[c].raw ? 0 : 3);
+            if (cases[c].raw) {
+                uint32_t cursor = 0;
+                edge_modbus_gateway_write write;
+                CHECK(edge_modbus_gateway_next_write(gateway, request, size, &cursor, &write) == 1);
+                CHECK(!strcmp(write.value, cases[c].raw));
+                if (c == 0) {
+                    edge_acquisition_sample sample = {.valid = true};
+                    memcpy(sample.device_id, device, 16); strcpy(sample.element_id, "scaled");
+                    sample.value.which_value = iot_edge_v1_ScalarValue_double_value_tag;
+                    sample.value.value.double_value = 12.5;
+                    edge_modbus_gateway_update(gateway, platform, &sample, 1);
+                    size = write_adu(request, 6, 0, 1, data);
+                    check_write_reply(gateway, request, size, 0);
+                    cursor = 0;
+                    CHECK(edge_modbus_gateway_next_write(gateway, request, size, &cursor, &write) == 1 &&
+                          !strcmp(write.value, "200"));
+                }
+            }
+            edge_modbus_gateway_free(gateway);
+        }
+    }
+    /* Meter BCD already accepts engineering fixed-point text: don't divide by
+     * scalar scale a second time, and validate its own width/precision. */
+    static const struct { const char *type; double number; const char *text; } meter[] = {
+        {"BCD",12.34,"12.34"}, {"BCD",100,NULL}, {"BCD",12.345,NULL},
+        {"BCD",-1,NULL}, {"BCD_SIGNED",-12.34,"-12.34"}, {"BCD_SIGNED",80,NULL}
+    };
+    for (size_t c = 0; c < sizeof(meter) / sizeof(meter[0]); ++c) {
+        items[2] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+        items[2].which_item = iot_edge_v1_ConfigItem_industrial_point_tag;
+        iot_edge_v1_IndustrialPointConfig *p = &items[2].item.industrial_point;
+        p->device_id.size = 16; memcpy(p->device_id.bytes, device, 16);
+        strcpy(p->element_id, "scaled"); strcpy(p->data_type, meter[c].type);
+        p->writable = true; p->scale = 0.1; p->length = 2; p->digits = 2;
+        edge_modbus_gateway *gateway = edge_modbus_gateway_prepare(path, &source, 1);
+        CHECK(gateway);
+        uint64_t bits; memcpy(&bits, &meter[c].number, sizeof(bits));
+        uint8_t data[8], request[260];
+        for (unsigned b = 0; b < 8; ++b) data[b] = (uint8_t)(bits >> ((7 - b) * 8));
+        const size_t size = write_adu(request, 16, 0, 4, data);
+        check_write_reply(gateway, request, size, meter[c].text ? 0 : 3);
+        if (meter[c].text) {
+            uint32_t cursor = 0;
+            edge_modbus_gateway_write write;
+            CHECK(edge_modbus_gateway_next_write(gateway, request, size, &cursor, &write) == 1 &&
+                  !strcmp(write.value, meter[c].text));
+        }
+        edge_modbus_gateway_free(gateway);
+    }
+    remove(path);
 }
 
 static void test_unit_id(void) {
@@ -771,6 +929,7 @@ int main(void) {
     test_derived_lifecycle();
     test_unit_id();
     test_write_plans();
+    test_scaled_write_plans();
     test_cross_platform_reorder();
     test_compact_lifecycle();
     test_native_types();

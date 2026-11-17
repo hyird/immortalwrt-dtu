@@ -53,8 +53,8 @@ try:
     old_config = (checkout / '.config').read_text() if (checkout / '.config').exists() else ''
     run(['./scripts/feeds', 'update', '-a'], 'feeds-update', 1800)
     run(['./scripts/install-tas-feeds.sh'], 'feeds-install', 1800)
-    for feed, revision in (('packages', '84bd86384928955b568988ca0e09e2c78c75173d'),
-                           ('luci', 'd6167ea0645cbd1327708d85f94824f42d0eb872')):
+    for feed, revision in (('packages', 'fa25995d74a720c1c98bf6265d3dd8b4eb620d1f'),
+                           ('luci', 'c38e5665e826f5e6e2ac9168e167ee368d0969d9')):
         assert git('-C', 'feeds/' + feed, 'rev-parse', 'HEAD') == revision
     shutil.copy2(checkout / seed, checkout / '.config')
     run(['make', 'defconfig'], 'defconfig', 1200)

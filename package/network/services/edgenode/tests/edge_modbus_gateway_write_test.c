@@ -220,7 +220,8 @@ static unsigned pending_count(const fixture *test) {
     return count;
 }
 
-static void setup(fixture *test, bool short_period, bool external_io, bool derived, bool raw) {
+static void setup(fixture *test, bool short_period, bool external_io, bool derived, bool raw,
+                   double word_scale) {
     memset(test, 0, sizeof(*test));
     test->derived = derived;
     test->raw = raw;
@@ -274,6 +275,10 @@ static void setup(fixture *test, bool short_period, bool external_io, bool deriv
         point->address = addresses[i];
         point->quantity = i == 1U ? 2U : 1U;
         point->scale = 1.0;
+        if (i == 2U) {
+            point->scale = word_scale;
+            if (word_scale != 1.0) point->decimals = -1;
+        }
         point->writable = i != 0U;
     }
     if (external_io) {
@@ -438,7 +443,7 @@ static void release_write(fixture *test) {
 
 static void verify_reads_follow_acquisition(void) {
     fixture test;
-    setup(&test, true, false, false, false);
+    setup(&test, true, false, false, false, 1.0);
     const int north = connect_north(&test);
     const uint16_t original[] = {7U, 0x1122U, 0x3344U, 9U};
     const uint64_t until = monotonic_ms() + 1300U;
@@ -464,7 +469,7 @@ static void verify_reads_follow_acquisition(void) {
 
 static void verify_write_chain(void) {
     fixture test;
-    setup(&test, false, false, false, false);
+    setup(&test, false, false, false, false, 1.0);
     int first = connect_north(&test);
     int second = connect_north(&test);
     int reader = connect_north(&test);
@@ -547,6 +552,8 @@ static void verify_write_chain(void) {
     const unsigned writes_before = test.writes;
     request(first, 14U, 16U, 1U, 3U, batch, sizeof(batch));
     wait_held(&test);
+    const struct linger reset = {.l_onoff = 1, .l_linger = 0};
+    assert(setsockopt(first, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset)) == 0);
     close(first);
     spin(&test, 30U);
     first = connect_north(&test);
@@ -626,7 +633,7 @@ static void verify_write_chain(void) {
 
 static void verify_external_output_readback(void) {
     fixture test;
-    setup(&test, false, true, false, false);
+    setup(&test, false, true, false, false, 1.0);
     const int north = connect_north(&test);
     /* The protocol Bool is bit 0; the external output is the next dense bit. */
     request(north, 1U, 5U, 1U, 0xff00U, NULL, 0U);
@@ -643,7 +650,7 @@ static void verify_external_output_readback(void) {
 
 static void verify_derived_gateway(bool raw) {
     fixture test;
-    setup(&test, false, false, true, raw);
+    setup(&test, false, false, true, raw, 1.0);
     const int north = connect_north(&test);
     const uint16_t initial[] = {0xc022, 0, 0, 0}; /* -9.0 */
     expect_read(&test, north, 100U, 4U, 4U, initial);
@@ -687,7 +694,7 @@ static void verify_derived_gateway(bool raw) {
 
 static void verify_derived_external_io(void) {
     fixture test;
-    setup(&test, false, true, true, false);
+    setup(&test, false, true, true, false, 1.0);
     const int north = connect_north(&test);
     const uint16_t initial[] = {0, 0, 0, 0};
     expect_read(&test, north, 120U, 4U, 4U, initial);
@@ -703,11 +710,56 @@ static void verify_derived_external_io(void) {
     teardown(&test);
 }
 
+static void verify_scaled_write_readback(void) {
+    fixture test;
+    setup(&test, false, false, false, false, 0.1);
+    const int north = connect_north(&test);
+    const uint8_t twenty[] = {0x40,0x34,0,0,0,0,0,0};
+    request(north, 40U, 16U, 3U, 4U, twenty, sizeof(twenty));
+    expect_echo(&test, north, 40U, 16U, 3U, 4U);
+    assert(test.writes == 1U && test.registers[30] == 200U);
+    const uint16_t twenty_words[] = {0x4034,0,0,0};
+    expect_read(&test, north, 41U, 3U, 4U, twenty_words);
+    const uint8_t fractional[] = {0x40,0x29,0,0,0,0,0,0};
+    request(north, 42U, 16U, 3U, 4U, fractional, sizeof(fractional));
+    expect_echo(&test, north, 42U, 16U, 3U, 4U);
+    assert(test.writes == 2U && test.registers[30] == 125U);
+    const uint16_t fractional_words[] = {0x4029,0,0,0};
+    expect_read(&test, north, 43U, 3U, 4U, fractional_words);
+
+    /* A valid first point cannot execute before a later point's conversion
+     * error (12.55 is not representable as UINT16 * 0.1) is discovered. */
+    const uint8_t invalid_batch[] = {0,0,0,2,0x40,0x29,0x19,0x99,0x99,0x99,0x99,0x9a};
+    request(north, 44U, 16U, 1U, 6U, invalid_batch, sizeof(invalid_batch));
+    uint8_t bytes[260];
+    assert(response(&test, north, 44U, bytes) == 9U && bytes[7] == 0x90U && bytes[8] == 3U);
+    assert(test.writes == 2U && test.registers[20] == 0x1122U &&
+        test.registers[21] == 0x3344U && test.registers[30] == 125U);
+
+    /* The local adapter still passes raw CommandRequest input unchanged. */
+    edge_modbus_gateway_write raw = {0};
+    memcpy(raw.platform_id, test.platform, 16U);
+    raw.device_id[0] = 2U;
+    strcpy(raw.element_id, "word");
+    strcpy(raw.value, "250");
+    uint8_t command_id[16];
+    assert(gateway_write(test.app, &raw, command_id, monotonic_ms() + 3000U) == 0U);
+    const uint64_t until = monotonic_ms() + 3000U;
+    while (pending_count(&test) && monotonic_ms() < until)
+        step(&test);
+    assert(pending_count(&test) == 0U && test.writes == 3U && test.registers[30] == 250U);
+    const uint16_t raw_readback[] = {0x4039,0,0,0}; /* Engineering 25. */
+    expect_read(&test, north, 45U, 3U, 4U, raw_readback);
+    close(north);
+    teardown(&test);
+}
+
 int main(void) {
     verify_derived_gateway(false);
     verify_derived_gateway(true);
     verify_derived_external_io();
     verify_reads_follow_acquisition();
+    verify_scaled_write_readback();
     verify_write_chain();
     verify_external_output_readback();
     puts("Modbus gateway acquisition/write integration tests passed");

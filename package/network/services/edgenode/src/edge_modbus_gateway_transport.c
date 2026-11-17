@@ -59,11 +59,13 @@ static void close_client(edge_gateway_client *client) {
 static bool client_connected(edge_gateway_client *client) {
     if (client->io.fd < 0)
         return false;
-    struct pollfd state = {.fd = client->io.fd, .events = POLLIN | POLLRDHUP};
+    struct pollfd state = {.fd = client->io.fd, .events = POLLIN};
     const int ready = poll(&state, 1, 0);
     if (ready < 0 && errno == EINTR)
         return true;
-    if (ready < 0 || (state.revents & (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL))) {
+    /* FIN only closes the peer's write side: a complete ADU still owns its
+     * response. A reset or full socket error, unlike EOF, cancels further work. */
+    if (ready < 0 || (state.revents & (POLLHUP | POLLERR | POLLNVAL))) {
         close_client(client);
         return false;
     }

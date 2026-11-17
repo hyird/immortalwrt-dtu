@@ -1,4 +1,4 @@
-"""Exercise real TCP framing, compact views, migration and zero-filled ranges."""
+"""Exercise real TCP framing, half-closes, compact views and persisted mappings."""
 import contextlib
 import pathlib
 import select
@@ -64,6 +64,15 @@ def ignored_write(connection, function, address, count, data):
             struct.pack(">BHHB", function, address, count, len(data)) + data)
     connection.sendall(struct.pack(">HHHB", 23, 0, len(body) + 1, 1) + body)
     assert receive_adu(connection) == struct.pack(">HHHB", 23, 0, 6, 1) + body[:5]
+
+
+def half_closed(port, packet):
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
+        connection.sendall(packet)
+        connection.shutdown(socket.SHUT_WR)
+        response = receive_adu(connection)
+        assert connection.recv(1) == b"", "EOF must close after the final response"
+        return response
 
 
 pathlib.Path("build").mkdir(exist_ok=True)
@@ -145,6 +154,50 @@ with tempfile.TemporaryDirectory(prefix="edge-gateway-", dir="build") as tempora
                 with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
                     connection.sendall(struct.pack(">HHHB", 124, 0, len(body) + 1, wrong) + body)
                     assert connection.recv(1) == b""
+    half_close_directory = directory / "half-close"
+    half_close_directory.mkdir()
+    with fixture(half_close_directory, "writable") as port:
+        # FIN means no more requests, not loss of the peer's receive side.
+        for function in (1, 2, 3, 4):
+            size = 1 if function in (1, 2) else 2
+            assert half_closed(port, request(200, function, 65535, 1)) == (
+                struct.pack(">HHHBBB", 200, 0, size + 3, 1, function, size)
+                + b"\x00" * size)
+        assert half_closed(port, request(201, 0x7f))[7:] == b"\xff\x01"
+
+        # Writable requests must wait for asynchronous completion even after FIN.
+        # FC16 spans two real targets: finishing only the first is not success.
+        for function, address, value, data in (
+                (5, 0, 0, b""),
+                (6, 4, 0xabcd, b""),
+                (15, 0, 1, b"\x00"),
+                (16, 4, 3, b"\x12\x34\x56\x78\x9a\xbc")):
+            body = struct.pack(">BHH", function, address, value)
+            if data:
+                body += bytes([len(data)]) + data
+            packet = struct.pack(">HHHB", 202, 0, len(body) + 1, 1) + body
+            assert half_closed(port, packet) == struct.pack(">HHHB", 202, 0, 6, 1) + body[:5]
+
+        # Buffered complete ADUs preceding EOF still run in order.
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
+            connection.sendall(request(203, 3, 65535, 1) + request(204, 6, 4, 42))
+            connection.shutdown(socket.SHUT_WR)
+            assert receive_adu(connection) == struct.pack(">HHHBBB", 203, 0, 5, 1, 3, 2) + b"\x00\x00"
+            assert receive_adu(connection) == request(204, 6, 4, 42)
+            assert connection.recv(1) == b""
+        assert (half_close_directory / "writes.log").read_text().splitlines() == [
+            "flag 0", "short 43981", "flag 0", "short 4660",
+            f"wide {0x56789abc}", "short 42"]
+
+        # EOF without a full ADU must close, not execute or keep an EOF watcher spinning.
+        for size in (0, 3, 7, 11):
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
+                connection.sendall(request(205, 6, 4, 99)[:size])
+                connection.shutdown(socket.SHUT_WR)
+                assert connection.recv(1) == b""
+        assert half_closed(port, request(206, 3, 65535, 1))[9:] == b"\x00\x00"
+        assert (half_close_directory / "writes.log").read_text().splitlines()[-1] == "short 42"
+
     # A corrupt persisted table must not produce a fabricated usable mapping.
     with (directory / "network.map").open("ab") as mapping:
         mapping.write(b"corrupt\n")

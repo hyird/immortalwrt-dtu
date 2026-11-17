@@ -406,6 +406,8 @@ typedef struct {
     uint64_t connect_advance_ms;
     uint64_t handshake_advance_ms;
     uint64_t write_advance_ms;
+    uint64_t read_advance_ms;
+    uint64_t report_advance_ms;
     bool mark_write_started;
     bool mark_write_ack;
     bool last_write_started;
@@ -433,6 +435,7 @@ static edge_io_result fake_handshake(void *context) {
 static edge_io_result fake_read(void *context, edge_device_sample *sample) {
     fake_device *fake = context;
     ++fake->reads;
+    fake->monotonic_now_ms += fake->read_advance_ms;
     if (fake->runtime != NULL && fake->runtime->debug_read)
         ++fake->debug_reads;
     if (fake->runtime != NULL && fake->runtime->silent_background_read)
@@ -491,6 +494,7 @@ static bool fake_report(void *context, const uint8_t platform_id[16],
         return false;
     }
     ++fake->reports;
+    fake->monotonic_now_ms += fake->report_advance_ms;
     memcpy(fake->last_platform, platform_id, 16U);
     return true;
 }
@@ -716,17 +720,58 @@ static void test_configured_read_interval(void) {
             require_true(fake.reads == 2U && fake.reports == (explicit_interval ? 1U : 2U),
                 "configured read deadline or independent ordinary report deadline was ignored");
             edge_device_runtime_tick(&runtime, 100000U, 100000);
-            require_true(fake.reads == 3U && fake.reports == (explicit_interval ? 2U : 3U) &&
-                runtime.next_io_at_ms == (explicit_interval ? 105000U : 120000U),
-                "late scheduling produced catch-up reads or lost the configured period");
+            require_true(fake.reads == 3U && fake.reports == (explicit_interval ? 2U : 3U),
+                "late scheduling produced catch-up reads or missed its fresh report");
             edge_device_runtime_tick(&runtime, 100000U, 100000);
             require_true(fake.reads == 3U, "late scheduling performed a catch-up burst");
             edge_write_command command = {.value = {0x55U}, .value_size = 1U};
             require_true(enqueue_write_for_test(&runtime, &command), "write enqueue failed");
             edge_device_runtime_tick(&runtime, 101000U, 101000);
-            require_true(fake.writes == 1U && fake.completions == 1U && fake.reads == 3U &&
-                runtime.next_io_at_ms == (explicit_interval ? 105000U : 120000U),
-                "slow acquisition delayed a priority write or moved the ordinary schedule");
+            require_true(fake.writes == 1U && fake.completions == 1U && fake.reads == 3U,
+                "slow acquisition delayed a priority write or inserted an ordinary read");
+            edge_device_runtime_close(&runtime);
+        }
+    }
+}
+
+static void test_reporting_with_io_latency(void) {
+    const uint8_t platform_id[16] = {1U}, device_id[16] = {2U};
+    const edge_device_driver driver = {
+        .connect = fake_connect, .handshake = fake_handshake, .read = fake_read,
+        .monotonic_ms = fake_monotonic_ms, .disconnect = fake_disconnect,
+        .report = fake_report, .command_complete = fake_complete};
+    const uint32_t intervals[] = {0U, 1000U, 3000U, 5000U};
+    for (unsigned protocol = EDGE_DEVICE_MODBUS; protocol <= EDGE_DEVICE_DLT645; ++protocol) {
+        for (size_t i = 0U; i < sizeof(intervals) / sizeof(intervals[0]); ++i) {
+            fake_device fake = {.monotonic_now_ms = 1000U, .read_advance_ms = 600U,
+                                .report_advance_ms = 100U};
+            edge_device_runtime runtime;
+            require_true(edge_device_runtime_init(&runtime, (edge_device_protocol)protocol,
+                platform_id, device_id, intervals[i], 3U, fake.monotonic_now_ms,
+                &driver, &fake), "latency runtime init failed");
+            const uint64_t period = intervals[i] > 3000U ? intervals[i] : 3000U;
+            uint64_t last_report_ms = 0U;
+            for (unsigned tick = 0U; tick < 32U; ++tick) {
+                const uint64_t schedule_ms = fake.monotonic_now_ms;
+                const unsigned previous_reports = fake.reports;
+                edge_device_runtime_tick(&runtime, schedule_ms, (int64_t)schedule_ms);
+                if (fake.reports != previous_reports) {
+                    if (last_report_ms != 0U)
+                        require_true(fake.monotonic_now_ms - last_report_ms >= 3000U,
+                            "ordinary report ran before its configured interval");
+                    last_report_ms = fake.monotonic_now_ms;
+                }
+                require_true(last_report_ms != 0U &&
+                    fake.monotonic_now_ms - last_report_ms <= period + 1700U,
+                    "I/O latency delayed reporting by an extra acquisition period");
+                if (intervals[i] == 0U || intervals[i] == 3000U)
+                    require_true(fake.reads == fake.reports,
+                        "a report-paced fresh sample was silently discarded");
+                /* The worker schedules its next scan after synchronous I/O and
+                 * telemetry queueing complete, rather than advancing a fake clock
+                 * only at the start of each read. */
+                fake.monotonic_now_ms += EDGE_ACQUISITION_TICK_MS;
+            }
             edge_device_runtime_close(&runtime);
         }
     }
@@ -1366,6 +1411,7 @@ int main(void) {
     test_command_start_deadlines_and_no_replay();
     test_s7_tcp_client_scan_and_report_intervals();
     test_configured_read_interval();
+    test_reporting_with_io_latency();
     test_fast_reporting_after_write();
     test_initial_report_attempts_first_complete_sample();
     test_io_and_reporting();

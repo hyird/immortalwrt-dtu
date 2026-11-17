@@ -267,7 +267,11 @@ if(UNIX)
             "${EDGENODE_ROOT}/src/edge_interface.c" "${EDGENODE_ROOT}/src/edge_process.c"
             "${EDGENODE_ROOT}/src/edge_protocol.c" "${EDGENODE_ROOT}/src/edge_url.c")
         target_compile_options(edge_modbus_gateway_config_test PRIVATE -UNDEBUG)
-        target_link_options(edge_modbus_gateway_config_test PRIVATE -Wl,--wrap=uci_alloc_context)
+        target_link_options(edge_modbus_gateway_config_test PRIVATE
+            -Wl,--wrap=uci_alloc_context -Wl,--wrap=open -Wl,--wrap=fopen
+            -Wl,--wrap=access -Wl,--wrap=unlink -Wl,--wrap=edge_process_run
+            -Wl,--wrap=edge_process_detach -Wl,--wrap=edge_process_close_inherited_fds
+            -Wl,--wrap=sleep)
         target_include_directories(edge_modbus_gateway_config_test PRIVATE
             "${EDGENODE_ROOT}/src" "${GATEWAY_UCI_INCLUDE_DIR}"
             "${GATEWAY_UBUS_INCLUDE_DIR}" "${GATEWAY_LIBEV_INCLUDE_DIR}")

@@ -18,6 +18,7 @@ struct ev_loop;
 typedef struct {
     uint8_t platform_id[16], device_id[16];
     char element_id[65];
+    /* Southbound encoder input (raw numeric value; BCD keeps its fixed-point text). */
     char value[129];
     bool external_io;
 } edge_modbus_gateway_write;
@@ -28,9 +29,9 @@ void edge_modbus_gateway_set_writer(edge_modbus_gateway_server *server,
     edge_modbus_gateway_write_callback callback, void *context);
 void edge_modbus_gateway_write_result(edge_modbus_gateway_server *server,
     const uint8_t command_id[16], bool success);
-/* The request is structurally/range validated by reply; cursor starts at zero.
- * 1 yields the next writable target, 0 finishes, negatives are exception codes.
- * Enumeration and validation have no I/O or cache mutation. */
+/* The request is structurally/range/conversion validated by reply; cursor starts
+ * at zero. 1 yields the next writable target, 0 finishes, negatives are exception
+ * codes. Enumeration and validation have no I/O or cache mutation. */
 int edge_modbus_gateway_next_write(const edge_modbus_gateway *gateway,
     const uint8_t *request, size_t size, uint32_t *cursor,
     edge_modbus_gateway_write *write);

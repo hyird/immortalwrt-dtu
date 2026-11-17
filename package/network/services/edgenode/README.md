@@ -1,6 +1,6 @@
 # edgenode for OpenWrt
 
-This directory contains a small C daemon and an OpenWrt package recipe. It has no C++
+This directory contains a Linux-only C daemon and an OpenWrt package recipe. It has no C++
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
@@ -26,11 +26,17 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 支持 05/06/0F/10 写入，与 Bool/数值紧凑地址对应。只读点及未映射地址忽略写入并正常响应，原样本/零值不变；可写点经节点真实命令与回读链完成后响应，不能改缓存冒充成功。05 只接受 0000/FF00，0F 每次 1–1968 位，10 每次 1–123 字，字节数必须精确匹配。部分字写使用有效的已采样原生值合成其余字；没有有效历史样本则异常 04，完整覆盖不要求历史样本，NaN/Inf 异常 03。整个 PDU 先验证，再逐点执行真实写入；多点写不承诺原子回滚，不自动重放已提交写入。真实执行失败异常 04，资源/队列忙异常 06，未知功能异常 01。网关缓存始终只跟随实际采集/回读样本更新。
 
+网关写值与读值使用相同工程单位：按现有采集解码规则反向换算为南向原始值，再走原命令与回读链。例如 UINT16、`scale=0.1` 写入 Double `12.5`，南向写入 `125`。零倍率、越界及不能按配置精度读回的值在整个 PDU 的预验证阶段拒绝（异常 03），不会先写前面的合法点。8/64 位整数沿用解码器不应用倍率的既有语义，BCD 沿用自身 `digits` 定点格式；平台原有 `CommandRequest` 原始值写入接口不变。
+
 `/etc/edgenode-modbus.map` 持久化内部排序身份并列入包配置保留清单，最多保留 6553 个身份；删除后恢复相同身份可重用内部 token。不要删除或手工重排该文件。实际主映射按当前启用、受支持身份顺序重新压紧，配置增删、停启、类型宽度变化及重排可能改变后续主地址；没有主映射的身份不制造空洞。文件损坏、写入失败、容量耗尽或与南向监听端口冲突时拒绝新配置。重启或配置切换后重新采集值缓存；配置未变时重算的主地址保持一致。采集进程异常退出会使已有值失效；本地样本事件受阻会记录错误，旧值按超时规则失效。
 
 寄存器读取在主事件循环完成，只读缓存，不触发南向请求，也不另设每秒刷新。普通采集读取间隔优先使用非零 `io_interval_ms`，否则使用平台下发的 `report_interval_sec * 1000`；每次真实采集完成后经本地样本事件立即更新网关，写后回读及快读窗口的真实样本同样更新缓存，窗口结束恢复普通周期。最多 8 条连接，支持分包及连续请求，30 秒未完成请求/响应时关闭连接。原始上报模式复用固件解码器更新缓存，平台报文保持原格式。主机测试入口为 `edge_modbus_gateway`；发布前还需 Linux 网络测试及实际固件验收。
 
+客户端发送完整 ADU 后可 `shutdown(SHUT_WR)` 并继续接收响应；FIN 不取消已接收的完整请求，缓冲中的完整请求按序处理后关闭，不完整 ADU 遇 EOF 直接关闭。普通 `close()` 与写半关闭在 TCP FIN 上无法区分，因此不能依赖 FIN 撤销已提交写入；RST、明确连接错误及请求截止仍会阻止后续写点。
+
 Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON`（需要 libev、libuci、libubus、libubox 开发文件和 Python），随后运行 `ctest --output-on-failure -R 'edge_modbus_gateway|edge_acquisition|edge_protocol|edge_derived'`。网关回归覆盖混合原生宽度、01/02 与 03/04 数值镜像、空表与跨尾部零值、65535 边界、停用/删除/重启/重排、旧快照与保存失败、写 PDU/类型/部分字预验证、实际 TCP 分包及只读忽略写入；派生回归复用现有 native、TCP fixture 及真实采集写入链，覆盖数值/布尔与物理/IO 连续地址、实际计算及回读变化、失败/过期清零、原始报文隔离、只读写 ACK、元数据快照和生命周期。另含实际 MBAP ID 247 各功能码响应、错误 ID 断连、非法 ID 不截断、真实 UCI 默认值/持久化回读/物理名拒绝/唯一迁移/歧义/逻辑删除改名边界，以及 ID 切换时排队与在途写不重放。真实可写点还须经过 TCP→采集命令→南向写及回读链路。发布前仍需三个 profile 的完整固件构建和实际设备验收。
+
+修复回归另覆盖真实 libuci 的网络备份覆盖恢复、导入/提交/reload 失败保留备份，工程值逆换算及真实南向写后回读、批量非法值零执行、TCP 半关闭和 RST 取消。`edge_runtime` 使用可控单调时钟模拟确定性的 I/O/入队耗时，检查默认和显式读取周期不会丢掉本应上报的新样本。
 
 ## 平台传输故障隔离（0.3.80）
 
@@ -84,7 +90,7 @@ Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON
 ## 主动轮询与首次遥测调度（0.3.86）
 
 - 主动 Modbus RTU/TCP、S7、FINS、MC、DLT645 普通读取间隔优先采用设备非零 `io_interval_ms`，否则采用 `report_interval_sec * 1000`，不再固定每秒读取。平台常规下发 `io_interval_ms=0`，此时读取跟随平台读取间隔。该值是调度目标，不是严格实时承诺；超时、共享物理链路和平台优先级会造成延迟。迟到调度跳过过期轮次，不补跑堆积读取。
-- `report_interval_sec` 独立控制普通遥测。配置应用后，首次完整新点集在本轮立即尝试入队；不会仅因收到配置应用确认、单独主动采集或已有旧样本而上报。首次读取失败、写命令占用或遥测入队失败时保留首次待报状态，每个后续采集轮只在读到完整新点集后重试；成功入队后才从成功时刻起算 `report_interval_sec`。
+- `report_interval_sec` 独立控制普通遥测。配置应用后，首次完整新点集在本轮立即尝试入队；不会仅因收到配置应用确认、单独主动采集或已有旧样本而上报。首次读取失败、写命令占用或遥测入队失败时保留首次待报状态，每个后续采集轮只在读到完整新点集后重试；普通遥测成功入队后，以同一完成时刻重新起算普通读取间隔和 `report_interval_sec`，避免同步 I/O 与入队耗时使读取落在上报截止前、再额外空等整轮。快读上报不重置普通读取计划。
 - Worker 在每次开始下一项读取前先有限量消费控制队列，并按既有平台优先级顺序优先执行已入队写任务；每轮最多插队 4 项写任务，随后仍处理当前扫描索引（同一设备刚执行过写时跳过该设备的重复普通读），不会因写任务跳过其他设备或被动 SL651 收帧。预算耗尽时，仍有待写命令的设备不执行普通读。单 Worker 的同步协议交换不可抢占：已发出的请求必须先完成或超时，之后才能写入；写请求只发送一次，不自动重放。共享物理资源仍由同一 Worker 串行操作，SL651 被动确认、DTU 透传及平台优先级规则不变。
 - 经验证的写命令可以启动快读窗口；快窗口到期会实际读取，不因较慢普通周期推迟到普通轮。仅在 fast due 轮成功取得新样本后上报，窗口结束恢复普通周期且不补跑迟到轮。写入仍即时返回命令结果，不因写后回读额外发送自动遥测，也不会把写入占用到期轮的旧遥测补报。网关只发布这些真实读取产生的缓存，不自行加快采集。
 - 静默扫描不发自动 RawPacket、解析值或报文 debug；必要故障状态和命令结果即时上报，到期轮和显式人工调试按原路径处理。S7 TCP Client 持连及断线重连、共享串口资源和平台优先级保持原机制。
@@ -337,6 +343,10 @@ internal connection ID and never asks the user to enter it. The default ID
 `00000000-0000-7000-8000-000000000001` remains the bootstrap platform for modem and
 terminal privileges, but network management and firmware upgrade are available to every
 enrolled platform.
+
+Network rollback replaces the failed UCI package with the saved export and checks
+both the commit and network reload. A failed restore retains its backup and blocks
+new network changes; rollback is reported only after restoration succeeds.
 
 New nodes enter the platform's manual approval flow by IMEI. Approval upgrades that
 connection to an enrolled session. A connection that never receives approval is
