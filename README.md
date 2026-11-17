@@ -48,6 +48,10 @@ Build the matching seed configuration from this repository. TAS-682F and
 IT-694_s3 images are written to `bin/targets/ramips/mt76x8/`; ECM30 NAND and
 RAM recovery images are written to `bin/targets/sunxi/cortexa7/`.
 
+Fresh configurations use the domestic NTP servers `ntp.aliyun.com`,
+`time1.cloud.tencent.com`, and `cn.ntp.org.cn`. Existing saved system/NTP
+configuration and board-specific NTP overrides are preserved during upgrades.
+
 ## Development
 To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensitive filesystem required). Cygwin is unsupported because of the lack of a case sensitive file system.<br/>
 

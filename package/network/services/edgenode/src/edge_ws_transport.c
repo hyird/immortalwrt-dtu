@@ -224,7 +224,6 @@ static bool native_connect(edge_native_transport *transport, struct ev_loop *loo
         .options = LWS_SERVER_OPTION_LIBEV | LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT,
         .foreign_loops = loops,
         .user = transport,
-        .client_ssl_ca_filepath = "/etc/ssl/certs/ca-certificates.crt",
         .timeout_secs = 30,
         .fd_limit_per_thread = 8,
     };
@@ -236,12 +235,15 @@ static bool native_connect(edge_native_transport *transport, struct ev_loop *loo
         .port = port,
         .path = transport->path,
         .host = transport->host,
-        .ssl_connection = tls ? LCCSCF_USE_SSL : 0,
+        .ssl_connection = tls ? LCCSCF_USE_SSL | LCCSCF_ALLOW_INSECURE |
+            LCCSCF_ALLOW_SELFSIGNED | LCCSCF_ALLOW_EXPIRED |
+            LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK : 0,
         .local_protocol_name = "edgenode",
         .pwsi = &transport->socket,
         .retry_and_idle_policy = &idle_policy,
     };
-    /* 不发送子协议、不弱化证书策略；不主动启用周期 WebSocket Ping。 */
+    /* TLS remains encrypted, but server certificates are deliberately not
+     * authenticated, including their validity dates on an unsynchronized node. */
     transport->notified = true; /* 同步失败由调用方安排一次重连。 */
     if (!lws_client_connect_via_info(&connection)) {
         native_destroy(transport);

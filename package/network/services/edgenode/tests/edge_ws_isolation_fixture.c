@@ -5,19 +5,10 @@
 #include <fcntl.h>
 #include <libwebsockets.h>
 static struct lws *fixture_connect(const struct lws_client_connect_info *info);
-static struct lws_context *fixture_context(const struct lws_context_creation_info *info);
 #define lws_client_connect_via_info fixture_connect
-#define lws_create_context fixture_context
 #include "../src/edge_ws_transport.c"
 #undef lws_client_connect_via_info
-#undef lws_create_context
 
-static struct lws_context *fixture_context(const struct lws_context_creation_info *info) {
-    struct lws_context_creation_info copy = *info;
-    const char *ca = getenv("EDGE_WS_TEST_CA");
-    if (ca) copy.client_ssl_ca_filepath = ca;
-    return lws_create_context(&copy);
-}
 
 static struct lws *fixture_connect(const struct lws_client_connect_info *info) {
     if (!strcmp(info->address, "stall.invalid"))
@@ -113,8 +104,8 @@ static void tick(struct ev_loop *loop, struct ev_timer *timer, int events) {
     if (state->received != state->target) return;
     assert(state->max_gap < 0.5);
     if (!strcmp(state->mode, "crash") || !strcmp(state->mode, "flood") ||
-        !strcmp(state->mode, "oversize") || !strcmp(state->mode, "watchdog") ||
-        !strcmp(state->mode, "tls-reject")) assert(state->bad_closed);
+        !strcmp(state->mode, "oversize") || !strcmp(state->mode, "watchdog"))
+        assert(state->bad_closed);
     if (!strcmp(state->mode, "stall")) assert(!state->bad_closed);
     if (!strcmp(state->mode, "freeze") || !strcmp(state->mode, "queue") ||
         !strcmp(state->mode, "destroy")) assert(state->fault_injected);

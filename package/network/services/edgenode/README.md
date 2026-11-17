@@ -51,7 +51,7 @@ Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON
   入站通道过载会断开对应平台；已入 outbox 的可靠消息继续按原 ACK／重连机制补发。
 - 子进程每秒报告自身事件循环进度。连接阶段 30 秒、已连接阶段 10 秒没有进度时，
   只终止该平台的网络子进程并通知既有重连机制；这不替代平台握手、ACK 和 WS 保活。
-- HTTP/WS、HTTPS/WSS、证书校验、permessage-deflate、平台协议、终端及固件分块接口保持兼容。
+- HTTP/WS、HTTPS/WSS、permessage-deflate、平台协议、终端及固件分块接口保持兼容；当前 TLS 证书策略见下文。
   IPC 增加约一个至两个 10 ms 调度周期的传输延迟；额外进程和缓冲需要在目标设备验证内存余量。
 - 入站消息独立解码和释放，不再复用全局出站缓冲区，避免异常文本／空消息释放旧出站数据，
   也避免发送回复时覆盖仍在处理的请求。流量统计通过仅在连接回调期间借用的 socket FD
@@ -60,7 +60,7 @@ Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON
   按设计继续共享，所有业务处理仍由主进程协调；不承诺整机资源耗尽或设备变更无全局影响。
 - `edge_ws_isolation` 使用同一应用进程同时连接健康与故障平台，验证同步连接卡住、
   SIGSTOP、SIGKILL、队列满、回调内销毁、消息洪泛、超大消息、子进程进度超时、
-  HTTPS 成功与不可信证书拒绝；测试还启用 libev 子进程回收以覆盖与主程序的兼容性。
+  WSS 在自签名、主机名不符、已过期及尚未生效证书下的实际收发；测试还启用 libev 子进程回收以覆盖与主程序的兼容性。
 - `edge_ws_application_compile` 同时编译真实主程序接入代码。
   `tests/edge_platform_e2e.py` 在独立网络／挂载命名空间中运行最终固件的 EdgeNode，
   同时对接 HTTP 和 HTTPS 模拟平台并打开两个真实 PTY。故障平台被冻结、崩溃、发送文本、
@@ -129,7 +129,7 @@ Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON
 ## WebSocket 压缩
 
 - `0.3.59` 的种子配置开启 `CONFIG_MBEDTLS_ECP_DP_SECP521R1_ENABLED`，用于解析系统
-  CA 包中的 P-521 根证书；不关闭证书或主机名校验。`0.3.58` 存在 CA 包加载失败问题，
+  CA 包中的 P-521 根证书；该历史版本未关闭证书或主机名校验，当前策略见下文。`0.3.58` 存在 CA 包加载失败问题，
   不应继续用于升级。主机验证中，原配置解析 120 张、失败 1 张；开启后 121 张全部成功。
 
 - 使用官方 feeds 的 `libwebsockets-mbedtls`，通过 `scripts/libwebsockets-edgenode.patch`
@@ -148,12 +148,12 @@ Linux 主机测试在 CMake 配置时增加 `-DEDGENODE_GATEWAY_NETWORK_TESTS=ON
 - 所有业务消息经同一压缩路径；Ping/Pong/Close 控制帧不压缩。接收分片先有界重组再解码。
 - 每个平台拥有独立 LWS context、256 KiB 有界待发队列及接收缓冲；网络写入仅发生在 writable
   回调内。outbox 仍以应用 ACK 确认，入队不代表服务端确认，断线按原规则重放。
-- 不改变采集间隔、原始数据、协议字段、升级流、平台配置及 WS/WSS 证书校验策略。
+- 压缩策略不改变采集间隔、原始数据、协议字段、升级流及平台配置；当前 TLS 证书策略见下文。
 
 ### 传输回归测试
 
 主机测试开启 `EDGENODE_WS_TRANSPORT_TESTS=ON`，需要带压缩和原生 libev 的 libwebsockets、
-libev 开发文件及 Python 3；交叉编译固件不能替代运行该测试。
+libev 开发文件、Python 3 及用于生成隔离 TLS 测试证书的 OpenSSL；交叉编译固件不能替代运行该测试。
 `ctest --test-dir <主机测试构建目录> -R '^edge_ws_transport$' --output-on-failure`
 验证真实 TCP 线帧：未协商压缩、禁止字典复用、允许字典复用，逐字节对比 level 9 编码，
 压缩分片重组、穿插 Ping/Pong、Close 不压缩和外部事件循环销毁边界。
@@ -228,8 +228,15 @@ ENQ 查询与连续应答。确认须晚于本平台 tmpfs outbox 写入成功�
 - an HTTP or HTTPS platform base address is upgraded internally to a binary WS or WSS
   session carrying one nanopb `Envelope` per message; HTTP/WS is unencrypted and intended
   only for trusted or temporary networks;
-- WSS validates both the certificate chain and hostname against OpenWrt's `ca-bundle`;
-  TLS initialization and verification failures fail closed;
+- WSS remains encrypted, but EdgeNode deliberately does not verify the server's
+  certificate chain, hostname, or validity dates. Self-signed, expired, and not-yet-valid
+  certificates are accepted, so an unsynchronized device clock does not block TLS.
+  EdgeNode no longer requires loading a CA bundle for these connections; TLS
+  initialization and protocol/handshake failures still fail closed.
+- This policy removes TLS server authentication and permits platform impersonation
+  and man-in-the-middle attacks. Application enrollment, platform isolation, firmware
+  size/SHA-256 checks and `sysupgrade -T` remain mandatory, but do not replace TLS
+  server authentication. System-wide and other services' certificate policies are unchanged.
 - every platform has isolated registration, config, reconnect, heartbeat, and outbox state;
   failed connections retry forever; a 30-second application handshake deadline, an
   enrolled-session watchdog, and a 60-second outbox ACK deadline break half-open sessions;
