@@ -169,8 +169,51 @@ static void test_local_diagnostics_do_not_enter_log_api(void) {
   }
 }
 
+static void test_concurrent_log_write(void) {
+  const char *path = "/tmp/edgenode-test-local-diagnostics/logs/current.log";
+  (void)unlink(path);
+  for (unsigned index = 1U; index < 16U; ++index) {
+    char rotated[120];
+    snprintf(rotated, sizeof(rotated), "%s.%u", path, index);
+    (void)unlink(rotated);
+  }
+  edge_log_init();
+  assert(edge_log_set_level("debug"));
+  const pid_t child = fork();
+  assert(child >= 0);
+  for (unsigned index = 0U; index < 1200U; ++index)
+    edge_log_write("info", "worker", "concurrent-message",
+                   "detail=0123456789abcdefghijklmnopqrstuvwxyz");
+  if (child == 0)
+    _exit(0);
+  int status;
+  assert(waitpid(child, &status, 0) == child);
+  assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  struct stat lock_info;
+  assert(stat("/tmp/edgenode-test-local-diagnostics/logs/current.lock",
+              &lock_info) == 0 &&
+         (lock_info.st_mode & 0777) == 0600);
+  FILE *input = fopen(path, "r");
+  assert(input != NULL);
+  char line[512];
+  while (fgets(line, sizeof(line), input) != NULL) {
+    unsigned tabs = 0U;
+    for (const char *cursor = line; *cursor != '\0'; ++cursor)
+      tabs += *cursor == '\t';
+    assert(tabs == 4U && strchr(line, '\n') != NULL);
+  }
+  assert(fclose(input) == 0);
+  (void)unlink(path);
+  for (unsigned index = 1U; index < 16U; ++index) {
+    char rotated[120];
+    snprintf(rotated, sizeof(rotated), "%s.%u", path, index);
+    (void)unlink(rotated);
+  }
+}
+
 int main(void) {
   test_log_lease();
   test_local_diagnostics_do_not_enter_log_api();
+  test_concurrent_log_write();
   return 0;
 }

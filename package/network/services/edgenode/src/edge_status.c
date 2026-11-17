@@ -1,4 +1,5 @@
 #include "edge_status.h"
+#include "edge_util.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -59,23 +60,11 @@ static bool json_bool(FILE *output, bool value) {
     return fputs(value ? "true" : "false", output) >= 0;
 }
 
-static void format_uuid(const uint8_t value[16], char output[37]) {
-    static const char digits[] = "0123456789abcdef";
-    size_t written = 0U;
-    for (size_t index = 0U; index < 16U; ++index) {
-        if (index == 4U || index == 6U || index == 8U || index == 10U)
-            output[written++] = '-';
-        output[written++] = digits[value[index] >> 4U];
-        output[written++] = digits[value[index] & 0x0fU];
-    }
-    output[written] = '\0';
-}
-
 static bool json_uuid(FILE *output, const uint8_t *value, size_t size) {
     if (value == NULL || size != 16U)
         return fputs("null", output) >= 0;
     char uuid[37];
-    format_uuid(value, uuid);
+    edge_format_uuid_bytes(value, uuid);
     return json_string(output, uuid);
 }
 
@@ -104,6 +93,12 @@ static const char *protocol_name(iot_edge_v1_Protocol value) {
         return "S7";
     case iot_edge_v1_Protocol_PROTOCOL_SL651:
         return "SL651";
+    case iot_edge_v1_Protocol_PROTOCOL_MC:
+        return "MC";
+    case iot_edge_v1_Protocol_PROTOCOL_FINS:
+        return "FINS";
+    case iot_edge_v1_Protocol_PROTOCOL_DLT645:
+        return "DLT645";
     case iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO:
         return "External IO";
     default:
@@ -227,6 +222,20 @@ static bool write_device(FILE *output,
     return fputc('}', output) != EOF;
 }
 
+static bool is_point_item(const iot_edge_v1_ConfigItem *item) {
+    switch (item->which_item) {
+    case iot_edge_v1_ConfigItem_modbus_register_tag:
+    case iot_edge_v1_ConfigItem_s7_area_tag:
+    case iot_edge_v1_ConfigItem_industrial_point_tag:
+    case iot_edge_v1_ConfigItem_external_io_tag:
+    case iot_edge_v1_ConfigItem_derived_point_tag:
+    case iot_edge_v1_ConfigItem_sl651_element_tag:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool write_point(FILE *output, const iot_edge_v1_ConfigItem *item) {
     if (fputc('{', output) == EOF)
         return false;
@@ -263,6 +272,24 @@ static bool write_point(FILE *output, const iot_edge_v1_ConfigItem *item) {
                     point->scale, point->decimals) < 0 ||
             !write_bool_field(output, "writable", point->writable, true))
             return false;
+    } else if (item->which_item == iot_edge_v1_ConfigItem_industrial_point_tag) {
+        const iot_edge_v1_IndustrialPointConfig *point = &item->item.industrial_point;
+        if (!write_string_field(output, "kind", "industrial", false) ||
+            !write_uuid_field(output, "deviceId", &point->device_id, true) ||
+            !write_string_field(output, "elementId", point->element_id, true) ||
+            !write_string_field(output, "name", point->name, true) ||
+            !write_string_field(output, "unit", point->unit, true) ||
+            !write_string_field(output, "area", point->area, true) ||
+            !write_string_field(output, "identifier", point->identifier, true) ||
+            !write_uint_field(output, "address", point->address, true) ||
+            !write_uint_field(output, "bit", point->bit, true) ||
+            !write_uint_field(output, "length", point->length, true) ||
+            !write_string_field(output, "dataType", point->data_type, true) ||
+            !write_string_field(output, "byteOrder", point->byte_order, true) ||
+            fprintf(output, ",\"scale\":%.17g,\"decimals\":%" PRId32,
+                    point->scale, point->decimals) < 0 ||
+            !write_bool_field(output, "writable", point->writable, true))
+            return false;
     } else if (item->which_item == iot_edge_v1_ConfigItem_external_io_tag) {
         const iot_edge_v1_ExternalIoPointConfig *point = &item->item.external_io;
         const char *kind = point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DI ? "DI" :
@@ -282,9 +309,38 @@ static bool write_point(FILE *output, const iot_edge_v1_ConfigItem *item) {
             !write_bool_field(output, "writable",
                 point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO, true))
             return false;
-    } else {
-        if (!write_string_field(output, "kind", "sl651", false))
+    } else if (item->which_item == iot_edge_v1_ConfigItem_derived_point_tag) {
+        const iot_edge_v1_DerivedPointConfig *point = &item->item.derived_point;
+        const char *data_type = point->data_type[0] != '\0'
+            ? point->data_type
+            : (point->boolean_result ? "BOOL" : "DOUBLE");
+        if (!write_string_field(output, "kind", "derived", false) ||
+            !write_uuid_field(output, "deviceId", &point->device_id, true) ||
+            !write_string_field(output, "elementId", point->point_id, true) ||
+            !write_string_field(output, "name", point->name, true) ||
+            !write_string_field(output, "unit", point->unit, true) ||
+            !write_string_field(output, "derivedKind", point->kind, true) ||
+            !write_string_field(output, "expression", point->expression, true) ||
+            !write_string_field(output, "dataType", data_type, true) ||
+            !write_bool_field(output, "hidden", point->hidden, true) ||
+            !write_bool_field(output, "writable", false, true))
             return false;
+    } else if (item->which_item == iot_edge_v1_ConfigItem_sl651_element_tag) {
+        const iot_edge_v1_Sl651ElementConfig *point = &item->item.sl651_element;
+        if (!write_string_field(output, "kind", "sl651", false) ||
+            !write_uuid_field(output, "deviceId", &point->device_id, true) ||
+            !write_string_field(output, "elementId", point->element_id, true) ||
+            !write_string_field(output, "name", point->name, true) ||
+            !write_string_field(output, "unit", point->unit, true) ||
+            !write_string_field(output, "functionCode", point->function_code, true) ||
+            !write_string_field(output, "dataType", point->encoding, true) ||
+            !write_uint_field(output, "length", point->length, true) ||
+            fprintf(output, ",\"scale\":1,\"decimals\":%" PRIu32,
+                    point->digits) < 0 ||
+            !write_bool_field(output, "writable", point->writable, true))
+            return false;
+    } else {
+        return false;
     }
     return fputc('}', output) != EOF;
 }
@@ -333,8 +389,7 @@ static bool write_config(FILE *output, const edge_runtime_config *config) {
     if (config != NULL) {
         for (uint32_t index = 0U; index < config->item_count; ++index) {
             const iot_edge_v1_ConfigItem *item = &config->items[index];
-            if (item->which_item == iot_edge_v1_ConfigItem_endpoint_tag ||
-                item->which_item == iot_edge_v1_ConfigItem_device_tag)
+            if (!is_point_item(item))
                 continue;
             if ((comma && fputc(',', output) == EOF) || !write_point(output, item))
                 return false;
@@ -418,8 +473,13 @@ bool edge_status_write(const edge_status_snapshot *snapshot) {
         return false;
     const bool rendered = edge_status_render(output, snapshot);
     const bool flushed = rendered && fflush(output) == 0;
-    const bool closed = fclose(output) == 0;
-    const bool renamed = flushed && closed && rename(temporary, EDGE_STATUS_PATH) == 0;
+#ifdef _WIN32
+    const bool synced = flushed && _commit(_fileno(output)) == 0;
+#else
+    const bool synced = flushed && fsync(fileno(output)) == 0;
+#endif
+    const bool closed = fclose(output) == 0 && synced;
+    const bool renamed = closed && rename(temporary, EDGE_STATUS_PATH) == 0;
     if (!renamed)
         edge_unlink(temporary);
     return renamed;

@@ -18,13 +18,53 @@
 #include "edge.pb.h"
 #include "edge_config.h"
 #include "edge_protocol.h"
+#include "edge_util.h"
 #include "log.h"
 #include "edge_sha256.h"
 
 #define EDGE_TMPFS_MIN_FREE_PERCENT 15U
+#define EDGE_MAX_ACTIVE_SPOOLS (EDGE_MAX_PLATFORMS * 2U)
+
+static edge_spool *active_spools[EDGE_MAX_ACTIVE_SPOOLS];
+
+static void register_active_spool(edge_spool *spool) {
+    if (spool == NULL)
+        return;
+    for (size_t index = 0U; index < EDGE_MAX_ACTIVE_SPOOLS; ++index) {
+        if (active_spools[index] == spool)
+            return;
+    }
+    for (size_t index = 0U; index < EDGE_MAX_ACTIVE_SPOOLS; ++index) {
+        if (active_spools[index] == NULL) {
+            active_spools[index] = spool;
+            return;
+        }
+    }
+}
+
+static void unregister_active_spool(edge_spool *spool) {
+    if (spool == NULL)
+        return;
+    for (size_t index = 0U; index < EDGE_MAX_ACTIVE_SPOOLS; ++index) {
+        if (active_spools[index] == spool)
+            active_spools[index] = NULL;
+    }
+}
+
+static edge_spool *find_active_spool(const uint8_t platform_id[16]) {
+    if (platform_id == NULL)
+        return NULL;
+    for (size_t index = 0U; index < EDGE_MAX_ACTIVE_SPOOLS; ++index) {
+        edge_spool *spool = active_spools[index];
+        if (spool != NULL && memcmp(spool->platform_id, platform_id, 16U) == 0)
+            return spool;
+    }
+    return NULL;
+}
 
 static bool path_join(char *output, size_t capacity, const char *left, const char *right);
 static uint8_t *read_file(const char *path, size_t maximum, size_t *size);
+static bool parse_id_name(const char *name, uint8_t id[16]);
 
 static bool protected_outbox_message(const char *path) {
     size_t size = 0;
@@ -44,6 +84,18 @@ static bool protected_outbox_message(const char *path) {
     return protected;
 }
 
+static bool is_protected_candidate(const edge_spool *spool, const char *entry_name,
+                                   const char *path, off_t file_size) {
+    uint8_t message_id[16];
+    if (spool != NULL && parse_id_name(entry_name, message_id)) {
+        const edge_memory_message *cached =
+            edge_memory_outbox_find(&spool->outbox, message_id);
+        if (cached != NULL && cached->payload_size == (size_t)file_size)
+            return cached->priority;
+    }
+    return protected_outbox_message(path);
+}
+
 static bool find_oldest_outbox(char *output, size_t capacity) {
     DIR *root = opendir(EDGE_SPOOL_ROOT);
     if (root == NULL)
@@ -60,6 +112,11 @@ static bool find_oldest_outbox(char *output, size_t capacity) {
                        platform->d_name) ||
             !path_join(outbox_path, sizeof(outbox_path), platform_path, "outbox"))
             continue;
+        uint8_t platform_id[16];
+        const edge_spool *spool =
+            edge_parse_uuid_bytes(platform->d_name, platform_id)
+                ? find_active_spool(platform_id)
+                : NULL;
         DIR *outbox = opendir(outbox_path);
         if (outbox == NULL)
             continue;
@@ -70,7 +127,8 @@ static bool find_oldest_outbox(char *output, size_t capacity) {
             char candidate[256];
             struct stat info;
             if (!path_join(candidate, sizeof(candidate), outbox_path, entry->d_name) ||
-                lstat(candidate, &info) != 0 || !S_ISREG(info.st_mode) || protected_outbox_message(candidate))
+                lstat(candidate, &info) != 0 || !S_ISREG(info.st_mode) ||
+                is_protected_candidate(spool, entry->d_name, candidate, info.st_size))
                 continue;
             if (!found || info.st_mtime < oldest) {
                 const size_t length = strlen(candidate);
@@ -229,21 +287,14 @@ static bool decode_message(const pb_msgdesc_t *fields, const uint8_t *data,
 }
 
 static void id_name(const uint8_t id[16], char output[36]) {
-    static const char digits[] = "0123456789abcdef";
-    for (size_t index = 0; index < 16U; ++index) {
-        output[index * 2U] = digits[id[index] >> 4U];
-        output[index * 2U + 1U] = digits[id[index] & 0x0fU];
-    }
+    edge_bytes_to_hex(id, 16U, output, 33U);
     memcpy(output + 32U, ".pb", 4U);
 }
 
 static bool parse_id_name(const char *name, uint8_t id[16]) {
-    if (strlen(name) != 35U || strcmp(name + 32U, ".pb") != 0)
+    if (name == NULL || strlen(name) != 35U || strcmp(name + 32U, ".pb") != 0)
         return false;
-    char uuid[37];
-    snprintf(uuid, sizeof(uuid), "%.8s-%.4s-%.4s-%.4s-%.12s",
-             name, name + 8U, name + 12U, name + 16U, name + 20U);
-    return edge_config_parse_uuid(uuid, id);
+    return edge_hex_to_bytes(name, id, 16U);
 }
 
 static bool verify_item_blob(const uint8_t *payload, size_t payload_size,
@@ -527,12 +578,15 @@ bool edge_spool_init(edge_spool *spool, const uint8_t platform_id[16],
     spool->outbox.maximum_bytes = 8U * 1024U * 1024U;
     const bool restored = load_outbox(spool);
     spool->outbox.maximum_bytes = outbox_maximum_bytes;
+    if (restored)
+        register_active_spool(spool);
     return restored;
 }
 
 void edge_spool_free(edge_spool *spool) {
     if (spool == NULL)
         return;
+    unregister_active_spool(spool);
     edge_memory_config_free(&spool->staging_config);
     edge_memory_config_free(&spool->active_config);
     edge_memory_outbox_free(&spool->outbox);
@@ -703,9 +757,10 @@ bool edge_spool_outbox_put_priority(edge_spool *spool,
     if (spool == NULL || message_id == NULL || envelope == NULL ||
         envelope_size == 0U || envelope_size > EDGENODE_MAX_WS_MESSAGE)
         return false;
-    for (const edge_memory_message *existing = spool->outbox.head; existing; existing = existing->next)
-        if (!memcmp(existing->message_id, message_id, 16U))
-            return !existing->priority || same_protected_payload(existing, envelope, envelope_size);
+    const edge_memory_message *existing =
+        edge_memory_outbox_find(&spool->outbox, message_id);
+    if (existing != NULL)
+        return !existing->priority || same_protected_payload(existing, envelope, envelope_size);
     if (envelope_size > spool->outbox.maximum_bytes)
         return false;
     (void)edge_spool_outbox_first(spool);

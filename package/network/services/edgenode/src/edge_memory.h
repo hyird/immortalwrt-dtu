@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #define EDGE_MAX_CONFIG_ITEMS 512U
+#define EDGE_OUTBOX_HASH_BUCKETS 64U
 
 typedef struct {
     uint8_t digest[32];
@@ -23,6 +24,8 @@ typedef struct {
 
 typedef struct edge_memory_message {
     struct edge_memory_message *next;
+    struct edge_memory_message *prev;
+    struct edge_memory_message *hash_next;
     uint8_t message_id[16];
     size_t payload_size;
     uint64_t sent_at_ms;
@@ -39,6 +42,8 @@ typedef struct {
     size_t in_flight;
     edge_memory_message *head;
     edge_memory_message *tail;
+    edge_memory_message *priority_tail;
+    edge_memory_message *buckets[EDGE_OUTBOX_HASH_BUCKETS];
 } edge_memory_outbox;
 
 void edge_memory_config_free(edge_memory_config_set *set);
@@ -60,6 +65,8 @@ bool edge_memory_outbox_put_priority(edge_memory_outbox *outbox,
                                      const uint8_t *payload, size_t payload_size,
                                      bool priority);
 const edge_memory_message *edge_memory_outbox_first(const edge_memory_outbox *outbox);
+const edge_memory_message *edge_memory_outbox_find(
+    const edge_memory_outbox *outbox, const uint8_t message_id[16]);
 const edge_memory_message *edge_memory_outbox_oldest_regular(
     const edge_memory_outbox *outbox);
 const edge_memory_message *edge_memory_outbox_next(edge_memory_outbox *outbox,

@@ -17,6 +17,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "edge_util.h"
+
 typedef struct { uint8_t *bytes; size_t offset, size, capacity; } dtu_queue;
 typedef struct {
     int fd;
@@ -26,11 +28,7 @@ typedef struct {
     dtu_queue queue;
 } dtu_peer;
 
-static uint64_t clock_ms(void) {
-    struct timespec value;
-    clock_gettime(CLOCK_MONOTONIC, &value);
-    return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
-}
+#define clock_ms edge_monotonic_ms
 
 static void disconnect_peer(dtu_peer *peer) {
     if (peer->fd >= 0) close(peer->fd);
@@ -133,14 +131,7 @@ static int tcp_socket(const char *host, uint32_t port, bool listener) {
     return fd;
 }
 
-static speed_t baud_speed(uint32_t baud) {
-    switch (baud) {
-    case 300: return B300; case 600: return B600; case 1200: return B1200;
-    case 2400: return B2400; case 4800: return B4800; case 9600: return B9600;
-    case 19200: return B19200; case 38400: return B38400; case 57600: return B57600;
-    case 115200: return B115200; case 230400: return B230400; default: return 0;
-    }
-}
+#define baud_speed edge_serial_baud_speed
 
 static int serial_open(const iot_edge_v1_SerialSettings *settings) {
     int fd = open(settings->channel, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);

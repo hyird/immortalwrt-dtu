@@ -308,7 +308,9 @@ typedef struct {
 
 struct edge_ws_bridge {
     struct ev_loop *loop;
+    struct ev_io io;
     struct ev_timer timer;
+    struct ev_timer watchdog;
     pid_t pid;
     int fd;
     int socket_fd;
@@ -324,6 +326,7 @@ struct edge_ws_bridge {
     bool notified;
     bool polling;
     bool retired;
+    bool cooldown;
     uint16_t close_code;
     char close_reason[124];
     void *user;
@@ -335,8 +338,10 @@ struct edge_ws_bridge {
 typedef struct {
     edge_native_transport native;
     struct ev_loop *loop;
+    struct ev_io io;
+    struct ev_timer timer;
+    struct ev_timer progress_timer;
     int fd;
-    ev_tstamp next_progress;
 } edge_ws_worker;
 
 static bool ipc_send(int fd, uint32_t type, uint32_t code,
@@ -381,7 +386,9 @@ static int ipc_receive(int fd, edge_ws_ipc *message, int *passed_fd) {
 static void worker_opened(void *user) {
     edge_ws_worker *worker = user;
     const int socket_fd = lws_get_socket_fd(worker->native.socket);
-    edge_ws_ipc message = {.type = IPC_OPEN};
+    edge_ws_ipc message;
+    memset(&message, 0, offsetof(edge_ws_ipc, bytes));
+    message.type = IPC_OPEN;
     struct iovec iov = {.iov_base = &message, .iov_len = offsetof(edge_ws_ipc, bytes)};
     union { struct cmsghdr align; unsigned char bytes[CMSG_SPACE(sizeof(int))]; } control = {0};
     struct msghdr header = {.msg_iov = &iov, .msg_iovlen = 1,
@@ -398,6 +405,10 @@ static void worker_opened(void *user) {
 static void worker_sent(void *user, size_t size) {
     edge_ws_worker *worker = user;
     if (!ipc_send(worker->fd, IPC_SENT, (uint32_t)size, NULL, 0)) _exit(1);
+    if (!ev_is_active(&worker->io) && !ev_is_active(&worker->timer) &&
+        worker->native.queued_packets < EDGE_WS_QUEUE_PACKETS &&
+        worker->native.queued_bytes <= EDGE_WS_QUEUE_LIMIT - EDGE_WS_IPC_MESSAGE_LIMIT)
+        ev_io_start(worker->loop, &worker->io);
 }
 
 static void worker_received(void *user, void *data, size_t size, bool binary) {
@@ -414,25 +425,29 @@ static void worker_closed(void *user, int code, const char *reason) {
     ev_break(worker->loop, EVBREAK_ALL);
 }
 
-static void worker_poll(struct ev_loop *loop, struct ev_timer *timer, int events) {
-    (void)loop;
-    (void)events;
-    edge_ws_worker *worker = timer->data;
-    if (ev_now(worker->loop) >= worker->next_progress) {
-        if (!ipc_send(worker->fd, IPC_PROGRESS, 0, NULL, 0)) _exit(1);
-        worker->next_progress = ev_now(worker->loop) + 1.0;
-    }
-    for (unsigned i = 0; i < EDGE_WS_IPC_BATCH; ++i) {
+static void worker_service(edge_ws_worker *worker) {
+    unsigned i = 0;
+    for (; i < EDGE_WS_IPC_BATCH; ++i) {
         /* Backpressure propagates through IPC instead of discarding accepted
          * outbound messages when the network queue is full. */
         if (worker->native.queued_packets >= EDGE_WS_QUEUE_PACKETS ||
-            worker->native.queued_bytes > EDGE_WS_QUEUE_LIMIT - EDGE_WS_IPC_MESSAGE_LIMIT)
+            worker->native.queued_bytes > EDGE_WS_QUEUE_LIMIT - EDGE_WS_IPC_MESSAGE_LIMIT) {
+            ev_io_stop(worker->loop, &worker->io);
+            if (!ev_is_active(&worker->timer)) {
+                ev_timer_set(&worker->timer, EDGE_WS_IPC_INTERVAL, 0.0);
+                ev_timer_start(worker->loop, &worker->timer);
+            }
             return;
+        }
         edge_ws_ipc message;
         int passed_fd;
         const int result = ipc_receive(worker->fd, &message, &passed_fd);
         if (passed_fd >= 0) { close(passed_fd); _exit(1); }
-        if (!result) return;
+        if (!result) {
+            if (!ev_is_active(&worker->io))
+                ev_io_start(worker->loop, &worker->io);
+            return;
+        }
         if (result < 0) _exit(0);
         if (message.type == IPC_CLOSE && message.size < 124U) {
             message.bytes[message.size] = 0;
@@ -442,6 +457,30 @@ static void worker_poll(struct ev_loop *loop, struct ev_timer *timer, int events
         if (message.type != IPC_BINARY ||
             !native_send(&worker->native, message.bytes, message.size)) _exit(1);
     }
+    ev_io_stop(worker->loop, &worker->io);
+    if (!ev_is_active(&worker->timer)) {
+        ev_timer_set(&worker->timer, EDGE_WS_IPC_INTERVAL, 0.0);
+        ev_timer_start(worker->loop, &worker->timer);
+    }
+}
+
+static void worker_io_cb(struct ev_loop *loop, struct ev_io *io, int events) {
+    (void)loop;
+    (void)events;
+    worker_service(io->data);
+}
+
+static void worker_timer_cb(struct ev_loop *loop, struct ev_timer *timer, int events) {
+    (void)loop;
+    (void)events;
+    worker_service(timer->data);
+}
+
+static void worker_progress_cb(struct ev_loop *loop, struct ev_timer *timer, int events) {
+    (void)loop;
+    (void)events;
+    edge_ws_worker *worker = timer->data;
+    if (!ipc_send(worker->fd, IPC_PROGRESS, 0, NULL, 0)) _exit(1);
 }
 
 static void worker_run(int fd, pid_t parent, const char *url, size_t limit) {
@@ -461,10 +500,14 @@ static void worker_run(int fd, pid_t parent, const char *url, size_t limit) {
     edge_ws_worker worker = {.fd = fd};
     worker.loop = ev_loop_new(EVFLAG_NOENV);
     if (!worker.loop) _exit(1);
-    struct ev_timer timer;
-    ev_timer_init(&timer, worker_poll, EDGE_WS_IPC_INTERVAL, EDGE_WS_IPC_INTERVAL);
-    timer.data = &worker;
-    ev_timer_start(worker.loop, &timer);
+    ev_io_init(&worker.io, worker_io_cb, fd, EV_READ);
+    worker.io.data = &worker;
+    ev_io_start(worker.loop, &worker.io);
+    ev_timer_init(&worker.timer, worker_timer_cb, EDGE_WS_IPC_INTERVAL, 0.0);
+    worker.timer.data = &worker;
+    ev_timer_init(&worker.progress_timer, worker_progress_cb, 1.0, 1.0);
+    worker.progress_timer.data = &worker;
+    ev_timer_start(worker.loop, &worker.progress_timer);
     if (!native_connect(&worker.native, worker.loop, url, limit, &worker,
                         worker_opened, worker_received, worker_closed)) _exit(1);
     ev_run(worker.loop, 0);
@@ -473,75 +516,139 @@ static void worker_run(int fd, pid_t parent, const char *url, size_t limit) {
     _exit(0);
 }
 
+static void bridge_update_io(edge_ws_bridge *bridge) {
+    if (bridge->retired || bridge->notified || bridge->fd < 0) {
+        ev_io_stop(bridge->loop, &bridge->io);
+        return;
+    }
+    int events = 0;
+    if (!bridge->cooldown) {
+        events |= EV_READ;
+        if ((bridge->head && !bridge->closing) ||
+            (bridge->closing && !bridge->close_sent))
+            events |= EV_WRITE;
+    }
+    if (events == 0) {
+        ev_io_stop(bridge->loop, &bridge->io);
+    } else if (!ev_is_active(&bridge->io) ||
+               (bridge->io.events & (EV_READ | EV_WRITE)) != events) {
+        ev_io_stop(bridge->loop, &bridge->io);
+        ev_io_set(&bridge->io, bridge->fd, events);
+        ev_io_start(bridge->loop, &bridge->io);
+    }
+}
+
 static void bridge_notify(edge_ws_bridge *bridge, int code, const char *reason) {
     if (bridge->notified) return;
     bridge->notified = true;
     bridge->connected = false;
+    ev_io_stop(bridge->loop, &bridge->io);
     ev_timer_stop(bridge->loop, &bridge->timer);
+    ev_timer_stop(bridge->loop, &bridge->watchdog);
     bridge->closed(bridge->user, code, reason);
 }
 
-static void bridge_poll(struct ev_loop *loop, struct ev_timer *timer, int events) {
+static void bridge_service(edge_ws_bridge *bridge) {
+    if (bridge->retired || bridge->notified) return;
+    bridge->polling = true;
+    unsigned received_count = 0;
+    if (!bridge->cooldown) {
+        for (; received_count < EDGE_WS_IPC_BATCH && !bridge->notified; ++received_count) {
+            edge_ws_ipc message;
+            int passed_fd;
+            const int result = ipc_receive(bridge->fd, &message, &passed_fd);
+            if (!result) break;
+            if (result < 0) {
+                bridge_notify(bridge, 1006, "platform transport worker stopped");
+                break;
+            }
+            bridge->last_progress = ev_now(bridge->loop);
+            if (message.type == IPC_OPEN && !bridge->connected && !message.size && passed_fd >= 0) {
+                bridge->socket_fd = passed_fd;
+                bridge->connected = true;
+                bridge->opened(bridge->user);
+                bridge->socket_fd = -1;
+            } else if (message.type == IPC_SENT && !message.size && message.code &&
+                       message.code <= bridge->bytes && bridge->packets) {
+                bridge->bytes -= message.code;
+                --bridge->packets;
+            } else if ((message.type == IPC_BINARY || message.type == IPC_TEXT) &&
+                       bridge->connected && message.size <= bridge->limit) {
+                if (!bridge->closing)
+                    bridge->received(bridge->user, message.bytes, message.size,
+                                     message.type == IPC_BINARY);
+            } else if (message.type == IPC_PROGRESS && !message.size) {
+                /* Worker progress is separate from platform/application liveness. */
+            } else if (message.type == IPC_CLOSE && message.size < 124U) {
+                message.bytes[message.size] = 0;
+                bridge_notify(bridge, (int)message.code, (char *)message.bytes);
+            } else {
+                bridge_notify(bridge, 1006, "invalid platform worker message");
+            }
+            if (passed_fd >= 0) close(passed_fd);
+            /* Callbacks may destroy or replace the public transport. */
+            if (bridge->retired) break;
+        }
+    }
+    bool send_blocked = false;
+    unsigned sent_count = 0;
+    if (!bridge->retired && !bridge->notified) {
+        for (; sent_count < EDGE_WS_IPC_BATCH && bridge->head && !bridge->closing; ++sent_count) {
+            edge_ws_packet *packet = bridge->head;
+            if (!ipc_send(bridge->fd, IPC_BINARY, 0, packet->bytes, packet->size)) {
+                send_blocked = true;
+                break;
+            }
+            bridge->head = packet->next;
+            if (!bridge->head) bridge->tail = NULL;
+            free(packet);
+        }
+        if (bridge->closing && !bridge->close_sent) {
+            if (ipc_send(bridge->fd, IPC_CLOSE, bridge->close_code,
+                         bridge->close_reason, strlen(bridge->close_reason)))
+                bridge->close_sent = true;
+            else
+                send_blocked = true;
+        }
+    }
+    if (!bridge->retired && !bridge->notified) {
+        if (received_count == EDGE_WS_IPC_BATCH ||
+            sent_count == EDGE_WS_IPC_BATCH || send_blocked) {
+            bridge->cooldown = true;
+            if (!ev_is_active(&bridge->timer)) {
+                ev_timer_set(&bridge->timer, EDGE_WS_IPC_INTERVAL, 0.0);
+                ev_timer_start(bridge->loop, &bridge->timer);
+            }
+        }
+        bridge_update_io(bridge);
+    }
+    bridge->polling = false;
+}
+
+static void bridge_io_cb(struct ev_loop *loop, struct ev_io *io, int events) {
+    (void)loop;
+    (void)events;
+    bridge_service(io->data);
+}
+
+static void bridge_cooldown_cb(struct ev_loop *loop, struct ev_timer *timer, int events) {
     (void)loop;
     (void)events;
     edge_ws_bridge *bridge = timer->data;
-    bridge->polling = true;
-    for (unsigned i = 0; i < EDGE_WS_IPC_BATCH && !bridge->notified; ++i) {
-        edge_ws_ipc message;
-        int passed_fd;
-        const int result = ipc_receive(bridge->fd, &message, &passed_fd);
-        if (!result) break;
-        if (result < 0) {
-            bridge_notify(bridge, 1006, "platform transport worker stopped");
-            break;
-        }
-        bridge->last_progress = ev_now(bridge->loop);
-        if (message.type == IPC_OPEN && !bridge->connected && !message.size && passed_fd >= 0) {
-            bridge->socket_fd = passed_fd;
-            bridge->connected = true;
-            bridge->opened(bridge->user);
-            bridge->socket_fd = -1;
-        } else if (message.type == IPC_SENT && !message.size && message.code &&
-                   message.code <= bridge->bytes && bridge->packets) {
-            bridge->bytes -= message.code;
-            --bridge->packets;
-        } else if ((message.type == IPC_BINARY || message.type == IPC_TEXT) &&
-                   bridge->connected && message.size <= bridge->limit) {
-            if (!bridge->closing)
-                bridge->received(bridge->user, message.bytes, message.size,
-                                 message.type == IPC_BINARY);
-        } else if (message.type == IPC_PROGRESS && !message.size) {
-            /* Worker progress is separate from platform/application liveness. */
-        } else if (message.type == IPC_CLOSE && message.size < 124U) {
-            message.bytes[message.size] = 0;
-            bridge_notify(bridge, (int)message.code, (char *)message.bytes);
-        } else {
-            bridge_notify(bridge, 1006, "invalid platform worker message");
-        }
-        if (passed_fd >= 0) close(passed_fd);
-        /* Callbacks may destroy or replace the public transport. */
-        if (bridge->retired) break;
-    }
+    bridge->cooldown = false;
+    bridge_service(bridge);
+}
+
+static void bridge_watchdog_cb(struct ev_loop *loop, struct ev_timer *timer, int events) {
+    (void)loop;
+    (void)events;
+    edge_ws_bridge *bridge = timer->data;
     if (!bridge->retired && !bridge->notified &&
         ev_now(bridge->loop) - bridge->last_progress > (bridge->connected ? 10.0 : 30.0)) {
         if (waitpid(bridge->pid, NULL, WNOHANG) == 0)
             (void)kill(bridge->pid, SIGKILL);
         bridge_notify(bridge, 1006, "platform transport worker timed out");
     }
-    if (!bridge->retired && !bridge->notified) {
-        for (unsigned i = 0; i < EDGE_WS_IPC_BATCH && bridge->head && !bridge->closing; ++i) {
-            edge_ws_packet *packet = bridge->head;
-            if (!ipc_send(bridge->fd, IPC_BINARY, 0, packet->bytes, packet->size)) break;
-            bridge->head = packet->next;
-            if (!bridge->head) bridge->tail = NULL;
-            free(packet);
-        }
-        if (bridge->closing && !bridge->close_sent &&
-            ipc_send(bridge->fd, IPC_CLOSE, bridge->close_code,
-                                        bridge->close_reason, strlen(bridge->close_reason)))
-            bridge->close_sent = true;
-    }
-    bridge->polling = false;
 }
 
 /* Reaping is asynchronous, including SIGKILL of an unresponsive resolver.
@@ -596,10 +703,15 @@ bool edge_ws_transport_connect(edge_ws_transport *transport, struct ev_loop *loo
     bridge->opened = opened;
     bridge->received = received;
     bridge->closed = closed;
-    ev_timer_init(&bridge->timer, bridge_poll, EDGE_WS_IPC_INTERVAL, EDGE_WS_IPC_INTERVAL);
+    ev_io_init(&bridge->io, bridge_io_cb, bridge->fd, EV_READ);
+    bridge->io.data = bridge;
+    ev_timer_init(&bridge->timer, bridge_cooldown_cb, EDGE_WS_IPC_INTERVAL, 0.0);
     bridge->timer.data = bridge;
+    ev_timer_init(&bridge->watchdog, bridge_watchdog_cb, 1.0, 1.0);
+    bridge->watchdog.data = bridge;
     transport->worker = bridge;
-    ev_timer_start(loop, &bridge->timer);
+    ev_io_start(loop, &bridge->io);
+    ev_timer_start(loop, &bridge->watchdog);
     return true;
 }
 
@@ -619,6 +731,8 @@ bool edge_ws_transport_send(edge_ws_transport *transport, const void *data, size
     bridge->tail = packet;
     bridge->bytes += size;
     ++bridge->packets;
+    if (!bridge->polling)
+        bridge_update_io(bridge);
     return true;
 }
 
@@ -636,6 +750,8 @@ void edge_ws_transport_close(edge_ws_transport *transport, uint16_t code, const 
     bridge->closing = true;
     bridge->close_code = code;
     snprintf(bridge->close_reason, sizeof(bridge->close_reason), "%s", reason ? reason : "");
+    if (!bridge->polling)
+        bridge_update_io(bridge);
 }
 
 void edge_ws_transport_destroy(edge_ws_transport *transport) {
@@ -644,8 +760,11 @@ void edge_ws_transport_destroy(edge_ws_transport *transport) {
     transport->worker = NULL;
     bridge->retired = true;
     bridge->connected = false;
+    ev_io_stop(bridge->loop, &bridge->io);
     ev_timer_stop(bridge->loop, &bridge->timer);
+    ev_timer_stop(bridge->loop, &bridge->watchdog);
     close(bridge->fd);
+    bridge->fd = -1;
     while (bridge->head) {
         edge_ws_packet *next = bridge->head->next;
         free(bridge->head);

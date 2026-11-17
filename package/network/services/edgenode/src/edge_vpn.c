@@ -1,7 +1,9 @@
+#define _GNU_SOURCE
 #include "edge_vpn.h"
 #include "edge_config.h"
 #include "edge_version.h"
 #include "edge_process.h"
+#include "edge_util.h"
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -14,14 +16,10 @@
 #include <unistd.h>
 
 static void set_error(char *output, size_t capacity, const char *message) {
-    if (output != NULL && capacity != 0U)
-        snprintf(output, capacity, "%s", message != NULL ? message : "VPN operation failed");
+    edge_set_error(output, capacity, message != NULL ? message : "VPN operation failed");
 }
 
-static void safe_copy(char *output, size_t capacity, const char *input) {
-    if (output != NULL && capacity != 0U)
-        snprintf(output, capacity, "%s", input != NULL ? input : "");
-}
+#define safe_copy edge_copy_text
 
 static bool write_all(int fd, const void *data, size_t size) {
     const uint8_t *bytes = data;
@@ -39,39 +37,12 @@ static bool write_all(int fd, const void *data, size_t size) {
     return true;
 }
 
-static int hex_value(char value) {
-    if (value >= '0' && value <= '9')
-        return value - '0';
-    if (value >= 'a' && value <= 'f')
-        return value - 'a' + 10;
-    if (value >= 'A' && value <= 'F')
-        return value - 'A' + 10;
-    return -1;
-}
-
 static bool hex_to_bytes(const char *input, uint8_t *output, size_t size) {
-    if (input == NULL || output == NULL || strlen(input) != size * 2U)
-        return false;
-    for (size_t index = 0U; index < size; ++index) {
-        const int high = hex_value(input[index * 2U]);
-        const int low = hex_value(input[index * 2U + 1U]);
-        if (high < 0 || low < 0)
-            return false;
-        output[index] = (uint8_t)((high << 4U) | low);
-    }
-    return true;
+    return input != NULL && strlen(input) == size * 2U &&
+           edge_hex_to_bytes(input, output, size);
 }
 
-static void bytes_to_hex(const uint8_t *input, size_t size, char *output, size_t capacity) {
-    static const char alphabet[] = "0123456789abcdef";
-    if (input == NULL || output == NULL || capacity < size * 2U + 1U)
-        return;
-    for (size_t index = 0U; index < size; ++index) {
-        output[index * 2U] = alphabet[input[index] >> 4U];
-        output[index * 2U + 1U] = alphabet[input[index] & 0x0fU];
-    }
-    output[size * 2U] = '\0';
-}
+#define bytes_to_hex edge_bytes_to_hex
 
 static int base64_value(char value) {
     if (value >= 'A' && value <= 'Z')
@@ -152,14 +123,8 @@ static bool load_or_create_private_key(const char *key_path, char output[65]) {
         return false;
 
     uint8_t random_bytes[32];
-    const int random_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (random_fd < 0 || read(random_fd, random_bytes, sizeof(random_bytes)) !=
-                              (ssize_t)sizeof(random_bytes)) {
-        if (random_fd >= 0)
-            close(random_fd);
+    if (!edge_random_bytes(random_bytes, sizeof(random_bytes)))
         return false;
-    }
-    close(random_fd);
     random_bytes[0] &= 248U;
     random_bytes[31] &= 127U;
     random_bytes[31] |= 64U;
@@ -189,31 +154,28 @@ static bool private_key_base64(const char private_hex[65], char output[45]) {
 }
 
 static bool read_public_key(const char private_key[45], char output[45]) {
-    if (mkdir("/tmp/edgenode", 0700) != 0 && errno != EEXIST)
+    int input_pipe[2] = {-1, -1};
+    int output_pipe[2] = {-1, -1};
+    if (pipe2(input_pipe, O_CLOEXEC) != 0)
         return false;
-    char input_path[] = "/tmp/edgenode/wg-private.XXXXXX";
-    char output_path[] = "/tmp/edgenode/wg-public.XXXXXX";
-    const int input = mkstemp(input_path);
-    if (input < 0)
-        return false;
-    unlink(input_path);
-    const int result = mkstemp(output_path);
-    if (result < 0) {
-        close(input);
+    if (pipe2(output_pipe, O_CLOEXEC) != 0) {
+        close(input_pipe[0]);
+        close(input_pipe[1]);
         return false;
     }
-    unlink(output_path);
     char private_line[46];
     snprintf(private_line, sizeof(private_line), "%s\n", private_key);
-    bool success = write_all(input, private_line, strlen(private_line)) &&
-                   lseek(input, 0, SEEK_SET) == 0;
+    bool success = write_all(input_pipe[1], private_line, strlen(private_line));
+    close(input_pipe[1]);
+    input_pipe[1] = -1;
     const char *const command[] = {"wg", "pubkey", NULL};
     if (success)
-        success = edge_process_run(command, input, result) == 0 &&
-                  lseek(result, 0, SEEK_SET) == 0;
+        success = edge_process_run(command, input_pipe[0], output_pipe[1]) == 0;
+    close(input_pipe[0]);
+    close(output_pipe[1]);
     char public_line[64] = {0};
     if (success) {
-        const ssize_t count = read(result, public_line, sizeof(public_line) - 1U);
+        const ssize_t count = read(output_pipe[0], public_line, sizeof(public_line) - 1U);
         success = count > 0;
         if (success) {
             public_line[count] = '\0';
@@ -222,8 +184,7 @@ static bool read_public_key(const char private_key[45], char output[45]) {
             success = base64_decode_key(public_line, public_bytes);
         }
     }
-    close(result);
-    close(input);
+    close(output_pipe[0]);
     if (success)
         safe_copy(output, 45U, public_line);
     return success;
@@ -310,6 +271,26 @@ static int run_namespace(const edge_vpn_session *session, const char *const args
     return edge_process_run_timeout(command, -1, output, 15000U);
 }
 
+static bool run_ip_batch(const char *namespace_name, const char *commands) {
+    int input_pipe[2] = {-1, -1};
+    if (commands == NULL || pipe2(input_pipe, O_CLOEXEC) != 0)
+        return false;
+    const bool written = write_all(input_pipe[1], commands, strlen(commands));
+    close(input_pipe[1]);
+    int result = -1;
+    if (written) {
+        if (namespace_name != NULL && namespace_name[0] != '\0') {
+            const char *const argv[] = {"ip", "-netns", namespace_name, "-batch", "-", NULL};
+            result = edge_process_run_timeout(argv, input_pipe[0], -1, 15000U);
+        } else {
+            const char *const argv[] = {"ip", "-batch", "-", NULL};
+            result = edge_process_run_timeout(argv, input_pipe[0], -1, 15000U);
+        }
+    }
+    close(input_pipe[0]);
+    return result == 0;
+}
+
 static bool option(struct uci_context *context, struct uci_package *package,
                     struct uci_section *section, const char *name, const char *value) {
     struct uci_ptr pointer = {.p = package, .s = section, .option = name, .value = value};
@@ -360,13 +341,17 @@ static bool firewall_resource(edge_vpn_session *session, bool enabled) {
 
 static bool collect_transfer(edge_vpn_session *session) {
     if (!session->enabled) return false;
-    char temporary[] = "/tmp/edgenode/vpn-transfer.XXXXXX";
-    const int file = mkstemp(temporary); if (file < 0) return false;
+    int output_pipe[2] = {-1, -1};
+    if (pipe2(output_pipe, O_CLOEXEC) != 0) return false;
     const char *const command[] = {"wg", "show", "wg", "transfer", NULL};
-    bool success = run_namespace(session, command, file) == 0;
+    bool success = run_namespace(session, command, output_pipe[1]) == 0;
+    close(output_pipe[1]);
     char data[192] = {0};
-    if (success) { success = lseek(file, 0, SEEK_SET) == 0; if (success) success = read(file, data, sizeof(data) - 1U) > 0; }
-    close(file); unlink(temporary);
+    if (success) {
+        const ssize_t count = read(output_pipe[0], data, sizeof(data) - 1U);
+        success = count > 0;
+    }
+    close(output_pipe[0]);
     char public_key[45]; unsigned long long rx = 0U, tx = 0U;
     if (!success || sscanf(data, "%44s %llu %llu", public_key, &rx, &tx) != 3) return false;
     edge_vpn_traffic *traffic = &session->traffic;
@@ -380,9 +365,7 @@ bool edge_vpn_init(edge_vpn_session *session, const uint8_t platform_id[16], siz
     if (!session) return false;
     memset(session, 0, sizeof(*session));
     if (!edge_vpn_plan_init(&session->plan, platform_id, slot)) return false;
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
-        session->traffic.ack_ms = (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+    session->traffic.ack_ms = edge_monotonic_ms();
     return true;
 }
 
@@ -514,40 +497,58 @@ bool edge_vpn_apply(edge_vpn_session *session, const iot_edge_v1_VpnConfigReques
     const char *const namespace_add[] = {"ip", "netns", "add", session->plan.namespace_name, NULL};
     const char *const wg_add[] = {"ip", "link", "add", session->plan.transport_link, "type", "wireguard", NULL};
     const char *const wg_set[] = {"wg", "set", session->plan.transport_link, "private-key", secret, "peer", request->hub_public_key, "endpoint", endpoint, "allowed-ips", "100.96.0.0/11,172.16.0.0/12", "persistent-keepalive", "30", NULL};
-    const char *const wg_move[] = {"ip", "link", "set", session->plan.transport_link, "netns", session->plan.namespace_name, NULL};
-    const char *const wg_rename[] = {"ip", "link", "set", session->plan.transport_link, "name", "wg", NULL};
-    const char *const links[] = {"ip", "link", "add", session->plan.host_link, "type", "veth", "peer", "name", peer_link, NULL};
-    const char *const peer_move[] = {"ip", "link", "set", peer_link, "netns", session->plan.namespace_name, NULL};
-    const char *const peer_rename[] = {"ip", "link", "set", peer_link, "name", "uplink", NULL};
-    const char *const host_address[] = {"ip", "addr", "add", session->plan.host_address, "dev", session->plan.host_link, NULL};
-    const char *const host_up[] = {"ip", "link", "set", session->plan.host_link, "up", NULL};
-    const char *const peer_address[] = {"ip", "addr", "add", session->plan.peer_address, "dev", "uplink", NULL};
-    const char *const peer_up[] = {"ip", "link", "set", "uplink", "up", NULL};
-    const char *const wg_address[] = {"ip", "addr", "add", request->edge_address, "dev", "wg", NULL};
-    const char *const wg_up[] = {"ip", "link", "set", "wg", "mtu", "1280", "up", NULL};
-    const char *const loopback[] = {"ip", "link", "set", "lo", "up", NULL};
-    const char *const default_route[] = {"ip", "route", "add", "default", "via", session->plan.host_ip, "dev", "uplink", NULL};
-    const char *const overlay[] = {"ip", "route", "add", "100.96.0.0/11", "dev", "wg", NULL};
-    const char *const virtual_routes[] = {"ip", "route", "add", "172.16.0.0/12", "dev", "wg", NULL};
-    // DNAT targets may themselves be inside another platform's virtual pool.
-    // Incoming WG packets always use the LAN transit table after translation.
-    const char *const lan_route[] = {"ip", "route", "add", "table", "200", "default", "via", session->plan.host_ip, "dev", "uplink", NULL};
-    const char *const lan_rule[] = {"ip", "rule", "add", "priority", "100", "iif", "wg", "lookup", "200", NULL};
     const char *const forwarding[] = {"sysctl", "-q", "-w", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=0", "net.ipv4.conf.uplink.rp_filter=0", "net.ipv4.conf.wg.rp_filter=0", "net.ipv4.tcp_mtu_probing=1", NULL};
     const char *const nft[] = {"nft", "-f", session->plan.rules_path, NULL};
-    success = success && run(namespace_add) == 0 && run(wg_add) == 0 && run(wg_set) == 0;
+    char host_batch[512], ns_setup_batch[512], ns_route_batch[512];
+    const int host_batch_len = snprintf(
+        host_batch, sizeof(host_batch),
+        "link set %s netns %s\n"
+        "link add %s type veth peer name %s\n"
+        "link set %s netns %s\n"
+        "addr add %s dev %s\n"
+        "link set %s up\n",
+        session->plan.transport_link, session->plan.namespace_name,
+        session->plan.host_link, peer_link,
+        peer_link, session->plan.namespace_name,
+        session->plan.host_address, session->plan.host_link,
+        session->plan.host_link);
+    const int ns_setup_len = snprintf(
+        ns_setup_batch, sizeof(ns_setup_batch),
+        "link set %s name wg\n"
+        "link set %s name uplink\n"
+        "addr add %s dev uplink\n"
+        "link set uplink up\n"
+        "addr add %s dev wg\n"
+        "link set lo up\n"
+        "route add default via %s dev uplink\n",
+        session->plan.transport_link, peer_link,
+        session->plan.peer_address, request->edge_address,
+        session->plan.host_ip);
+    // DNAT targets may themselves be inside another platform's virtual pool.
+    // Incoming WG packets always use the LAN transit table after translation.
+    const int ns_route_len = snprintf(
+        ns_route_batch, sizeof(ns_route_batch),
+        "link set wg mtu 1280 up\n"
+        "route add 100.96.0.0/11 dev wg\n"
+        "route add 172.16.0.0/12 dev wg\n"
+        "route add table 200 default via %s dev uplink\n"
+        "rule add priority 100 iif wg lookup 200\n",
+        session->plan.host_ip);
+    success = success && host_batch_len > 0 && (size_t)host_batch_len < sizeof(host_batch) &&
+              ns_setup_len > 0 && (size_t)ns_setup_len < sizeof(ns_setup_batch) &&
+              ns_route_len > 0 && (size_t)ns_route_len < sizeof(ns_route_batch) &&
+              run(namespace_add) == 0 && run(wg_add) == 0 && run(wg_set) == 0;
     unlink(secret);
-    success = success && run(wg_move) == 0 && run_namespace(session, wg_rename, -1) == 0 && run(links) == 0 && run(peer_move) == 0 &&
-        run_namespace(session, peer_rename, -1) == 0 && run(host_address) == 0 && run(host_up) == 0 && run_namespace(session, peer_address, -1) == 0 &&
-        run_namespace(session, peer_up, -1) == 0 && run_namespace(session, wg_address, -1) == 0 && run_namespace(session, loopback, -1) == 0 &&
-        run_namespace(session, default_route, -1) == 0 &&
-        write_atomic(session->plan.rules_path, rules) && run_namespace(session, nft, -1) == 0;
+    success = success && run_ip_batch(NULL, host_batch) &&
+              run_ip_batch(session->plan.namespace_name, ns_setup_batch) &&
+              write_atomic(session->plan.rules_path, rules) &&
+              run_namespace(session, nft, -1) == 0;
     char root_rules[256]; snprintf(root_rules, sizeof(root_rules), "iifname \"%s\" ip saddr %s masquerade\n", session->plan.host_link, session->plan.peer_host);
     // Install restrictions and root return-path translation before allowing WG traffic.
-    success = success && write_atomic(session->plan.root_rules_path, root_rules) && firewall_resource(session, true) &&
-        run_namespace(session, wg_up, -1) == 0 && run_namespace(session, overlay, -1) == 0 &&
-        run_namespace(session, virtual_routes, -1) == 0 && run_namespace(session, lan_route, -1) == 0 &&
-        run_namespace(session, lan_rule, -1) == 0 && run_namespace(session, forwarding, -1) == 0;
+    success = success && write_atomic(session->plan.root_rules_path, root_rules) &&
+              firewall_resource(session, true) &&
+              run_ip_batch(session->plan.namespace_name, ns_route_batch) &&
+              run_namespace(session, forwarding, -1) == 0;
     if (!success) { edge_vpn_shutdown(session); set_error(error, error_size, "cannot apply platform-isolated VPN"); return false; }
     session->enabled = true; session->applied_version = request->config_version; session->traffic.primed = false;
     (void)collect_transfer(session);

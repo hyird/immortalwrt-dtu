@@ -1993,6 +1993,7 @@ static void verify_write_priority_across_devices(void) {
     assert(priority_command_results == 1U);
     edge_acquisition_tick(acquisition, monotonic_ms());
     assert(priority_command_results == 1U);
+    assert(priority_telemetry_records >= 1U);
     close(fd); close(fd_b); close(listener); close(listener_b); edge_acquisition_destroy(acquisition);
 }
 

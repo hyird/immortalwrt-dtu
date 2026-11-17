@@ -9,10 +9,9 @@
 
 #include <pb_decode.h>
 
-static void set_error(char *error, size_t size, const char *message) {
-    if (error != NULL && size != 0U)
-        snprintf(error, size, "%s", message);
-}
+#include "edge_util.h"
+
+#define set_error edge_set_error
 
 static bool same_id(const void *field, const uint8_t id[16]) {
     pb_size_t size = 0U;
@@ -89,9 +88,7 @@ static bool valid_dtu(const iot_edge_v1_DtuConfig *value) {
         (value->heartbeat_interval_sec && !value->heartbeat.size)) return false;
     if (value->south_mode == iot_edge_v1_LinkMode_LINK_MODE_SERIAL) {
         const iot_edge_v1_SerialSettings *s = &value->serial;
-        static const uint32_t rates[] = {300,600,1200,2400,4800,9600,19200,38400,57600,115200,230400};
-        bool baud = false;
-        for (size_t i = 0; i < sizeof(rates)/sizeof(rates[0]); ++i) baud |= s->baud_rate == rates[i];
+        const bool baud = edge_serial_baud_speed(s->baud_rate) != 0;
         return value->has_serial && !strncmp(s->channel, "/dev/", 5) && baud &&
             s->data_bits >= 5U && s->data_bits <= 8U && s->stop_bits >= 1U && s->stop_bits <= 2U &&
             (!strcmp(s->parity, "none") || !strcmp(s->parity, "even") || !strcmp(s->parity, "odd")) &&

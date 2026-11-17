@@ -287,25 +287,21 @@ if(UNIX)
             "${CMAKE_CURRENT_LIST_DIR}/edge_modbus_gateway_network_test.py" "$<TARGET_FILE:edge_modbus_gateway_fixture>")
         set_tests_properties(edge_modbus_gateway_network PROPERTIES TIMEOUT 15)
     endif()
-    find_path(MBEDTLS_INCLUDE_DIR mbedtls/sha256.h PATH_SUFFIXES mbedtls3)
-    find_library(MBEDCRYPTO_LIBRARY mbedcrypto PATH_SUFFIXES mbedtls3)
-    if(MBEDTLS_INCLUDE_DIR AND MBEDCRYPTO_LIBRARY)
-        add_executable(edge_dtu_checkpoint_fixture edge_dtu_checkpoint_fixture.c
-            "${EDGENODE_ROOT}/src/edge_spool.c" "${EDGENODE_ROOT}/src/edge_memory.c"
-            "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c"
-            "${EDGENODE_ROOT}/src/log.c")
-        target_include_directories(edge_dtu_checkpoint_fixture PRIVATE "${EDGENODE_ROOT}/src" "${MBEDTLS_INCLUDE_DIR}")
-        target_link_libraries(edge_dtu_checkpoint_fixture PRIVATE edgenode_nanopb "${MBEDCRYPTO_LIBRARY}")
-        target_compile_definitions(edge_dtu_checkpoint_fixture PRIVATE EDGE_SPOOL_ROOT="spool" EDGE_DTU_CONFIG_ROOT="checkpoints")
-        add_executable(edge_spool_io_test edge_spool_io_test.c
-            "${EDGENODE_ROOT}/src/edge_spool.c" "${EDGENODE_ROOT}/src/edge_memory.c"
-            "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c"
-            "${EDGENODE_ROOT}/src/log.c")
-        target_include_directories(edge_spool_io_test PRIVATE "${EDGENODE_ROOT}/src" "${MBEDTLS_INCLUDE_DIR}")
-        target_link_libraries(edge_spool_io_test PRIVATE edgenode_nanopb "${MBEDCRYPTO_LIBRARY}")
-        target_compile_definitions(edge_spool_io_test PRIVATE EDGE_SPOOL_ROOT="spool-io" EDGE_DTU_CONFIG_ROOT="checkpoints-io")
-        add_test(NAME edge_spool_io COMMAND edge_spool_io_test)
-    endif()
+    add_executable(edge_dtu_checkpoint_fixture edge_dtu_checkpoint_fixture.c
+        "${EDGENODE_ROOT}/src/edge_spool.c" "${EDGENODE_ROOT}/src/edge_memory.c"
+        "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c"
+        "${EDGENODE_ROOT}/src/log.c")
+    target_include_directories(edge_dtu_checkpoint_fixture PRIVATE "${EDGENODE_ROOT}/src")
+    target_link_libraries(edge_dtu_checkpoint_fixture PRIVATE edgenode_nanopb edgenode_gateway_crypto)
+    target_compile_definitions(edge_dtu_checkpoint_fixture PRIVATE EDGE_SPOOL_ROOT="spool" EDGE_DTU_CONFIG_ROOT="checkpoints")
+    add_executable(edge_spool_io_test edge_spool_io_test.c
+        "${EDGENODE_ROOT}/src/edge_spool.c" "${EDGENODE_ROOT}/src/edge_memory.c"
+        "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c"
+        "${EDGENODE_ROOT}/src/log.c")
+    target_include_directories(edge_spool_io_test PRIVATE "${EDGENODE_ROOT}/src")
+    target_link_libraries(edge_spool_io_test PRIVATE edgenode_nanopb edgenode_gateway_crypto)
+    target_compile_definitions(edge_spool_io_test PRIVATE EDGE_SPOOL_ROOT="spool-io" EDGE_DTU_CONFIG_ROOT="checkpoints-io")
+    add_test(NAME edge_spool_io COMMAND edge_spool_io_test)
     add_executable(edge_dtu_fixture edge_dtu_fixture.c "${EDGENODE_ROOT}/src/edge_dtu.c")
     target_include_directories(edge_dtu_fixture PRIVATE "${EDGENODE_ROOT}/src")
     target_link_libraries(edge_dtu_fixture PRIVATE edgenode_nanopb)
@@ -355,6 +351,11 @@ if(UNIX)
         edge_external_io_stub.c
         "${EDGENODE_ROOT}/src/edge_sl651.c"
         "${EDGENODE_ROOT}/src/edge_acquisition.c"
+        "${EDGENODE_ROOT}/src/edge_acquisition_transport.c"
+        "${EDGENODE_ROOT}/src/edge_acquisition_codec.c"
+        "${EDGENODE_ROOT}/src/edge_acquisition_sl651.c"
+        "${EDGENODE_ROOT}/src/edge_acquisition_extio.c"
+        "${EDGENODE_ROOT}/src/edge_acquisition_serial.c"
         "${EDGENODE_ROOT}/src/edge_dtu.c"
         "${EDGENODE_ROOT}/src/edge_industrial.c"
     "${EDGENODE_ROOT}/src/edge_runtime_config.c"
@@ -380,6 +381,9 @@ if(UNIX)
         find_path(GATEWAY_LWS_CONFIG_INCLUDE_DIR lws_config.h REQUIRED)
         add_executable(edge_modbus_gateway_write_test edge_modbus_gateway_write_test.c
             ${EDGENODE_ACQUISITION_TEST_SOURCES}
+            "${EDGENODE_ROOT}/src/edge_ws_gateway.c"
+            "${EDGENODE_ROOT}/src/edge_ws_modem.c"
+            "${EDGENODE_ROOT}/src/edge_ws_terminal.c"
             "${EDGENODE_ROOT}/src/edge_modbus_gateway.c"
             "${EDGENODE_ROOT}/src/edge_modbus_gateway_transport.c")
         target_compile_options(edge_modbus_gateway_write_test PRIVATE

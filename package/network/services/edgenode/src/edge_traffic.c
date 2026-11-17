@@ -15,17 +15,15 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "edge_util.h"
+
 /* No packet contents, process-wide endpoint guesses, firewall rules or NAT changes. */
 static void incomplete(edge_traffic *traffic) {
     for (size_t i = 0; i < traffic->platform_count; ++i)
         traffic->windows[i].complete = false;
 }
 
-static uint64_t milliseconds(void) {
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
-    return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
-}
+#define milliseconds edge_monotonic_ms
 
 static const unsigned char *attribute(const void *input, size_t length,
                                       unsigned type, size_t *value_size) {

@@ -14,6 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "edge_util.h"
+
 #define EDGE_GATEWAY_CLIENTS 8
 
 typedef struct {
@@ -37,11 +39,7 @@ struct edge_modbus_gateway_server {
     edge_gateway_client clients[EDGE_GATEWAY_CLIENTS];
 };
 
-static uint64_t monotonic_ms(void) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
-}
+#define monotonic_ms edge_monotonic_ms
 
 static void pump_writes(edge_modbus_gateway_server *server);
 

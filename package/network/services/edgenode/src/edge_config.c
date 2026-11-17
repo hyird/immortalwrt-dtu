@@ -9,57 +9,16 @@
 
 #include "edge_protocol.h"
 #include "edge_url.h"
+#include "edge_util.h"
 
-static void set_error(char *error, size_t size, const char *message) {
-    if (error != NULL && size != 0U)
-        snprintf(error, size, "%s", message);
-}
-
-static int hex_digit(char ch) {
-    if (ch >= '0' && ch <= '9')
-        return ch - '0';
-    if (ch >= 'a' && ch <= 'f')
-        return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F')
-        return ch - 'A' + 10;
-    return -1;
-}
+#define set_error edge_set_error
 
 bool edge_config_parse_uuid(const char *text, uint8_t output[16]) {
-    static const size_t hyphens[] = {8U, 13U, 18U, 23U};
-    if (text == NULL || output == NULL || strlen(text) != 36U)
-        return false;
-    for (size_t index = 0; index < sizeof(hyphens) / sizeof(hyphens[0]); ++index)
-        if (text[hyphens[index]] != '-')
-            return false;
-    size_t byte = 0U;
-    for (size_t index = 0U; index < 36U;) {
-        if (text[index] == '-') {
-            ++index;
-            continue;
-        }
-        if (index + 1U >= 36U || byte >= 16U)
-            return false;
-        const int high = hex_digit(text[index]);
-        const int low = hex_digit(text[index + 1U]);
-        if (high < 0 || low < 0)
-            return false;
-        output[byte++] = (uint8_t)((high << 4U) | low);
-        index += 2U;
-    }
-    return byte == 16U;
+    return edge_parse_uuid_bytes(text, output);
 }
 
 void edge_config_format_uuid(const uint8_t value[16], char output[37]) {
-    static const char digits[] = "0123456789abcdef";
-    size_t out = 0U;
-    for (size_t index = 0; index < 16U; ++index) {
-        if (index == 4U || index == 6U || index == 8U || index == 10U)
-            output[out++] = '-';
-        output[out++] = digits[value[index] >> 4U];
-        output[out++] = digits[value[index] & 0x0fU];
-    }
-    output[out] = '\0';
+    edge_format_uuid_bytes(value, output);
 }
 
 static bool copy_option(struct uci_context *context, struct uci_section *section,

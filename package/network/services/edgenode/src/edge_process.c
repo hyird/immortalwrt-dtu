@@ -12,12 +12,9 @@
 #include <time.h>
 #include <unistd.h>
 
-static uint64_t monotonic_milliseconds(void) {
-    struct timespec value;
-    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
-        return 0U;
-    return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
-}
+#include "edge_util.h"
+
+#define monotonic_milliseconds edge_monotonic_ms
 
 void edge_process_report_progress(void) {
     FILE *health = fopen("/tmp/edgenode/loop.health.new", "w");
@@ -50,6 +47,7 @@ int edge_process_run_timeout(const char *const argv[], int stdin_fd, int stdout_
     (void)setpgid(child, child);
     int status = 0;
     const uint64_t deadline = monotonic_milliseconds() + timeout_ms;
+    long sleep_ns = 1000000L;
     for (;;) {
         const pid_t waited = waitpid(child, &status, WNOHANG);
         if (waited == child)
@@ -58,7 +56,12 @@ int edge_process_run_timeout(const char *const argv[], int stdin_fd, int stdout_
             return -1;
         if (timeout_ms != 0U && monotonic_milliseconds() >= deadline)
             break;
-        struct timespec pause = {.tv_sec = 0, .tv_nsec = 10000000L};
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = sleep_ns};
+        if (sleep_ns < 10000000L) {
+            sleep_ns *= 2L;
+            if (sleep_ns > 10000000L)
+                sleep_ns = 10000000L;
+        }
         while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {
         }
     }

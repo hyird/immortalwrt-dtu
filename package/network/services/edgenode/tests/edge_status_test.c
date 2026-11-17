@@ -190,6 +190,73 @@ int main(void) {
                     "analog IO metadata missing");
     }
 
+    iot_edge_v1_ConfigItem extra_items[8] = {0};
+    extra_items[0] = items[0];
+    extra_items[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_MC;
+    extra_items[1] = items[1];
+    extra_items[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_DLT645;
+
+    extra_items[2].which_item = iot_edge_v1_ConfigItem_industrial_point_tag;
+    memcpy(&extra_items[2].item.industrial_point.device_id,
+           &extra_items[1].item.device.device_id,
+           sizeof(extra_items[2].item.industrial_point.device_id));
+    strcpy(extra_items[2].item.industrial_point.element_id, "energy-total");
+    strcpy(extra_items[2].item.industrial_point.name, "Total Energy");
+    strcpy(extra_items[2].item.industrial_point.area, "DATA");
+    strcpy(extra_items[2].item.industrial_point.identifier, "00010000");
+    extra_items[2].item.industrial_point.address = 100U;
+    strcpy(extra_items[2].item.industrial_point.data_type, "UINT32");
+    extra_items[2].item.industrial_point.scale = 0.01;
+    extra_items[2].item.industrial_point.decimals = 2U;
+    strcpy(extra_items[2].item.industrial_point.unit, "kWh");
+
+    extra_items[3].which_item = iot_edge_v1_ConfigItem_derived_point_tag;
+    memcpy(&extra_items[3].item.derived_point.device_id,
+           &extra_items[1].item.device.device_id,
+           sizeof(extra_items[3].item.derived_point.device_id));
+    strcpy(extra_items[3].item.derived_point.point_id, "energy-delta");
+    strcpy(extra_items[3].item.derived_point.name, "Energy Delta");
+    strcpy(extra_items[3].item.derived_point.kind, "DELTA");
+    strcpy(extra_items[3].item.derived_point.expression, "a - b");
+
+    extra_items[4].which_item = iot_edge_v1_ConfigItem_sl651_element_tag;
+    memcpy(&extra_items[4].item.sl651_element.device_id,
+           &extra_items[1].item.device.device_id,
+           sizeof(extra_items[4].item.sl651_element.device_id));
+    strcpy(extra_items[4].item.sl651_element.element_id, "water-level");
+    strcpy(extra_items[4].item.sl651_element.name, "Water Level");
+    strcpy(extra_items[4].item.sl651_element.function_code, "32");
+    strcpy(extra_items[4].item.sl651_element.encoding, "BCD");
+    extra_items[4].item.sl651_element.length = 4U;
+    extra_items[4].item.sl651_element.digits = 2U;
+    extra_items[4].item.sl651_element.writable = true;
+
+    extra_items[5].which_item = iot_edge_v1_ConfigItem_dtu_tag;
+    extra_items[6].which_item = iot_edge_v1_ConfigItem_sl651_function_tag;
+    extra_items[7].which_item = iot_edge_v1_ConfigItem_sl651_dictionary_tag;
+
+    runtime.items = extra_items;
+    runtime.item_count = 8U;
+    output = tmpfile();
+    require(output != NULL, "cannot create extended status file");
+    require(edge_status_render(output, &snapshot), "extended status rendering failed");
+    rewind(output);
+    json[fread(json, 1U, sizeof(json) - 1U, output)] = '\0';
+    fclose(output);
+    require(strstr(json, "\"protocol\":\"MC\"") != NULL, "MC protocol missing");
+    require(strstr(json, "\"protocol\":\"DLT645\"") != NULL, "DLT645 protocol missing");
+    require(strstr(json, "\"kind\":\"industrial\"") != NULL &&
+            strstr(json, "\"identifier\":\"00010000\"") != NULL,
+            "industrial point missing");
+    require(strstr(json, "\"kind\":\"derived\"") != NULL &&
+            strstr(json, "\"derivedKind\":\"DELTA\"") != NULL,
+            "derived point missing");
+    require(strstr(json, "\"kind\":\"sl651\"") != NULL &&
+            strstr(json, "\"functionCode\":\"32\"") != NULL,
+            "sl651 element point missing");
+    require(strstr(json, "\"kind\":\"\",") == NULL,
+            "non-point config items must not be serialized into points");
+
     puts("edge status tests passed");
     return EXIT_SUCCESS;
 }

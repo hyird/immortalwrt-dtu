@@ -19,6 +19,7 @@
 
 #include "edge_interface.h"
 #include "edge_process.h"
+#include "edge_util.h"
 
 #define NETWORK_BACKUP "/tmp/edgenode/network.backup"
 #define NETWORK_PENDING "/tmp/edgenode/network.pending"
@@ -33,8 +34,7 @@ typedef struct {
 static void restore_network(void);
 
 static void set_error(char *output, size_t capacity, const char *message) {
-    if (output != NULL && capacity != 0U)
-        snprintf(output, capacity, "%s", message != NULL ? message : "network error");
+    edge_set_error(output, capacity, message != NULL ? message : "network error");
 }
 
 bool edge_network_pending(void) {
@@ -511,25 +511,29 @@ static bool validate_request(const iot_edge_v1_NetworkConfigRequest *request,
            validate_existing_ownership(request, protected_name, error, error_size);
 }
 
-static bool run_uci(const char *operation, const char *argument) {
-    const char *argv[5] = {"uci", NULL, NULL, NULL, NULL};
-    size_t index = 1U;
-    if (strcmp(operation, "delete") == 0)
-        argv[index++] = "-q";
-    argv[index++] = operation;
-    if (argument != NULL)
-        argv[index++] = argument;
-    return edge_process_run(argv, -1, -1) == 0;
-}
-
 static bool backup_network(void) {
-    const int output = open(NETWORK_BACKUP, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (output < 0)
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    if (context == NULL || uci_load(context, "network", &package) != UCI_OK) {
+        if (context != NULL)
+            uci_free_context(context);
         return false;
-    const char *argv[] = {"uci", "export", "network", NULL};
-    const int result = edge_process_run(argv, -1, output);
-    close(output);
-    return result == 0;
+    }
+    const int fd = open(NETWORK_BACKUP, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    FILE *output = fd >= 0 ? fdopen(fd, "w") : NULL;
+    if (output == NULL) {
+        if (fd >= 0)
+            close(fd);
+        uci_unload(context, package);
+        uci_free_context(context);
+        return false;
+    }
+    const bool exported = uci_export(context, output, package, true) == UCI_OK &&
+                          fflush(output) == 0 && fsync(fileno(output)) == 0;
+    const bool closed = fclose(output) == 0;
+    uci_unload(context, package);
+    uci_free_context(context);
+    return exported && closed;
 }
 
 static void prefix_to_mask(uint32_t prefix, char output[16]) {
@@ -537,44 +541,79 @@ static void prefix_to_mask(uint32_t prefix, char output[16]) {
     (void)inet_ntop(AF_INET, &mask, output, 16U);
 }
 
-static bool set_option(const char *section, const char *option, const char *value) {
-    char argument[384];
-    snprintf(argument, sizeof(argument), "network.%s.%s=%s", section, option, value);
-    return run_uci("set", argument);
+static bool set_option(struct uci_context *context, struct uci_package *package,
+                       struct uci_section *section, const char *option,
+                       const char *value) {
+    struct uci_ptr ptr = {
+        .p = package,
+        .s = section,
+        .option = option,
+        .value = value,
+    };
+    return uci_set(context, &ptr) == UCI_OK;
 }
 
-static bool delete_option(const char *section, const char *option) {
-    char argument[96];
-    snprintf(argument, sizeof(argument), "network.%s.%s", section, option);
-    (void)run_uci("delete", argument);
-    return true;
+static bool delete_option(struct uci_context *context, struct uci_package *package,
+                          struct uci_section *section, const char *option) {
+    struct uci_option *existing = uci_lookup_option(context, section, option);
+    if (existing == NULL)
+        return true;
+    struct uci_ptr ptr = {
+        .p = package,
+        .s = section,
+        .option = option,
+        .o = existing,
+    };
+    return uci_delete(context, &ptr) == UCI_OK;
 }
 
-static bool apply_interface(const iot_edge_v1_NetworkInterfaceConfig *config) {
-    char section[64];
-    snprintf(section, sizeof(section), "network.%s", config->logical_name);
+static bool apply_interface(struct uci_context *context,
+                            struct uci_package *package,
+                            const iot_edge_v1_NetworkInterfaceConfig *config) {
     if (config->operation ==
         iot_edge_v1_NetworkConfigOperation_NETWORK_CONFIG_DELETE) {
-        (void)run_uci("delete", section);
+        struct uci_section *existing =
+            uci_lookup_section(context, package, config->logical_name);
+        if (existing != NULL) {
+            struct uci_ptr ptr = {.p = package, .s = existing};
+            if (uci_delete(context, &ptr) != UCI_OK)
+                return false;
+        }
         return true;
     }
 
     if (config->previous_logical_name[0] != '\0') {
-        char rename[96];
-        snprintf(rename, sizeof(rename), "network.%s=%s",
-                 config->previous_logical_name, config->logical_name);
-        if (!run_uci("rename", rename))
+        struct uci_section *previous =
+            uci_lookup_section(context, package, config->previous_logical_name);
+        if (previous == NULL)
+            return false;
+        struct uci_ptr rename_ptr = {
+            .p = package,
+            .s = previous,
+            .value = config->logical_name,
+        };
+        if (uci_rename(context, &rename_ptr) != UCI_OK)
             return false;
     }
 
-    char section_type[80];
-    snprintf(section_type, sizeof(section_type), "%s=interface", section);
+    struct uci_ptr section_ptr = {
+        .package = "network",
+        .p = package,
+        .section = config->logical_name,
+        .value = "interface",
+    };
+    if (uci_set(context, &section_ptr) != UCI_OK)
+        return false;
+    struct uci_section *section =
+        uci_lookup_section(context, package, config->logical_name);
+    if (section == NULL)
+        return false;
+
     const char *protocol =
         config->mode == iot_edge_v1_NetworkAddressMode_NETWORK_ADDRESS_STATIC
             ? "static"
             : "dhcp";
-    bool applied = run_uci("set", section_type) &&
-                   set_option(config->logical_name, "proto", protocol);
+    bool applied = set_option(context, package, section, "proto", protocol);
     if (config->bridge) {
         char members[272] = {0};
         size_t offset = 0U;
@@ -586,28 +625,28 @@ static bool apply_interface(const iot_edge_v1_NetworkInterfaceConfig *config) {
                 return false;
             offset += (size_t)written;
         }
-        applied = applied && set_option(config->logical_name, "type", "bridge") &&
-                  set_option(config->logical_name, "ifname", members) &&
-                  delete_option(config->logical_name, "device");
+        applied = applied && set_option(context, package, section, "type", "bridge") &&
+                  set_option(context, package, section, "ifname", members) &&
+                  delete_option(context, package, section, "device");
     } else {
-        applied = applied && delete_option(config->logical_name, "type") &&
-                  set_option(config->logical_name, "ifname", config->device) &&
-                  delete_option(config->logical_name, "device");
+        applied = applied && delete_option(context, package, section, "type") &&
+                  set_option(context, package, section, "ifname", config->device) &&
+                  delete_option(context, package, section, "device");
     }
     if (config->mode ==
         iot_edge_v1_NetworkAddressMode_NETWORK_ADDRESS_STATIC) {
         char netmask[16];
         prefix_to_mask(config->prefix_length, netmask);
-        applied = applied && set_option(config->logical_name, "ipaddr", config->ip) &&
-                  set_option(config->logical_name, "netmask", netmask);
+        applied = applied && set_option(context, package, section, "ipaddr", config->ip) &&
+                  set_option(context, package, section, "netmask", netmask);
         applied = applied &&
                   (config->gateway[0] != '\0'
-                       ? set_option(config->logical_name, "gateway", config->gateway)
-                       : delete_option(config->logical_name, "gateway"));
+                       ? set_option(context, package, section, "gateway", config->gateway)
+                       : delete_option(context, package, section, "gateway"));
     } else {
-        applied = applied && delete_option(config->logical_name, "ipaddr") &&
-                  delete_option(config->logical_name, "netmask") &&
-                  delete_option(config->logical_name, "gateway");
+        applied = applied && delete_option(context, package, section, "ipaddr") &&
+                  delete_option(context, package, section, "netmask") &&
+                  delete_option(context, package, section, "gateway");
     }
     return applied;
 }
@@ -625,10 +664,18 @@ bool edge_network_prepare(const iot_edge_v1_NetworkConfigRequest *request,
         set_error(error, error_size, "cannot back up UCI network configuration");
         return false;
     }
-    bool applied = true;
+    struct uci_context *context = uci_alloc_context();
+    struct uci_package *package = NULL;
+    bool applied = context != NULL && uci_load(context, "network", &package) == UCI_OK;
     for (pb_size_t index = 0; index < request->interfaces_count && applied; ++index)
-        applied = apply_interface(&request->interfaces[index]);
-    applied = applied && run_uci("commit", "network");
+        applied = apply_interface(context, package, &request->interfaces[index]);
+    if (applied)
+        applied = uci_save(context, package) == UCI_OK &&
+                  uci_commit(context, &package, false) == UCI_OK;
+    if (package != NULL)
+        uci_unload(context, package);
+    if (context != NULL)
+        uci_free_context(context);
     if (!applied) {
         restore_network();
         unlink(NETWORK_BACKUP);
@@ -639,12 +686,21 @@ bool edge_network_prepare(const iot_edge_v1_NetworkConfigRequest *request,
 }
 
 static void restore_network(void) {
-    const int input = open(NETWORK_BACKUP, O_RDONLY);
-    if (input >= 0) {
-        const char *import[] = {"uci", "import", "network", NULL};
-        if (edge_process_run(import, input, -1) == 0)
-            (void)run_uci("commit", "network");
-        close(input);
+    FILE *input = fopen(NETWORK_BACKUP, "r");
+    if (input != NULL) {
+        struct uci_context *context = uci_alloc_context();
+        struct uci_package *package = NULL;
+        if (context != NULL) {
+            if (uci_import(context, input, "network", &package, true) == UCI_OK &&
+                package != NULL) {
+                (void)uci_save(context, package);
+                (void)uci_commit(context, &package, false);
+            }
+            if (package != NULL)
+                uci_unload(context, package);
+            uci_free_context(context);
+        }
+        fclose(input);
     }
     const char *reload[] = {"/etc/init.d/network", "reload", NULL};
     (void)edge_process_run(reload, -1, -1);

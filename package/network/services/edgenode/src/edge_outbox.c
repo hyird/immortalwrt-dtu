@@ -3,6 +3,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+static size_t outbox_bucket(const uint8_t message_id[16]) {
+    uint32_t hash = 2166136261U;
+    for (size_t index = 0U; index < 16U; ++index) {
+        hash ^= message_id[index];
+        hash *= 16777619U;
+    }
+    return (size_t)(hash & (EDGE_OUTBOX_HASH_BUCKETS - 1U));
+}
+
+static edge_memory_message *find_message(const edge_memory_outbox *outbox,
+                                         const uint8_t message_id[16]) {
+    if (outbox == NULL || message_id == NULL)
+        return NULL;
+    for (edge_memory_message *item = outbox->buckets[outbox_bucket(message_id)];
+         item != NULL; item = item->hash_next) {
+        if (memcmp(item->message_id, message_id, 16U) == 0)
+            return item;
+    }
+    return NULL;
+}
+
 void edge_memory_outbox_init(edge_memory_outbox *outbox, size_t maximum_bytes) {
     if (outbox == NULL)
         return;
@@ -38,15 +59,15 @@ bool edge_memory_outbox_put_priority(edge_memory_outbox *outbox,
         payload_size > outbox->maximum_bytes ||
         outbox->bytes > outbox->maximum_bytes - payload_size)
         return false;
-    for (edge_memory_message *existing = outbox->head; existing != NULL;
-         existing = existing->next)
-        if (memcmp(existing->message_id, message_id, 16U) == 0)
-            return true;
+    if (find_message(outbox, message_id) != NULL)
+        return true;
 
     edge_memory_message *item = malloc(sizeof(*item) + payload_size);
     if (item == NULL)
         return false;
     item->next = NULL;
+    item->prev = NULL;
+    item->hash_next = NULL;
     memcpy(item->message_id, message_id, 16U);
     item->payload_size = payload_size;
     item->sent_at_ms = 0U;
@@ -55,26 +76,31 @@ bool edge_memory_outbox_put_priority(edge_memory_outbox *outbox,
     item->in_flight = false;
     memcpy(item->payload, payload, payload_size);
 
+    const size_t bucket = outbox_bucket(message_id);
+    item->hash_next = outbox->buckets[bucket];
+    outbox->buckets[bucket] = item;
+
     if (!priority) {
+        item->prev = outbox->tail;
         if (outbox->tail != NULL)
             outbox->tail->next = item;
         else
             outbox->head = item;
         outbox->tail = item;
     } else {
-        edge_memory_message *previous = NULL;
-        edge_memory_message *current = outbox->head;
-        while (current != NULL && current->priority) {
-            previous = current;
-            current = current->next;
-        }
-        item->next = current;
-        if (previous != NULL)
-            previous->next = item;
+        edge_memory_message *after = outbox->priority_tail;
+        edge_memory_message *before = after != NULL ? after->next : outbox->head;
+        item->prev = after;
+        item->next = before;
+        if (after != NULL)
+            after->next = item;
         else
             outbox->head = item;
-        if (current == NULL)
+        if (before != NULL)
+            before->prev = item;
+        else
             outbox->tail = item;
+        outbox->priority_tail = item;
     }
     outbox->bytes += payload_size;
     ++outbox->count;
@@ -85,14 +111,18 @@ const edge_memory_message *edge_memory_outbox_first(const edge_memory_outbox *ou
     return outbox != NULL ? outbox->head : NULL;
 }
 
+const edge_memory_message *edge_memory_outbox_find(
+    const edge_memory_outbox *outbox, const uint8_t message_id[16]) {
+    return find_message(outbox, message_id);
+}
+
 const edge_memory_message *edge_memory_outbox_oldest_regular(
     const edge_memory_outbox *outbox) {
     if (outbox == NULL)
         return NULL;
-    for (edge_memory_message *item = outbox->head; item != NULL; item = item->next)
-        if (!item->priority)
-            return item;
-    return NULL;
+    const edge_memory_message *candidate =
+        outbox->priority_tail != NULL ? outbox->priority_tail->next : outbox->head;
+    return candidate != NULL && !candidate->priority ? candidate : NULL;
 }
 
 const edge_memory_message *edge_memory_outbox_next(edge_memory_outbox *outbox,
@@ -146,19 +176,15 @@ size_t edge_memory_outbox_retry_expired(edge_memory_outbox *outbox,
 
 bool edge_memory_outbox_retry(edge_memory_outbox *outbox,
                               const uint8_t message_id[16]) {
-    if (outbox == NULL || message_id == NULL)
+    edge_memory_message *item = find_message(outbox, message_id);
+    if (item == NULL)
         return false;
-    for (edge_memory_message *item = outbox->head; item != NULL; item = item->next) {
-        if (memcmp(item->message_id, message_id, 16U) != 0)
-            continue;
-        if (item->in_flight) {
-            item->in_flight = false;
-            item->sent_at_ms = 0U;
-            --outbox->in_flight;
-        }
-        return true;
+    if (item->in_flight) {
+        item->in_flight = false;
+        item->sent_at_ms = 0U;
+        --outbox->in_flight;
     }
-    return false;
+    return true;
 }
 
 void edge_memory_outbox_reset(edge_memory_outbox *outbox) {
@@ -175,20 +201,30 @@ void edge_memory_outbox_reset(edge_memory_outbox *outbox) {
 bool edge_memory_outbox_ack(edge_memory_outbox *outbox, const uint8_t message_id[16]) {
     if (outbox == NULL || message_id == NULL)
         return false;
-    edge_memory_message *previous = NULL;
-    edge_memory_message *current = outbox->head;
+    const size_t bucket = outbox_bucket(message_id);
+    edge_memory_message *hash_prev = NULL;
+    edge_memory_message *current = outbox->buckets[bucket];
     while (current != NULL && memcmp(current->message_id, message_id, 16U) != 0) {
-        previous = current;
-        current = current->next;
+        hash_prev = current;
+        current = current->hash_next;
     }
     if (current == NULL)
         return false;
-    if (previous != NULL)
-        previous->next = current->next;
+    if (hash_prev != NULL)
+        hash_prev->hash_next = current->hash_next;
+    else
+        outbox->buckets[bucket] = current->hash_next;
+
+    if (outbox->priority_tail == current)
+        outbox->priority_tail = current->prev;
+    if (current->prev != NULL)
+        current->prev->next = current->next;
     else
         outbox->head = current->next;
-    if (outbox->tail == current)
-        outbox->tail = previous;
+    if (current->next != NULL)
+        current->next->prev = current->prev;
+    else
+        outbox->tail = current->prev;
     outbox->bytes -= current->payload_size;
     --outbox->count;
     if (current->in_flight)

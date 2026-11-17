@@ -74,12 +74,16 @@ static unsigned configured_type(const iot_edge_v1_ConfigItem *item) {
     return 0;
 }
 
+#define EDGE_GATEWAY_HASH_BUCKETS 256U
+#define EDGE_GATEWAY_INVALID_INDEX UINT16_MAX
+
 typedef struct {
     uint8_t platform[16], device[16];
     char element[65];
     bool active, writable, external_io, derived;
     uint32_t timeout_sec;
     uint16_t type, native_quality, native_type, value_address;
+    uint16_t hash_next;
     uint64_t bits, native_bits, observed_at_ms, received_at_ms;
 } edge_gateway_point;
 
@@ -90,7 +94,61 @@ struct edge_modbus_gateway {
     uint16_t *holding, *discrete;
     size_t holding_count, discrete_count;
     uint8_t unit_id;
+    uint16_t buckets[EDGE_GATEWAY_HASH_BUCKETS];
 };
+
+static void clear_point_index(edge_modbus_gateway *gateway) {
+    for (size_t i = 0; i < EDGE_GATEWAY_HASH_BUCKETS; ++i)
+        gateway->buckets[i] = EDGE_GATEWAY_INVALID_INDEX;
+}
+
+static size_t point_bucket(const uint8_t platform[16], const uint8_t device[16],
+                           const char *element) {
+    uint32_t hash = 2166136261U;
+    for (size_t i = 0; i < 16U; ++i) {
+        hash ^= platform[i];
+        hash *= 16777619U;
+    }
+    for (size_t i = 0; i < 16U; ++i) {
+        hash ^= device[i];
+        hash *= 16777619U;
+    }
+    for (const unsigned char *p = (const unsigned char *)element; *p != 0U; ++p) {
+        hash ^= *p;
+        hash *= 16777619U;
+    }
+    return (size_t)(hash & (EDGE_GATEWAY_HASH_BUCKETS - 1U));
+}
+
+static void insert_point_index(edge_modbus_gateway *gateway, size_t slot) {
+    edge_gateway_point *point = &gateway->points[slot];
+    const size_t bucket = point_bucket(point->platform, point->device, point->element);
+    point->hash_next = gateway->buckets[bucket];
+    gateway->buckets[bucket] = (uint16_t)slot;
+}
+
+static void rebuild_point_index(edge_modbus_gateway *gateway) {
+    clear_point_index(gateway);
+    for (size_t slot = 0; slot < gateway->count; ++slot)
+        insert_point_index(gateway, slot);
+}
+
+static size_t find_point_index(const edge_modbus_gateway *gateway,
+                               const uint8_t platform[16],
+                               const uint8_t device[16],
+                               const char *element) {
+    const size_t bucket = point_bucket(platform, device, element);
+    for (uint16_t index = gateway->buckets[bucket];
+         index != EDGE_GATEWAY_INVALID_INDEX && index < gateway->count;
+         index = gateway->points[index].hash_next) {
+        const edge_gateway_point *point = &gateway->points[index];
+        if (!memcmp(point->platform, platform, 16) &&
+            !memcmp(point->device, device, 16) &&
+            !strcmp(point->element, element))
+            return index;
+    }
+    return gateway->count;
+}
 
 static bool reserve_point(edge_modbus_gateway *gateway) {
     if (gateway->count < gateway->capacity)
@@ -150,12 +208,8 @@ static bool prepare_layout(edge_modbus_gateway *gateway) {
     gateway->discrete = discrete;
     gateway->holding_count = holding_count;
     gateway->discrete_count = discrete_count;
+    rebuild_point_index(gateway);
     return true;
-}
-
-static bool same_point(const edge_gateway_point *a, const edge_gateway_point *b) {
-    return !memcmp(a->platform, b->platform, 16) && !memcmp(a->device, b->device, 16) &&
-           !strcmp(a->element, b->element);
 }
 
 static void hex_write(FILE *file, const void *bytes, size_t count) {
@@ -178,6 +232,7 @@ static bool hex_read(const char *text, void *bytes, size_t count) {
 }
 
 static bool load_map(edge_modbus_gateway *gateway, const char *path) {
+    clear_point_index(gateway);
     FILE *file = fopen(path, "rb");
     if (!file)
         return errno == ENOENT;
@@ -195,13 +250,16 @@ static bool load_map(edge_modbus_gateway *gateway, const char *path) {
         ok = length && length <= 64 && hex_read(line, point.platform, 16) &&
              hex_read(line + 33, point.device, 16) && hex_read(line + 66, point.element, length) &&
              !memchr(point.element, 0, length);
-        for (size_t i = 0; ok && i < gateway->count; ++i)
-            if (same_point(&point, &gateway->points[i]))
-                ok = false;
+        if (ok && find_point_index(gateway, point.platform, point.device, point.element) !=
+                      gateway->count)
+            ok = false;
         if (ok)
             ok = reserve_point(gateway);
-        if (ok)
-            gateway->points[gateway->count++] = point;
+        if (ok) {
+            const size_t slot = gateway->count++;
+            gateway->points[slot] = point;
+            insert_point_index(gateway, slot);
+        }
     }
     if (ferror(file))
         ok = false;
@@ -283,13 +341,13 @@ static bool add_point(edge_modbus_gateway *gateway, const uint8_t platform[16],
     if (!element[0] || strlen(element) > 64)
         return false;
     strcpy(key.element, element);
-    size_t slot = 0;
-    while (slot < gateway->count && !same_point(&key, &gateway->points[slot]))
-        ++slot;
+    size_t slot = find_point_index(gateway, platform, device, key.element);
     if (slot == gateway->count) {
         if (!reserve_point(gateway))
             return false;
-        gateway->points[gateway->count++] = key;
+        slot = gateway->count++;
+        gateway->points[slot] = key;
+        insert_point_index(gateway, slot);
     }
     gateway->points[slot].active = true;
     gateway->points[slot].native_type = (uint16_t)configured_type(item);
@@ -472,6 +530,7 @@ bool edge_modbus_gateway_reorder(edge_modbus_gateway *gateway, const char *path,
         gateway->discrete = candidate.discrete;
         gateway->holding_count = candidate.holding_count;
         gateway->discrete_count = candidate.discrete_count;
+        memcpy(gateway->buckets, candidate.buckets, sizeof(gateway->buckets));
     } else {
         free(candidate.points);
         free(candidate.holding);
@@ -587,55 +646,53 @@ void edge_modbus_gateway_update(edge_modbus_gateway *gateway, const uint8_t plat
             }
         return;
     }
-    for (size_t i = 0; i < gateway->count; ++i) {
-        edge_gateway_point *point = &gateway->points[i];
-        if (!point->active || memcmp(point->platform, platform, 16) ||
-            memcmp(point->device, sample->device_id, 16) ||
-            strcmp(point->element, sample->element_id))
-            continue;
-        point->native_quality = 2;
+    const size_t slot =
+        find_point_index(gateway, platform, sample->device_id, sample->element_id);
+    if (slot == gateway->count || !gateway->points[slot].active)
+        return;
+    edge_gateway_point *point = &gateway->points[slot];
+    point->native_quality = 2;
+    point->type = 0;
+    point->bits = 0;
+    point->native_bits = 0;
+    point->received_at_ms = now_ms;
+    point->observed_at_ms = sample->observed_at_ms > 0 ? (uint64_t)sample->observed_at_ms : 0;
+    if (!sample->valid)
+        return;
+    const iot_edge_v1_ScalarValue *value = &sample->value;
+    point->type = value->which_value;
+    switch (value->which_value) {
+    case iot_edge_v1_ScalarValue_bool_value_tag:
+        point->bits = value->value.bool_value ? 1 : 0;
+        break;
+    case iot_edge_v1_ScalarValue_signed_value_tag:
+        point->bits = (uint64_t)value->value.signed_value;
+        break;
+    case iot_edge_v1_ScalarValue_unsigned_value_tag:
+        point->bits = value->value.unsigned_value;
+        break;
+    case iot_edge_v1_ScalarValue_double_value_tag:
+        if (!isfinite(value->value.double_value))
+            return;
+        memcpy(&point->bits, &value->value.double_value, sizeof(point->bits));
+        break;
+    case iot_edge_v1_ScalarValue_decimal_value_tag: {
+        point->type = iot_edge_v1_ScalarValue_double_value_tag;
+        char *end = NULL;
+        errno = 0;
+        const double number = strtod(value->value.decimal_value, &end);
+        if (errno || end == value->value.decimal_value || *end || !isfinite(number))
+            return;
+        memcpy(&point->bits, &number, sizeof(point->bits));
+        break;
+    }
+    default:
         point->type = 0;
-        point->bits = 0;
-        point->native_bits = 0;
-        point->received_at_ms = now_ms;
-        point->observed_at_ms = sample->observed_at_ms > 0 ? (uint64_t)sample->observed_at_ms : 0;
-        if (!sample->valid)
-            return;
-        const iot_edge_v1_ScalarValue *value = &sample->value;
-        point->type = value->which_value;
-        switch (value->which_value) {
-        case iot_edge_v1_ScalarValue_bool_value_tag:
-            point->bits = value->value.bool_value ? 1 : 0;
-            break;
-        case iot_edge_v1_ScalarValue_signed_value_tag:
-            point->bits = (uint64_t)value->value.signed_value;
-            break;
-        case iot_edge_v1_ScalarValue_unsigned_value_tag:
-            point->bits = value->value.unsigned_value;
-            break;
-        case iot_edge_v1_ScalarValue_double_value_tag:
-            if (!isfinite(value->value.double_value))
-                return;
-            memcpy(&point->bits, &value->value.double_value, sizeof(point->bits));
-            break;
-        case iot_edge_v1_ScalarValue_decimal_value_tag: {
-            point->type = iot_edge_v1_ScalarValue_double_value_tag;
-            char *end = NULL;
-            errno = 0;
-            const double number = strtod(value->value.decimal_value, &end);
-            if (errno || end == value->value.decimal_value || *end || !isfinite(number))
-                return;
-            memcpy(&point->bits, &number, sizeof(point->bits));
-            break;
-        }
-        default:
-            point->type = 0;
-            return;
-        }
-        if (!native_value(point)) return;
-        point->native_quality = 1;
         return;
     }
+    if (!native_value(point))
+        return;
+    point->native_quality = 1;
 }
 
 static uint16_t point_quality(const edge_gateway_point *point, uint64_t now_ms) {
@@ -694,25 +751,22 @@ bool edge_modbus_gateway_describe(const edge_modbus_gateway *gateway, const uint
                                   iot_edge_v1_ModbusGatewayPoint *output, uint64_t now_ms) {
     if (!gateway)
         return false;
-    for (size_t i = 0; i < gateway->count; ++i) {
-        const edge_gateway_point *point = &gateway->points[i];
-        if (memcmp(point->platform, platform, 16) || memcmp(point->device, device, 16) ||
-            strcmp(point->element, element))
-            continue;
-        output->address = (uint32_t)(i * EDGE_GATEWAY_SLOT_WORDS);
-        output->words = EDGE_GATEWAY_SLOT_WORDS;
-        point_layout(output, point);
-        output->quality = point_quality(point, now_ms);
-        output->observed_at_ms = (int64_t)point->observed_at_ms;
-        snprintf(output->state, sizeof(output->state), "%s", point->active ? "active" : "disabled");
-        output->value[0] = '\0';
-        if (output->quality != 1 && output->quality != 3)
-            return true;
-        (void)format_native_value(point->native_type, point->native_bits,
-                                  output->value, sizeof(output->value));
+    const size_t i = find_point_index(gateway, platform, device, element);
+    if (i == gateway->count)
+        return false;
+    const edge_gateway_point *point = &gateway->points[i];
+    output->address = (uint32_t)(i * EDGE_GATEWAY_SLOT_WORDS);
+    output->words = EDGE_GATEWAY_SLOT_WORDS;
+    point_layout(output, point);
+    output->quality = point_quality(point, now_ms);
+    output->observed_at_ms = (int64_t)point->observed_at_ms;
+    snprintf(output->state, sizeof(output->state), "%s", point->active ? "active" : "disabled");
+    output->value[0] = '\0';
+    if (output->quality != 1 && output->quality != 3)
         return true;
-    }
-    return false;
+    (void)format_native_value(point->native_type, point->native_bits,
+                              output->value, sizeof(output->value));
+    return true;
 }
 
 static void gateway_text(char *output, size_t size, const char *input) {

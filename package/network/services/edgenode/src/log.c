@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "edge_protocol.h"
+#include "edge_util.h"
 
 #ifndef EDGE_LOG_ROOT
 #define EDGE_LOG_ROOT "/tmp/edgenode"
@@ -24,6 +25,7 @@
 #endif
 #define EDGE_LOG_DIR EDGE_LOG_ROOT "/logs"
 #define EDGE_LOG_PATH EDGE_LOG_DIR "/current.log"
+#define EDGE_LOG_LOCK_PATH EDGE_LOG_DIR "/current.lock"
 #define EDGE_LOCAL_LOG_PATH EDGE_LOG_DIR "/acquisition.log"
 #define EDGE_LOCAL_LOCK_PATH EDGE_LOG_DIR "/acquisition.lock"
 #define EDGE_LOCAL_LOG_MAX_FILES 4U
@@ -51,30 +53,14 @@ typedef struct {
 static local_fault_entry local_faults[EDGE_LOCAL_FAULT_CACHE_SIZE];
 static unsigned next_local_fault;
 
-static int64_t monotonic_ms(void) {
-  struct timespec value;
-  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
-    return -1;
-  return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
-}
+#define monotonic_ms edge_monotonic_ms_signed
+#define now_ms edge_realtime_ms
+#define copy_text edge_copy_text
 
 static void silence_logs(void) {
   log_threshold = 4;
   memcpy(log_level_name, "silent", sizeof("silent"));
   log_deadline_ms = 0;
-}
-
-static int64_t now_ms(void) {
-  struct timespec value;
-  if (clock_gettime(CLOCK_REALTIME, &value) != 0)
-    return 0;
-  return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
-}
-
-static void copy_text(char *output, size_t capacity, const char *input) {
-  if (capacity == 0U)
-    return;
-  snprintf(output, capacity, "%s", input != NULL ? input : "");
 }
 
 static int level_rank(const char *level) {
@@ -175,11 +161,12 @@ static void rotate_logs(void) {
     (void)rename(EDGE_LOG_PATH, to);
 }
 
-static void write_escaped(FILE *output, const char *input, size_t limit) {
+static size_t append_escaped(char *output, size_t capacity, size_t offset,
+                             const char *input, size_t limit) {
   size_t written = 0U;
   const unsigned char *cursor =
       (const unsigned char *)(input != NULL ? input : "");
-  while (*cursor != '\0' && written < limit) {
+  while (*cursor != '\0' && written < limit && offset + 1U < capacity) {
     const unsigned char value = *cursor++;
     char escaped = '\0';
     if (value == '\\')
@@ -191,16 +178,17 @@ static void write_escaped(FILE *output, const char *input, size_t limit) {
     else if (value == '\r')
       escaped = 'r';
     if (escaped != '\0') {
-      if (written + 2U > limit)
+      if (written + 2U > limit || offset + 2U >= capacity)
         break;
-      fputc('\\', output);
-      fputc(escaped, output);
+      output[offset++] = '\\';
+      output[offset++] = escaped;
       written += 2U;
     } else {
-      fputc(value >= 32U && value != 127U ? value : ' ', output);
+      output[offset++] = (char)(value >= 32U && value != 127U ? value : ' ');
       ++written;
     }
   }
+  return offset;
 }
 
 static void copy_unescaped(char *output, size_t capacity, const char *input) {
@@ -404,25 +392,54 @@ void edge_log_write(const char *level, const char *source, const char *message,
     return;
   if (!ensure_log_dir())
     return;
-  if ((unsigned long)file_size(EDGE_LOG_PATH) >= EDGE_LOG_MAX_FILE_BYTES)
-    rotate_logs();
-  enforce_space_reserve();
-  FILE *output = fopen(EDGE_LOG_PATH, "a");
-  if (output == NULL)
+  char line[512];
+  const int prefix = snprintf(line, sizeof(line), "%" PRId64 "\t", now_ms());
+  if (prefix <= 0 || (size_t)prefix >= sizeof(line))
     return;
-  fprintf(output, "%" PRId64 "\t", now_ms());
-  write_escaped(output, level != NULL ? level : "info", 8U);
-  fputc('\t', output);
-  write_escaped(output, source != NULL ? source : "node", 16U);
-  fputc('\t', output);
-  write_escaped(output, message, 96U);
-  fputc('\t', output);
-  write_escaped(output, detail, 128U);
-  fputc('\n', output);
-  fclose(output);
+  size_t offset = (size_t)prefix;
+  offset = append_escaped(line, sizeof(line), offset,
+                          level != NULL ? level : "info", 8U);
+  if (offset + 1U < sizeof(line))
+    line[offset++] = '\t';
+  offset = append_escaped(line, sizeof(line), offset,
+                          source != NULL ? source : "node", 16U);
+  if (offset + 1U < sizeof(line))
+    line[offset++] = '\t';
+  offset = append_escaped(line, sizeof(line), offset, message, 96U);
+  if (offset + 1U < sizeof(line))
+    line[offset++] = '\t';
+  offset = append_escaped(line, sizeof(line), offset, detail, 128U);
+  if (offset + 1U >= sizeof(line))
+    return;
+  line[offset++] = '\n';
+
+  const int lock = open(EDGE_LOG_LOCK_PATH,
+                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (lock < 0)
+    return;
+  if (flock(lock, LOCK_EX) != 0) {
+    (void)close(lock);
+    return;
+  }
   if ((unsigned long)file_size(EDGE_LOG_PATH) >= EDGE_LOG_MAX_FILE_BYTES)
     rotate_logs();
   enforce_space_reserve();
+  const int fd = open(EDGE_LOG_PATH,
+                      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd >= 0) {
+    (void)fchmod(fd, 0600);
+    (void)write(fd, line, offset);
+    struct stat info;
+    const bool needs_rotate =
+        fstat(fd, &info) == 0 &&
+        (unsigned long)info.st_size >= EDGE_LOG_MAX_FILE_BYTES;
+    (void)close(fd);
+    if (needs_rotate) {
+      rotate_logs();
+      enforce_space_reserve();
+    }
+  }
+  (void)close(lock);
 }
 
 static void local_log_path(unsigned index, char *path, size_t size) {
@@ -444,12 +461,7 @@ static void rotate_local_logs(void) {
 }
 
 static void hex_id(const uint8_t id[16], char output[33]) {
-  static const char digits[] = "0123456789abcdef";
-  for (unsigned index = 0U; index < 16U; ++index) {
-    output[index * 2U] = digits[id[index] >> 4U];
-    output[index * 2U + 1U] = digits[id[index] & 15U];
-  }
-  output[32] = '\0';
+  edge_bytes_to_hex(id, 16U, output, 33U);
 }
 
 static bool write_local_event(const uint8_t platform_id[16],
@@ -487,8 +499,12 @@ static bool write_local_event(const uint8_t platform_id[16],
   }
   (void)fchmod(fd, 0600);
   const bool written = write(fd, line, (size_t)length) == length;
+  struct stat info;
+  const bool needs_rotate =
+      fstat(fd, &info) == 0 &&
+      (unsigned long)info.st_size >= EDGE_LOCAL_LOG_MAX_BYTES;
   (void)close(fd);
-  if ((unsigned long)file_size(EDGE_LOCAL_LOG_PATH) >= EDGE_LOCAL_LOG_MAX_BYTES)
+  if (needs_rotate)
     rotate_local_logs();
   (void)close(lock);
   return written;
@@ -619,6 +635,9 @@ void edge_log_query(const iot_edge_v1_LogRequest *request,
     return;
   }
 
+  const int lock = open(EDGE_LOG_LOCK_PATH,
+                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  const bool locked = lock >= 0 && flock(lock, LOCK_SH) == 0;
   const uint32_t limit =
       request->limit == 0U || request->limit > EDGE_LOG_RESULT_LIMIT
           ? EDGE_LOG_RESULT_LIMIT
@@ -628,5 +647,10 @@ void edge_log_query(const iot_edge_v1_LogRequest *request,
     char path[128];
     log_path(index, path, sizeof(path));
     read_reverse_file(path, request, result, limit);
+  }
+  if (lock >= 0) {
+    if (locked)
+      (void)flock(lock, LOCK_UN);
+    (void)close(lock);
   }
 }

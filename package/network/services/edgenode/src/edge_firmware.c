@@ -14,6 +14,7 @@
 #include "edge_firmware_stream.h"
 #include "edge_process.h"
 #include "edge_sha256.h"
+#include "edge_util.h"
 
 #define FIRMWARE_IMAGE "/tmp/edgenode/firmware.bin"
 #define FIRMWARE_LOCK "/tmp/edgenode/firmware.lock"
@@ -55,16 +56,10 @@ static firmware_transfer transfer = {
 };
 
 static void set_error(char *output, size_t capacity, const char *message) {
-    if (output != NULL && capacity != 0U)
-        snprintf(output, capacity, "%s", message != NULL ? message : "firmware error");
+    edge_set_error(output, capacity, message != NULL ? message : "firmware error");
 }
 
-static uint64_t monotonic_milliseconds(void) {
-    struct timespec value;
-    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
-        return 0U;
-    return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
-}
+#define monotonic_milliseconds edge_monotonic_ms
 
 static void wait_for_sysupgrade_handoff(void) {
     const uint64_t deadline =
@@ -77,13 +72,9 @@ static void wait_for_sysupgrade_handoff(void) {
 }
 
 static void status_path(const uint8_t platform_id[16], char output[96]) {
-    static const char hex[] = "0123456789abcdef";
-    size_t offset = (size_t)snprintf(output, 96U, "/tmp/edgenode/firmware-");
-    for (size_t index = 0; index < 16U && offset + 2U < 96U; ++index) {
-        output[offset++] = hex[platform_id[index] >> 4U];
-        output[offset++] = hex[platform_id[index] & 0x0FU];
-    }
-    snprintf(output + offset, 96U - offset, ".status");
+    char hex_id[33];
+    edge_bytes_to_hex(platform_id, 16U, hex_id, sizeof(hex_id));
+    snprintf(output, 96U, "/tmp/edgenode/firmware-%s.status", hex_id);
 }
 
 static bool write_status(const uint8_t platform_id[16], const uint8_t request_id[16],

@@ -76,11 +76,19 @@ define Build/Compile
 		$(PKG_BUILD_DIR)/edge/src/edge_vpn_plan.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_terminal.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_ws.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_ws_gateway.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_ws_modem.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_ws_terminal.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_ws_transport.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_derived.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_dtu.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_external_io.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_acquisition.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_acquisition_transport.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_acquisition_codec.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_acquisition_sl651.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_acquisition_extio.c \
+		$(PKG_BUILD_DIR)/edge/src/edge_acquisition_serial.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_device_runtime.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_modbus.c \
 		$(PKG_BUILD_DIR)/edge/src/edge_modbus_gateway.c \

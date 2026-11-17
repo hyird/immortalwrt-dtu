@@ -1,50 +1,7 @@
-#include "edge_modbus_gateway.h"
-#include "edge_protocol.h"
-#include "edge_ws.h"
+#include "edge_ws_internal.h"
 
-#include <errno.h>
-#include <inttypes.h>
-#include <signal.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/prctl.h>
-#include <sys/socket.h>
-#include <sys/sysinfo.h>
-#include <sys/utsname.h>
-#include <sys/wait.h>
-#include <syslog.h>
-#include <time.h>
-#include <unistd.h>
-
-#include <pb_encode.h>
-
-#include "edge_capability.h"
-#include "edge_firmware.h"
-#include "edge_modem.h"
-#include "edge_network.h"
-#include "edge_process.h"
-#include "edge_sha256.h"
-#include "edge_status.h"
-#include "edge_terminal.h"
-#include "edge_url.h"
-#include "edge_version.h"
-#include "edge_vpn.h"
-#include "log.h"
-
-#define EDGE_OUTBOX_WINDOW 16U
-#define EDGE_CONNECT_TIMEOUT_SEC 30U
-#define EDGE_APPLICATION_HANDSHAKE_TIMEOUT_MS 30000U
-#define EDGE_OUTBOX_ACK_TIMEOUT_MS 60000U
-#define EDGE_LIVENESS_CHECK_INTERVAL_SEC 1.0
-#define EDGE_TERMINAL_OUTPUT_POLL_INTERVAL 0.01
-#define EDGE_TERMINAL_ACK_TIMEOUT_MS 15000U
-
-static void send_pending_modem_result(edge_ws_session *session);
 static bool send_capability_report(edge_ws_session *session, bool force);
 static bool send_io_status(edge_ws_session *session);
-static void gateway_commands_stopped(edge_ws_app *app);
 
 static void invalidate_command_clock(edge_ws_session *session) {
     const bool was_valid = session->command_clock.valid;
@@ -54,18 +11,6 @@ static void invalidate_command_clock(edge_ws_session *session) {
                                                  session->config->id);
 }
 
-static void reset_terminal_flow(edge_ws_session *session) {
-    memset(session->terminal_output, 0, sizeof(session->terminal_output));
-    session->terminal_output_size = 0U;
-    session->terminal_output_sequence = 0U;
-    session->terminal_output_acked_sequence = 0U;
-    session->terminal_output_deadline_ms = 0U;
-    session->terminal_input_ack_sequence = 0U;
-    session->terminal_output_pending = false;
-    session->terminal_output_sent = false;
-    session->terminal_input_ack_pending = false;
-}
-
 static void traffic_ready(struct ev_loop *loop, struct ev_io *watcher, int events) {
     (void)loop;
     (void)events;
@@ -73,60 +18,8 @@ static void traffic_ready(struct ev_loop *loop, struct ev_io *watcher, int event
     edge_traffic_drain(&app->traffic);
 }
 
-static edge_ws_session *session_from_reconnect(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, reconnect_timer));
-}
-
-static edge_ws_session *session_from_liveness(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, liveness_timer));
-}
-
-static edge_ws_session *session_from_status_report(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, status_report_timer));
-}
-
-static edge_ws_session *session_from_firmware(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, firmware_timer));
-}
-
-static edge_ws_session *session_from_modem(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, modem_timer));
-}
-
-static edge_ws_session *session_from_modem_io(struct ev_io *watcher) {
-    return (edge_ws_session *)((uint8_t *)watcher - offsetof(edge_ws_session, modem_io));
-}
-
-static edge_ws_session *session_from_modem_child(struct ev_child *watcher) {
-    return (edge_ws_session *)((uint8_t *)watcher - offsetof(edge_ws_session, modem_child));
-}
-
-static edge_ws_session *session_from_network(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, network_timer));
-}
-
-static edge_ws_session *session_from_reload(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, reload_timer));
-}
-
-static edge_ws_session *session_from_terminal(struct ev_timer *timer) {
-    return (edge_ws_session *)((uint8_t *)timer - offsetof(edge_ws_session, terminal_timer));
-}
-
-static edge_ws_app *app_from_acquisition(struct ev_timer *timer) {
-    return (edge_ws_app *)((uint8_t *)timer - offsetof(edge_ws_app, acquisition_timer));
-}
-
-static edge_ws_app *app_from_status(struct ev_timer *timer) {
-    return (edge_ws_app *)((uint8_t *)timer - offsetof(edge_ws_app, status_timer));
-}
-
-static edge_ws_app *app_from_acquisition_io(struct ev_io *watcher) {
-    return (edge_ws_app *)((uint8_t *)watcher - offsetof(edge_ws_app, acquisition_io));
-}
-
-static edge_ws_session *session_for_platform(edge_ws_app *app,
-                                             const uint8_t platform_id[16]) {
+edge_ws_session *edge_ws_session_for_platform(edge_ws_app *app,
+                                              const uint8_t platform_id[16]) {
     if (app == NULL || platform_id == NULL)
         return NULL;
     for (size_t index = 0U; index < app->config->platform_count; ++index)
@@ -134,6 +27,8 @@ static edge_ws_session *session_for_platform(edge_ws_app *app,
             return &app->sessions[index];
     return NULL;
 }
+
+#define session_for_platform edge_ws_session_for_platform
 
 static const char *command_state_name(iot_edge_v1_CommandState state) {
     switch (state) {
@@ -158,21 +53,6 @@ static const char *command_state_name(iot_edge_v1_CommandState state) {
     }
 }
 
-static const char *modem_state_name(iot_edge_v1_ModemControlState state) {
-    switch (state) {
-    case iot_edge_v1_ModemControlState_MODEM_CONTROL_ACCEPTED:
-        return "accepted";
-    case iot_edge_v1_ModemControlState_MODEM_CONTROL_RUNNING:
-        return "running";
-    case iot_edge_v1_ModemControlState_MODEM_CONTROL_SUCCEEDED:
-        return "succeeded";
-    case iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED:
-        return "failed";
-    default:
-        return "unknown";
-    }
-}
-
 static const char *firmware_state_name(iot_edge_v1_FirmwareUpdateState state) {
     switch (state) {
     case iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_ACCEPTED:
@@ -190,9 +70,9 @@ static const char *firmware_state_name(iot_edge_v1_FirmwareUpdateState state) {
     }
 }
 
-static void log_uuid_task(const edge_ws_session *session, const char *type,
-                          const uint8_t id[16], const char *state,
-                          const char *summary) {
+void edge_ws_log_uuid_task(const edge_ws_session *session, const char *type,
+                           const uint8_t id[16], const char *state,
+                           const char *summary) {
     char uuid[37];
     edge_config_format_uuid(id, uuid);
     char detail[257];
@@ -210,6 +90,8 @@ static void log_uuid_task(const edge_ws_session *session, const char *type,
         "task", type, detail);
 }
 
+#define log_uuid_task edge_ws_log_uuid_task
+
 static void sync_acquisition_io(edge_ws_app *app) {
     const int fd = edge_acquisition_event_fd(app->acquisition);
     if (ev_is_active(&app->acquisition_io) && app->acquisition_io.fd == fd)
@@ -221,36 +103,8 @@ static void sync_acquisition_io(edge_ws_app *app) {
     }
 }
 
-static int64_t now_ms(void) {
-    struct timespec value;
-    if (clock_gettime(CLOCK_REALTIME, &value) != 0)
-        return 0;
-    return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
-}
-
-static uint64_t monotonic_ms(void) {
-    struct timespec value;
-    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
-        return 0U;
-    return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
-}
-
-static bool random_bytes(uint8_t *output, size_t size) {
-    FILE *input = fopen("/dev/urandom", "rb");
-    if (input == NULL)
-        return false;
-    const bool ok = fread(output, 1U, size, input) == size;
-    fclose(input);
-    return ok;
-}
-
-static void safe_copy(char *output, size_t capacity, const char *input) {
-    if (capacity == 0U)
-        return;
-    snprintf(output, capacity, "%s", input != NULL ? input : "");
-}
-
-static bool init_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
+bool edge_ws_init_envelope(edge_ws_session *session,
+                           iot_edge_v1_Envelope *envelope) {
     uint8_t random[10];
     if (!random_bytes(random, sizeof(random))) {
         edge_log_local_fault(session->config->id, NULL, 0U,
@@ -267,7 +121,10 @@ static bool init_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     return initialized;
 }
 
-static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
+#define init_envelope edge_ws_init_envelope
+
+bool edge_ws_send_envelope(edge_ws_session *session,
+                           iot_edge_v1_Envelope *envelope) {
     size_t wire_size = 0U;
     const char *error = NULL;
     if (!session->websocket_open ||
@@ -289,8 +146,10 @@ static bool send_envelope(edge_ws_session *session, iot_edge_v1_Envelope *envelo
     return sent;
 }
 
+#define send_envelope edge_ws_send_envelope
+
 static bool send_report(edge_ws_session *session, iot_edge_v1_Envelope *envelope,
-                         edge_report_snapshot *snapshot, bool force) {
+                        edge_report_snapshot *snapshot, bool force) {
     edge_report_snapshot candidate = {0};
     const edge_report_decision decision = edge_report_prepare(snapshot, envelope, force, &candidate);
     if (decision == EDGE_REPORT_UNCHANGED) return true;
@@ -395,45 +254,6 @@ static void close_serial_debug(edge_ws_session *session, const char *reason) {
     session->serial_debug_active = false;
 }
 
-#ifndef EDGE_GATEWAY_MAP_PATH
-#define EDGE_GATEWAY_MAP_PATH "/etc/edgenode-modbus.map"
-#endif
-
-static void export_gateway(edge_ws_app *app) {
-    if (!app->gateway) {
-        remove("/tmp/edgenode-modbus.csv");
-        return;
-    }
-    if (app->gateway && !edge_modbus_gateway_export(app->gateway, "/tmp/edgenode-modbus.csv")) {
-        remove("/tmp/edgenode-modbus.csv");
-        syslog(LOG_ERR, "cannot export Modbus gateway register map");
-    }
-}
-
-static void acquisition_sample(void *context, const uint8_t platform[16],
-    const edge_acquisition_sample *sample) {
-    edge_ws_app *app = context;
-    edge_modbus_gateway_update(app->gateway, platform, sample, monotonic_ms());
-    if (sample == NULL)
-        gateway_commands_stopped(app);
-}
-
-static edge_modbus_gateway *prepare_gateway(const edge_acquisition_source *sources, size_t count, uint16_t port) {
-    for (size_t s = 0; s < count; ++s) {
-        const edge_runtime_config *config = sources[s].config;
-        for (size_t i = 0; i < config->item_count; ++i) {
-            const iot_edge_v1_ConfigItem *item = &config->items[i];
-            if ((item->which_item == iot_edge_v1_ConfigItem_endpoint_tag &&
-                 item->item.endpoint.enabled && item->item.endpoint.mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER &&
-                 item->item.endpoint.port == port) ||
-                (item->which_item == iot_edge_v1_ConfigItem_dtu_tag && item->item.dtu.enabled &&
-                 item->item.dtu.south_mode == iot_edge_v1_LinkMode_LINK_MODE_TCP_SERVER &&
-                 item->item.dtu.south_port == port)) return NULL;
-        }
-    }
-    return edge_modbus_gateway_prepare(EDGE_GATEWAY_MAP_PATH, sources, count);
-}
-
 static void acquisition_debug(void *context, const uint8_t platform_id[16], const iot_edge_v1_RawPacket *packet) {
     edge_ws_app *app = context;
     edge_ws_session *session = session_for_platform(app, platform_id);
@@ -478,100 +298,6 @@ static bool acquisition_telemetry(void *context,
     edge_log_local_fault(platform_id, device_id, protocol,
                          EDGE_LOCAL_FAULT_PARENT_OUTBOX, queued ? 0U : 3U);
     return queued;
-}
-
-static uint8_t gateway_write(void *context, const edge_modbus_gateway_write *write,
-                              uint8_t command_id[16], uint64_t deadline_ms) {
-    edge_ws_app *app = context;
-    const uint64_t now = monotonic_ms();
-    if (now == 0U || now >= deadline_ms)
-        return 4U;
-    edge_ws_gateway_command *pending = NULL;
-    for (size_t i = 0U; i < 8U; ++i) {
-        /* A rebound listener can still have an old real command outstanding.
-         * Do not merge another partial write with its pre-readback cache. */
-        if (app->gateway_commands[i].active)
-            return 6U;
-        if (!pending)
-            pending = &app->gateway_commands[i];
-    }
-    if (!random_bytes(command_id, 16U))
-        return 4U;
-    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
-    request.command_id.size = request.device_id.size = 16U;
-    memcpy(request.command_id.bytes, command_id, 16U);
-    memcpy(request.device_id.bytes, write->device_id, 16U);
-    request.values_count = 1U;
-    safe_copy(request.values[0].element_id, sizeof(request.values[0].element_id), write->element_id);
-    request.values[0].has_expected = true;
-    request.values[0].expected.kind = iot_edge_v1_ValueKind_VALUE_STRING;
-    request.values[0].expected.which_value = iot_edge_v1_ScalarValue_string_value_tag;
-    safe_copy(request.values[0].expected.value.string_value,
-              sizeof(request.values[0].expected.value.string_value), write->value);
-    request.external_io = write->external_io;
-    const uint64_t remaining = deadline_ms - now;
-    request.timeout_ms = remaining > UINT32_MAX ? UINT32_MAX : (uint32_t)remaining;
-    request.readback_count = 1U;
-    request.has_start_before_ms = true;
-    /* This is a trusted local monotonic deadline, not a remote DB timestamp.
-     * The public acquisition API still stamps/checks the current generation. */
-    request.start_before_ms = 1;
-    pending->active = true;
-    pending->external_io = write->external_io;
-    memcpy(pending->command_id, command_id, 16U);
-    memcpy(pending->platform_id, write->platform_id, 16U);
-    memcpy(pending->device_id, write->device_id, 16U);
-    char error[256] = {0};
-    if (!edge_acquisition_command_for_platform_until(app->acquisition, write->platform_id,
-            &request, deadline_ms, deadline_ms, error, sizeof(error))) {
-        pending->active = false;
-        return 6U;
-    }
-    return 0U;
-}
-
-static bool consume_gateway_result(edge_ws_app *app, const uint8_t platform_id[16],
-                                     const iot_edge_v1_CommandResult *result) {
-    if (!result || result->command_id.size != 16U || result->device_id.size != 16U)
-        return false;
-    for (size_t i = 0U; i < 8U; ++i) {
-        edge_ws_gateway_command *pending = &app->gateway_commands[i];
-        if (!pending->active || memcmp(pending->command_id, result->command_id.bytes, 16U) ||
-            memcmp(pending->platform_id, platform_id, 16U) ||
-            memcmp(pending->device_id, result->device_id.bytes, 16U))
-            continue;
-        const bool success = result->state == iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED;
-        const bool external_io = pending->external_io;
-        pending->active = false; /* Release before completion can submit the next point. */
-        if (success && external_io) {
-            /* Protocol reads already publish samples while parsing. External IO
-             * reports the real output readback here, ahead of its ordinary period. */
-            for (pb_size_t value = 0U; value < result->actual_values_count; ++value) {
-                const iot_edge_v1_TelemetryValue *actual = &result->actual_values[value];
-                edge_acquisition_sample sample = {.valid = actual->has_value,
-                    .observed_at_ms = result->completed_at_ms, .value = actual->value};
-                memcpy(sample.device_id, result->device_id.bytes, 16U);
-                safe_copy(sample.element_id, sizeof(sample.element_id), actual->element_id);
-                edge_modbus_gateway_update(app->gateway, platform_id, &sample, monotonic_ms());
-            }
-        }
-        /* A replaced/destroyed server has no matching random command ID. */
-        edge_modbus_gateway_write_result(app->gateway_server, result->command_id.bytes, success);
-        return true;
-    }
-    return false;
-}
-
-static void gateway_commands_stopped(edge_ws_app *app) {
-    /* Only after the old worker is definitely stopped and its IPC is closed:
-     * no further result can arrive, so these IDs may now be retired. */
-    for (size_t i = 0U; i < 8U; ++i) {
-        edge_ws_gateway_command *pending = &app->gateway_commands[i];
-        if (!pending->active)
-            continue;
-        pending->active = false;
-        edge_modbus_gateway_write_result(app->gateway_server, pending->command_id, false);
-    }
 }
 
 static bool acquisition_command_result(void *context,
@@ -657,6 +383,39 @@ static void send_outbox_window(edge_ws_session *session) {
     }
 }
 
+static void populate_modem_fields(const edge_ws_session *session,
+                                  bool *modem_available_out,
+                                  char *iccid, size_t iccid_size,
+                                  uint32_t *signal_csq, int32_t *signal_rssi_dbm,
+                                  uint32_t *signal_percent, bool *mobile_registered,
+                                  int32_t *mobile_registration_status,
+                                  iot_edge_v1_ModemSimState *sim_state,
+                                  char *apn, size_t apn_size,
+                                  char *mobile_operator, size_t operator_size,
+                                  bool *mobile_connected,
+                                  char *mobile_ipv4, size_t ipv4_size) {
+    *signal_csq = 99U;
+    *signal_rssi_dbm = -1;
+    *mobile_registration_status = -1;
+    edge_modem_info modem;
+    bool modem_available = false;
+    if (edge_modem_read_status(session->app->config->modem_status_path,
+                               &modem, &modem_available)) {
+        *modem_available_out = modem_available;
+        safe_copy(iccid, iccid_size, modem.iccid);
+        *signal_csq = (uint32_t)modem.csq;
+        *signal_rssi_dbm = modem.rssi_dbm;
+        *signal_percent = modem.signal_percent;
+        *mobile_registered = modem.registered;
+        *mobile_registration_status = modem.registration_status;
+        *sim_state = modem.sim_state;
+        safe_copy(apn, apn_size, modem.apn);
+        safe_copy(mobile_operator, operator_size, modem.mobile_operator);
+        *mobile_connected = modem.connected;
+        safe_copy(mobile_ipv4, ipv4_size, modem.mobile_ipv4);
+    }
+}
+
 static bool send_hello(edge_ws_session *session) {
     iot_edge_v1_Envelope *envelope = &session->app->envelope;
     if (!init_envelope(session, envelope))
@@ -698,27 +457,13 @@ static bool send_hello(edge_ws_session *session) {
     safe_copy(hello->log_level, sizeof(hello->log_level), edge_log_level());
     hello->supports_modem_control =
         session->config->bootstrap && session->app->config->modem_at_port[0] != '\0';
-    edge_modem_info modem;
-    bool modem_available = false;
-    hello->signal_csq = 99U;
-    hello->signal_rssi_dbm = -1;
-    hello->mobile_registration_status = -1;
-    if (edge_modem_read_status(session->app->config->modem_status_path,
-                               &modem, &modem_available)) {
-        hello->modem_available = modem_available;
-        safe_copy(hello->iccid, sizeof(hello->iccid), modem.iccid);
-        hello->signal_csq = (uint32_t)modem.csq;
-        hello->signal_rssi_dbm = modem.rssi_dbm;
-        hello->signal_percent = modem.signal_percent;
-        hello->mobile_registered = modem.registered;
-        hello->mobile_registration_status = modem.registration_status;
-        hello->sim_state = modem.sim_state;
-        safe_copy(hello->apn, sizeof(hello->apn), modem.apn);
-        safe_copy(hello->mobile_operator, sizeof(hello->mobile_operator),
-                  modem.mobile_operator);
-        hello->mobile_connected = modem.connected;
-        safe_copy(hello->mobile_ipv4, sizeof(hello->mobile_ipv4), modem.mobile_ipv4);
-    }
+    populate_modem_fields(
+        session, &hello->modem_available, hello->iccid, sizeof(hello->iccid),
+        &hello->signal_csq, &hello->signal_rssi_dbm, &hello->signal_percent,
+        &hello->mobile_registered, &hello->mobile_registration_status,
+        &hello->sim_state, hello->apn, sizeof(hello->apn),
+        hello->mobile_operator, sizeof(hello->mobile_operator),
+        &hello->mobile_connected, hello->mobile_ipv4, sizeof(hello->mobile_ipv4));
     session->hello_sent_monotonic_ms = monotonic_ms();
     const bool sent = send_envelope(session, envelope);
     if (!sent || session->hello_sent_monotonic_ms == 0U) {
@@ -1025,7 +770,7 @@ static void send_config_result(edge_ws_session *session, uint64_t revision,
                    "acquisition-config", detail);
 }
 
-static size_t build_acquisition_sources(
+size_t edge_ws_build_acquisition_sources(
     edge_ws_app *app, const edge_ws_session *replacement_session,
     const edge_runtime_config *replacement_config,
     edge_acquisition_source sources[EDGE_MAX_PLATFORMS]) {
@@ -1044,174 +789,7 @@ static size_t build_acquisition_sources(
     return count;
 }
 
-static void gateway_network_changed(void *context, bool available) {
-    edge_ws_app *app = context;
-    app->gateway_network_available = available;
-    char device[33] = {0};
-    const bool resolved = available && edge_network_gateway_resolve(
-        app->config->modbus_gateway_interface, true, device,
-        app->gateway_error, sizeof(app->gateway_error));
-    if (!available)
-        safe_copy(app->gateway_error, sizeof(app->gateway_error), "network event subscription unavailable; restart required");
-    if (resolved && app->config->modbus_gateway &&
-        edge_modbus_gateway_listening(app->gateway_server) && !strcmp(device, app->gateway_device)) {
-        app->gateway_error[0] = '\0';
-        return;
-    }
-    edge_modbus_gateway_close(app->gateway_server);
-    app->gateway_server = NULL;
-    app->gateway_device[0] = '\0';
-    if (!resolved) return;
-    app->gateway_error[0] = '\0';
-    if (!app->config->modbus_gateway) return;
-    if (!app->gateway) {
-        edge_acquisition_source sources[EDGE_MAX_PLATFORMS];
-        const size_t count = build_acquisition_sources(app, NULL, NULL, sources);
-        app->gateway = prepare_gateway(sources, count, app->config->modbus_gateway_port);
-        if (!app->gateway) {
-            safe_copy(app->gateway_error, sizeof(app->gateway_error), "gateway map unavailable");
-            return;
-        }
-    }
-    if (!edge_modbus_gateway_set_unit_id(app->gateway, app->config->modbus_gateway_unit_id)) {
-        safe_copy(app->gateway_error, sizeof(app->gateway_error), "gateway Unit ID must be between 1 and 247");
-        return;
-    }
-    app->gateway_server = edge_modbus_gateway_listen(app->loop, app->gateway, device,
-        app->config->modbus_gateway_port);
-    if (!app->gateway_server) {
-        safe_copy(app->gateway_error, sizeof(app->gateway_error), "cannot bind logical interface L3 device");
-        return;
-    }
-    safe_copy(app->gateway_device, sizeof(app->gateway_device), device);
-    app->gateway_error[0] = '\0';
-    edge_modbus_gateway_set_writer(app->gateway_server, gateway_write, app);
-}
-
-static bool apply_gateway_settings(edge_ws_app *app, const iot_edge_v1_ModbusGatewaySettings *settings,
-    char *error, size_t error_size) {
-    if (!settings->port || settings->port > 65535U || settings->unit_id > 247U) {
-        snprintf(error, error_size, "监听端口或从站 ID 无效（ID 必须为 1..247）"); return false;
-    }
-    char device[33] = {0};
-    if (!edge_network_gateway_resolve(settings->interface_name, settings->enabled,
-                                      device, error, error_size)) return false;
-    if (settings->enabled && !app->gateway_network_available) {
-        snprintf(error, error_size, "网络事件监听不可用，请重启服务"); return false;
-    }
-    edge_app_config candidate = app->config_storage;
-    candidate.modbus_gateway = settings->enabled;
-    candidate.modbus_gateway_port = (uint16_t)settings->port;
-    candidate.modbus_gateway_unit_id = settings->unit_id ? (uint8_t)settings->unit_id : 1U;
-    safe_copy(candidate.modbus_gateway_interface, sizeof(candidate.modbus_gateway_interface), settings->interface_name);
-    const bool reuse = settings->enabled && edge_modbus_gateway_listening(app->gateway_server) &&
-        app->config->modbus_gateway_port == settings->port && !strcmp(app->gateway_device, device);
-    edge_modbus_gateway *map = NULL;
-    edge_modbus_gateway_server *server = NULL;
-    if (settings->enabled) {
-        edge_acquisition_source sources[EDGE_MAX_PLATFORMS];
-        const size_t count = build_acquisition_sources(app, NULL, NULL, sources);
-        map = prepare_gateway(sources, count, candidate.modbus_gateway_port);
-        if (!map) { snprintf(error, error_size, "地址映射不可用、容量已满或监听端口冲突"); return false; }
-        if (!edge_modbus_gateway_set_unit_id(map, candidate.modbus_gateway_unit_id)) {
-            edge_modbus_gateway_free(map); snprintf(error, error_size, "从站 ID 无效"); return false;
-        }
-        server = reuse ? app->gateway_server : edge_modbus_gateway_listen(app->loop, map,
-            device, candidate.modbus_gateway_port);
-        if (!server) { edge_modbus_gateway_free(map); snprintf(error, error_size, "无法绑定监听接口或端口"); return false; }
-        edge_modbus_gateway_set_writer(server, gateway_write, app);
-    }
-    if (!edge_acquisition_set_gateway_enabled(app->acquisition, settings->enabled)) {
-        if (!reuse) edge_modbus_gateway_close(server);
-        edge_modbus_gateway_free(map);
-        snprintf(error, error_size, "采集进程忙，请稍后重试"); return false;
-    }
-    if (!edge_config_save_modbus_gateway(&candidate)) {
-        if (!edge_acquisition_set_gateway_enabled(app->acquisition, app->config->modbus_gateway))
-            syslog(LOG_ERR, "cannot restore gateway sampling mode after UCI failure");
-        if (!reuse) edge_modbus_gateway_close(server);
-        edge_modbus_gateway_free(map);
-        snprintf(error, error_size, "无法持久保存网关配置"); return false;
-    }
-    if (reuse) edge_modbus_gateway_replace(server, map);
-    else edge_modbus_gateway_close(app->gateway_server);
-    edge_modbus_gateway_free(app->gateway);
-    app->gateway = map; app->gateway_server = server;
-    app->config_storage = candidate;
-    safe_copy(app->gateway_device, sizeof(app->gateway_device), settings->enabled ? device : "");
-    app->gateway_error[0] = '\0';
-    export_gateway(app);
-    return true;
-}
-
-static bool gateway_points(edge_ws_session *session, const iot_edge_v1_ModbusGatewayRequest *request,
-    iot_edge_v1_ModbusGatewayResult *result) {
-    edge_modbus_gateway *loaded = NULL;
-    const edge_modbus_gateway *map = session->app->gateway;
-    if (!map) {
-        loaded = edge_modbus_gateway_load(EDGE_GATEWAY_MAP_PATH);
-        map = loaded;
-        if (!map) { safe_copy(result->message, sizeof(result->message), "无法读取寄存器地址预留表"); return false; }
-    }
-    if (!edge_modbus_gateway_digest(map, session->config->id, result->mapping_digest.bytes)) {
-        edge_modbus_gateway_free(loaded);
-        safe_copy(result->message, sizeof(result->message), "无法计算映射表版本");
-        return false;
-    }
-    result->mapping_digest.size = 32;
-    const bool success = edge_modbus_gateway_points(map, session->config->id, &session->runtime_config,
-        session->app->config->modbus_gateway, edge_modbus_gateway_listening(session->app->gateway_server),
-        request, result, monotonic_ms());
-    edge_modbus_gateway_free(loaded);
-    return success;
-}
-
-static bool apply_gateway_order(edge_ws_session *session,
-    const iot_edge_v1_ModbusGatewayRequest *request, char *error, size_t error_size) {
-    edge_ws_app *app = session->app;
-    if (request->has_settings || request->include_points || !app->config->modbus_gateway ||
-        !edge_modbus_gateway_listening(app->gateway_server)) {
-        snprintf(error, error_size, "请启用网关并单独提交地址排序");
-        return false;
-    }
-    if (!edge_modbus_gateway_reorder(app->gateway, EDGE_GATEWAY_MAP_PATH, session->config->id,
-                                    &request->order)) {
-        snprintf(error, error_size, "映射已变化、排序无效或保存失败；请重新读取后排序");
-        return false;
-    }
-    edge_modbus_gateway_replace(app->gateway_server, app->gateway);
-    export_gateway(app);
-    return true;
-}
-
-static void handle_gateway_request(edge_ws_session *session, const iot_edge_v1_Envelope *input) {
-    const iot_edge_v1_ModbusGatewayRequest request = input->payload.modbus_gateway_request;
-    if (request.request_id.size != 16U) return;
-    char error[257] = {0};
-    const bool success = request.has_order
-        ? apply_gateway_order(session, &request, error, sizeof(error))
-        : !request.has_settings || apply_gateway_settings(session->app, &request.settings, error, sizeof(error));
-    iot_edge_v1_Envelope *output = &session->app->envelope;
-    if (!init_envelope(session, output)) return;
-    output->which_payload = iot_edge_v1_Envelope_modbus_gateway_result_tag;
-    iot_edge_v1_ModbusGatewayResult *result = &output->payload.modbus_gateway_result;
-    edge_protocol_set_bytes(&result->request_id, sizeof(result->request_id.bytes), request.request_id.bytes, 16U);
-    result->success = success;
-    result->order_applied = success && request.has_order;
-    result->order_supported = true;
-    safe_copy(result->message, sizeof(result->message), success ? "ok" : error);
-    result->has_settings = true;
-    result->settings.enabled = session->app->config->modbus_gateway;
-    result->settings.port = session->app->config->modbus_gateway_port;
-    result->settings.unit_id = session->app->config->modbus_gateway_unit_id;
-    safe_copy(result->settings.interface_name, sizeof(result->settings.interface_name),
-        session->app->config->modbus_gateway_interface);
-    if (success && !request.has_settings && session->app->gateway_error[0])
-        safe_copy(result->message, sizeof(result->message), session->app->gateway_error);
-    if (result->success && request.include_points)
-        result->success = gateway_points(session, &request, result);
-    if (!send_envelope(session, output)) syslog(LOG_WARNING, "Modbus gateway configuration reply was not sent");
-}
+#define build_acquisition_sources edge_ws_build_acquisition_sources
 
 static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelope) {
     const edge_config_replay replay = edge_protocol_config_replay(envelope,
@@ -1577,70 +1155,6 @@ static void report_network_rollback(edge_ws_app *app) {
     broadcast_network_state(app);
 }
 
-static bool send_modem_result(edge_ws_session *session, const uint8_t request_id[16],
-                              iot_edge_v1_ModemControlAction action,
-                              iot_edge_v1_ModemControlState state,
-                              const char *message, const char *apn) {
-    iot_edge_v1_Envelope *output = &session->app->envelope;
-    if (!init_envelope(session, output))
-        return false;
-    output->which_payload = iot_edge_v1_Envelope_modem_control_result_tag;
-    edge_protocol_set_bytes(&output->payload.modem_control_result.request_id,
-                            sizeof(output->payload.modem_control_result.request_id.bytes),
-                            request_id, 16U);
-    output->payload.modem_control_result.action = action;
-    output->payload.modem_control_result.state = state;
-    safe_copy(output->payload.modem_control_result.message,
-              sizeof(output->payload.modem_control_result.message), message);
-    safe_copy(output->payload.modem_control_result.apn,
-              sizeof(output->payload.modem_control_result.apn), apn);
-    const bool sent = send_envelope(session, output);
-    if (state == iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED)
-        edge_log_local_fault(session->config->id, NULL, 0U,
-                             EDGE_LOCAL_FAULT_MODEM, (unsigned)action);
-    if (!sent)
-        edge_log_local_fault(session->config->id, NULL, 0U,
-                             EDGE_LOCAL_FAULT_MODEM, 100U);
-    char summary[160];
-    snprintf(summary, sizeof(summary), "action=%d message=%s",
-             (int)action, message != NULL ? message : "");
-    log_uuid_task(session, "modem-control", request_id,
-                  modem_state_name(state), summary);
-    return sent;
-}
-
-typedef struct {
-    uint8_t request_id[16];
-    iot_edge_v1_ModemControlAction action;
-    bool success;
-    char message[257];
-    char apn[101];
-} edge_modem_worker_result;
-
-static void modem_worker(edge_ws_session *session, int worker_fd,
-                         const iot_edge_v1_ModemControlRequest *request) {
-    (void)prctl(PR_SET_PDEATHSIG, SIGTERM);
-    if (getppid() == 1)
-        _exit(EXIT_FAILURE);
-    edge_process_close_inherited_fds(worker_fd);
-    edge_modem_worker_result result = {0};
-    memcpy(result.request_id, request->request_id.bytes, sizeof(result.request_id));
-    result.action = request->action;
-    safe_copy(result.apn, sizeof(result.apn), request->apn);
-    result.success = edge_modem_control(session->app->config->modem_at_port, request,
-                                        result.message, sizeof(result.message));
-    for (;;) {
-        const ssize_t sent = send(worker_fd, &result, sizeof(result), MSG_NOSIGNAL);
-        if (sent == (ssize_t)sizeof(result))
-            break;
-        if (sent < 0 && errno == EINTR)
-            continue;
-        break;
-    }
-    close(worker_fd);
-    _exit(result.success ? EXIT_SUCCESS : EXIT_FAILURE);
-}
-
 static void handle_network_config(edge_ws_session *session,
                                   const iot_edge_v1_NetworkConfigRequest *request) {
     uint8_t request_id[16] = {0};
@@ -1705,31 +1219,18 @@ static bool send_status_report(edge_ws_session *session) {
     heartbeat->has_tcp_traffic = heartbeat->tcp_traffic.sample_id != 0U;
     heartbeat->has_vpn_traffic =
         edge_vpn_sample(&session->vpn, monotonic_ms(), &heartbeat->vpn_traffic);
-    heartbeat->signal_csq = 99U;
-    heartbeat->signal_rssi_dbm = -1;
-    heartbeat->mobile_registration_status = -1;
     heartbeat->supports_modem_control =
         session->config->bootstrap && session->app->config->modem_at_port[0] != '\0';
     safe_copy(heartbeat->log_level, sizeof(heartbeat->log_level), edge_log_level());
-    edge_modem_info modem;
-    bool modem_available = false;
-    if (edge_modem_read_status(session->app->config->modem_status_path,
-                               &modem, &modem_available)) {
-        heartbeat->modem_available = modem_available;
-        safe_copy(heartbeat->iccid, sizeof(heartbeat->iccid), modem.iccid);
-        heartbeat->signal_csq = (uint32_t)modem.csq;
-        heartbeat->signal_rssi_dbm = modem.rssi_dbm;
-        heartbeat->signal_percent = modem.signal_percent;
-        heartbeat->mobile_registered = modem.registered;
-        heartbeat->mobile_registration_status = modem.registration_status;
-        heartbeat->sim_state = modem.sim_state;
-        safe_copy(heartbeat->apn, sizeof(heartbeat->apn), modem.apn);
-        safe_copy(heartbeat->mobile_operator, sizeof(heartbeat->mobile_operator),
-                  modem.mobile_operator);
-        heartbeat->mobile_connected = modem.connected;
-        safe_copy(heartbeat->mobile_ipv4, sizeof(heartbeat->mobile_ipv4),
-                  modem.mobile_ipv4);
-    }
+    populate_modem_fields(
+        session, &heartbeat->modem_available, heartbeat->iccid,
+        sizeof(heartbeat->iccid), &heartbeat->signal_csq,
+        &heartbeat->signal_rssi_dbm, &heartbeat->signal_percent,
+        &heartbeat->mobile_registered, &heartbeat->mobile_registration_status,
+        &heartbeat->sim_state, heartbeat->apn,
+        sizeof(heartbeat->apn), heartbeat->mobile_operator,
+        sizeof(heartbeat->mobile_operator), &heartbeat->mobile_connected,
+        heartbeat->mobile_ipv4, sizeof(heartbeat->mobile_ipv4));
     struct sysinfo info;
     if (sysinfo(&info) == 0)
         heartbeat->uptime_sec = (uint64_t)info.uptime;
@@ -1802,191 +1303,6 @@ static void handle_firmware_chunk(edge_ws_session *session,
             session->firmware_traffic_flush_followup = false;
         }
     }
-}
-
-static void handle_modem_control(edge_ws_session *session,
-                                 const iot_edge_v1_ModemControlRequest *request) {
-    uint8_t request_id[16] = {0};
-    if (request->request_id.size != 16U) {
-        (void)send_modem_result(session, request_id, request->action,
-                                iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED,
-                                "invalid modem request id", request->apn);
-        return;
-    }
-    memcpy(request_id, request->request_id.bytes, sizeof(request_id));
-    char message[257] = {0};
-    if (!edge_modem_validate_control(request, message, sizeof(message))) {
-        (void)send_modem_result(session, request_id, request->action,
-                                iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED,
-                                message, request->apn);
-        return;
-    }
-    if (session->modem_worker_pid > 0 || session->modem_result_pending) {
-        (void)send_modem_result(session, request_id, request->action,
-                                iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED,
-                                "another modem operation is still pending", request->apn);
-        return;
-    }
-    int sockets[2];
-    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK,
-                   0, sockets) != 0) {
-        (void)send_modem_result(session, request_id, request->action,
-                                iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED,
-                                "cannot start modem worker", request->apn);
-        return;
-    }
-    const pid_t child = fork();
-    if (child < 0) {
-        close(sockets[0]);
-        close(sockets[1]);
-        (void)send_modem_result(session, request_id, request->action,
-                                iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED,
-                                "cannot start modem worker", request->apn);
-        return;
-    }
-    if (child == 0) {
-        close(sockets[0]);
-        modem_worker(session, sockets[1], request);
-    }
-    close(sockets[1]);
-    session->modem_worker_pid = child;
-    session->modem_worker_fd = sockets[0];
-    session->modem_result_received = false;
-    memcpy(session->modem_result_request_id, request_id,
-           sizeof(session->modem_result_request_id));
-    session->modem_result_action = request->action;
-    session->modem_result_state =
-        iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED;
-    safe_copy(session->modem_result_message,
-              sizeof(session->modem_result_message),
-              "modem worker exited before returning a result");
-    safe_copy(session->modem_result_apn, sizeof(session->modem_result_apn),
-              request->apn);
-    (void)send_modem_result(session, request_id, request->action,
-                            iot_edge_v1_ModemControlState_MODEM_CONTROL_ACCEPTED,
-                            "modem control accepted", request->apn);
-    ev_io_stop(session->app->loop, &session->modem_io);
-    ev_io_set(&session->modem_io, session->modem_worker_fd, EV_READ);
-    ev_io_start(session->app->loop, &session->modem_io);
-    ev_child_stop(session->app->loop, &session->modem_child);
-    ev_child_set(&session->modem_child, child, 0);
-    ev_child_start(session->app->loop, &session->modem_child);
-    ev_timer_stop(session->app->loop, &session->modem_timer);
-    ev_timer_set(&session->modem_timer, 60.0, 0.0);
-    ev_timer_start(session->app->loop, &session->modem_timer);
-}
-
-static bool send_terminal_opened(edge_ws_session *session,
-                                 const uint8_t terminal_id[16]) {
-    iot_edge_v1_Envelope *output = &session->app->envelope;
-    if (!init_envelope(session, output))
-        return false;
-    output->which_payload = iot_edge_v1_Envelope_terminal_opened_tag;
-    return edge_protocol_set_bytes(
-               &output->payload.terminal_opened.terminal_id,
-               sizeof(output->payload.terminal_opened.terminal_id.bytes),
-               terminal_id, 16U) &&
-           send_envelope(session, output);
-}
-
-static void send_terminal_close(edge_ws_session *session, const uint8_t terminal_id[16],
-                                int32_t exit_code, const char *reason) {
-    iot_edge_v1_Envelope *output = &session->app->envelope;
-    if (!init_envelope(session, output))
-        return;
-    output->which_payload = iot_edge_v1_Envelope_terminal_close_tag;
-    edge_protocol_set_bytes(&output->payload.terminal_close.terminal_id,
-                            sizeof(output->payload.terminal_close.terminal_id.bytes),
-                            terminal_id, 16U);
-    output->payload.terminal_close.exit_code = exit_code;
-    safe_copy(output->payload.terminal_close.reason,
-              sizeof(output->payload.terminal_close.reason), reason);
-    send_envelope(session, output);
-}
-
-static bool send_terminal_data_ack(edge_ws_session *session,
-                                   const uint8_t terminal_id[16],
-                                   uint64_t sequence) {
-    iot_edge_v1_Envelope *output = &session->app->envelope;
-    if (!init_envelope(session, output))
-        return false;
-    output->which_payload = iot_edge_v1_Envelope_terminal_data_ack_tag;
-    return edge_protocol_set_bytes(
-               &output->payload.terminal_data_ack.terminal_id,
-               sizeof(output->payload.terminal_data_ack.terminal_id.bytes),
-               terminal_id, 16U) &&
-           (output->payload.terminal_data_ack.sequence = sequence) != 0U &&
-           send_envelope(session, output);
-}
-
-static void stage_terminal_input_ack(edge_ws_session *session, uint64_t sequence) {
-    if (sequence == 0U)
-        return;
-    session->terminal_input_ack_sequence = sequence;
-    session->terminal_input_ack_pending = true;
-    if (send_terminal_data_ack(session, session->terminal_id, sequence))
-        session->terminal_input_ack_pending = false;
-}
-
-static bool send_terminal_output(edge_ws_session *session) {
-    if (!session->terminal_output_pending || session->terminal_output_size == 0U ||
-        session->terminal_output_sequence == 0U)
-        return false;
-    iot_edge_v1_Envelope *output = &session->app->envelope;
-    if (!init_envelope(session, output))
-        return false;
-    output->which_payload = iot_edge_v1_Envelope_terminal_data_tag;
-    return edge_protocol_set_bytes(
-               &output->payload.terminal_data.terminal_id,
-               sizeof(output->payload.terminal_data.terminal_id.bytes),
-               session->terminal_id, sizeof(session->terminal_id)) &&
-           edge_protocol_set_bytes(
-               &output->payload.terminal_data.data,
-               sizeof(output->payload.terminal_data.data.bytes),
-               session->terminal_output, session->terminal_output_size) &&
-           (output->payload.terminal_data.sequence =
-                session->terminal_output_sequence) != 0U &&
-           send_envelope(session, output);
-}
-
-static void fail_terminal(edge_ws_session *session, const char *reason) {
-    uint8_t terminal_id[16];
-    memcpy(terminal_id, session->terminal_id, sizeof(terminal_id));
-    edge_terminal_close(terminal_id);
-    ev_timer_stop(session->app->loop, &session->terminal_timer);
-    session->terminal_open = false;
-    send_terminal_close(session, terminal_id, -1, reason);
-    reset_terminal_flow(session);
-}
-
-static void handle_terminal_open(edge_ws_session *session,
-                                 const iot_edge_v1_TerminalOpen *request) {
-    uint8_t terminal_id[16] = {0};
-    if (request->terminal_id.size == 16U)
-        memcpy(terminal_id, request->terminal_id.bytes, sizeof(terminal_id));
-    if (session->terminal_open) {
-        send_terminal_close(session, terminal_id, -1,
-                            "another terminal is active on this platform");
-        return;
-    }
-    char error[129] = {0};
-    if (!edge_terminal_open(request, error, sizeof(error))) {
-        send_terminal_close(session, terminal_id, -1, error);
-        return;
-    }
-    reset_terminal_flow(session);
-    memcpy(session->terminal_id, terminal_id, sizeof(session->terminal_id));
-    session->terminal_open = true;
-    if (!send_terminal_opened(session, terminal_id)) {
-        edge_terminal_close(terminal_id);
-        session->terminal_open = false;
-        reset_terminal_flow(session);
-        return;
-    }
-    ev_timer_stop(session->app->loop, &session->terminal_timer);
-    ev_timer_set(&session->terminal_timer, EDGE_TERMINAL_OUTPUT_POLL_INTERVAL,
-                 EDGE_TERMINAL_OUTPUT_POLL_INTERVAL);
-    ev_timer_start(session->app->loop, &session->terminal_timer);
 }
 
 static void dispatch_platform_message(edge_ws_session *session,
@@ -2201,70 +1517,16 @@ static void dispatch_platform_message(edge_ws_session *session,
             handle_terminal_open(session, &envelope->payload.terminal_open);
         break;
     case iot_edge_v1_Envelope_terminal_data_tag:
-        if (session->terminal_open) {
-            const iot_edge_v1_TerminalData *data =
-                &envelope->payload.terminal_data;
-            if (data->terminal_id.size != 16U ||
-                memcmp(data->terminal_id.bytes, session->terminal_id,
-                       sizeof(session->terminal_id)) != 0) {
-                fail_terminal(session, "terminal input identity mismatch");
-                break;
-            }
-            uint64_t acked_sequence = 0U;
-            const edge_terminal_input_result result =
-                edge_terminal_write(data, &acked_sequence);
-            if (result == EDGE_TERMINAL_INPUT_ACKED)
-                stage_terminal_input_ack(session, acked_sequence);
-            else if (result == EDGE_TERMINAL_INPUT_ERROR)
-                fail_terminal(session, "terminal input sequence or write failed");
-        }
+        edge_ws_handle_terminal_data(session, &envelope->payload.terminal_data);
         break;
     case iot_edge_v1_Envelope_terminal_data_ack_tag:
-        if (session->terminal_open) {
-            const iot_edge_v1_TerminalDataAck *ack =
-                &envelope->payload.terminal_data_ack;
-            if (ack->terminal_id.size != 16U || ack->sequence == 0U ||
-                memcmp(ack->terminal_id.bytes, session->terminal_id,
-                       sizeof(session->terminal_id)) != 0 ||
-                (!session->terminal_output_pending &&
-                 ack->sequence != session->terminal_output_acked_sequence) ||
-                (session->terminal_output_pending &&
-                 ack->sequence != session->terminal_output_sequence)) {
-                fail_terminal(session, "terminal output acknowledgement mismatch");
-            } else if (session->terminal_output_pending) {
-                session->terminal_output_acked_sequence = ack->sequence;
-                session->terminal_output_size = 0U;
-                session->terminal_output_deadline_ms = 0U;
-                session->terminal_output_pending = false;
-                session->terminal_output_sent = false;
-            }
-        }
+        edge_ws_handle_terminal_data_ack(session, &envelope->payload.terminal_data_ack);
         break;
     case iot_edge_v1_Envelope_terminal_resize_tag:
-        if (session->terminal_open) {
-            const iot_edge_v1_TerminalResize *resize =
-                &envelope->payload.terminal_resize;
-            if (resize->terminal_id.size != 16U ||
-                memcmp(resize->terminal_id.bytes, session->terminal_id,
-                       sizeof(session->terminal_id)) != 0)
-                fail_terminal(session, "terminal resize identity mismatch");
-            else if (!edge_terminal_resize(resize))
-                fail_terminal(session, "terminal resize failed");
-        }
+        edge_ws_handle_terminal_resize(session, &envelope->payload.terminal_resize);
         break;
     case iot_edge_v1_Envelope_terminal_close_tag:
-        if (session->terminal_open) {
-            if (envelope->payload.terminal_close.terminal_id.size != 16U ||
-                memcmp(envelope->payload.terminal_close.terminal_id.bytes,
-                       session->terminal_id, sizeof(session->terminal_id)) != 0) {
-                fail_terminal(session, "terminal close identity mismatch");
-            } else {
-                edge_terminal_close(session->terminal_id);
-                ev_timer_stop(session->app->loop, &session->terminal_timer);
-                session->terminal_open = false;
-                reset_terminal_flow(session);
-            }
-        }
+        edge_ws_handle_terminal_close(session, &envelope->payload.terminal_close);
         break;
     case iot_edge_v1_Envelope_enrollment_pending_tag:
         syslog(LOG_INFO, "platform %s enrollment pending", session->config->name);
@@ -2393,84 +1655,6 @@ static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
     }
 }
 
-static void send_pending_modem_result(edge_ws_session *session) {
-    if (session->modem_result_pending && session->websocket_open && session->enrolled &&
-        send_modem_result(session, session->modem_result_request_id,
-                          session->modem_result_action, session->modem_result_state,
-                          session->modem_result_message, session->modem_result_apn))
-        session->modem_result_pending = false;
-}
-
-static void read_modem_worker_result(edge_ws_session *session) {
-    if (session->modem_worker_fd >= 0) {
-        edge_modem_worker_result result;
-        const ssize_t size = recv(session->modem_worker_fd, &result, sizeof(result), 0);
-        if (size == (ssize_t)sizeof(result)) {
-            memcpy(session->modem_result_request_id, result.request_id,
-                   sizeof(session->modem_result_request_id));
-            session->modem_result_action = result.action;
-            session->modem_result_state =
-                result.success
-                    ? iot_edge_v1_ModemControlState_MODEM_CONTROL_SUCCEEDED
-                    : iot_edge_v1_ModemControlState_MODEM_CONTROL_FAILED;
-            safe_copy(session->modem_result_message,
-                      sizeof(session->modem_result_message), result.message);
-            safe_copy(session->modem_result_apn, sizeof(session->modem_result_apn),
-                      result.apn);
-            session->modem_result_received = true;
-            session->modem_result_pending = true;
-            ev_io_stop(session->app->loop, &session->modem_io);
-            close(session->modem_worker_fd);
-            session->modem_worker_fd = -1;
-        } else if (size == 0 ||
-                   (size < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
-                    errno != EINTR)) {
-            ev_io_stop(session->app->loop, &session->modem_io);
-            close(session->modem_worker_fd);
-            session->modem_worker_fd = -1;
-        }
-    }
-}
-
-static void modem_io(struct ev_loop *loop, struct ev_io *watcher, int events) {
-    (void)loop;
-    (void)events;
-    edge_ws_session *session = session_from_modem_io(watcher);
-    read_modem_worker_result(session);
-    send_pending_modem_result(session);
-}
-
-static void modem_child(struct ev_loop *loop, struct ev_child *watcher, int events) {
-    (void)loop;
-    (void)events;
-    edge_ws_session *session = session_from_modem_child(watcher);
-    ev_child_stop(session->app->loop, &session->modem_child);
-    ev_timer_stop(session->app->loop, &session->modem_timer);
-    read_modem_worker_result(session);
-    session->modem_worker_pid = 0;
-    if (session->modem_worker_fd >= 0) {
-        ev_io_stop(session->app->loop, &session->modem_io);
-        close(session->modem_worker_fd);
-        session->modem_worker_fd = -1;
-    }
-    if (!session->modem_result_received)
-        session->modem_result_pending = true;
-    send_pending_modem_result(session);
-}
-
-static void modem_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
-    (void)loop;
-    (void)events;
-    edge_ws_session *session = session_from_modem(timer);
-    ev_timer_stop(session->app->loop, &session->modem_timer);
-    if (session->modem_worker_pid > 0) {
-        safe_copy(session->modem_result_message,
-                  sizeof(session->modem_result_message),
-                  "modem operation timed out");
-        (void)kill(session->modem_worker_pid, SIGKILL);
-    }
-}
-
 static void network_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
     (void)loop;
     (void)events;
@@ -2496,62 +1680,6 @@ static void reload_timer(struct ev_loop *loop, struct ev_timer *timer, int event
     edge_ws_session *session = session_from_reload(timer);
     ev_timer_stop(session->app->loop, &session->reload_timer);
     raise(SIGHUP);
-}
-
-static void terminal_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
-    (void)loop;
-    (void)events;
-    edge_ws_session *session = session_from_terminal(timer);
-    if (!session->terminal_open)
-        return;
-    if (session->terminal_input_ack_pending &&
-        send_terminal_data_ack(session, session->terminal_id,
-                               session->terminal_input_ack_sequence))
-        session->terminal_input_ack_pending = false;
-
-    uint64_t input_acked_sequence = 0U;
-    const edge_terminal_input_result input_result =
-        edge_terminal_flush(session->terminal_id, &input_acked_sequence);
-    if (input_result == EDGE_TERMINAL_INPUT_ERROR) {
-        fail_terminal(session, "terminal input write failed");
-        return;
-    }
-    if (input_result == EDGE_TERMINAL_INPUT_ACKED)
-        stage_terminal_input_ack(session, input_acked_sequence);
-
-    const uint64_t now = monotonic_ms();
-    if (session->terminal_output_pending) {
-        if (now >= session->terminal_output_deadline_ms) {
-            fail_terminal(session, "terminal output acknowledgement timed out");
-            return;
-        }
-        if (!session->terminal_output_sent && send_terminal_output(session))
-            session->terminal_output_sent = true;
-        return;
-    }
-
-    bool closed = false;
-    int32_t exit_code = 0;
-    const ssize_t size =
-        edge_terminal_read(session->terminal_id, session->terminal_output,
-                           sizeof(session->terminal_output), &closed, &exit_code);
-    if (size > 0) {
-        if (session->terminal_output_sequence == UINT64_MAX) {
-            fail_terminal(session, "terminal output sequence exhausted");
-            return;
-        }
-        session->terminal_output_size = (size_t)size;
-        ++session->terminal_output_sequence;
-        session->terminal_output_pending = true;
-        session->terminal_output_sent = send_terminal_output(session);
-        session->terminal_output_deadline_ms = now + EDGE_TERMINAL_ACK_TIMEOUT_MS;
-    }
-    if (closed) {
-        ev_timer_stop(session->app->loop, &session->terminal_timer);
-        session->terminal_open = false;
-        send_terminal_close(session, session->terminal_id, exit_code, "terminal closed");
-        reset_terminal_flow(session);
-    }
 }
 
 static void acquisition_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
@@ -2723,12 +1851,12 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         ev_timer_init(&session->liveness_timer, liveness_timer, 0.0, 0.0);
         ev_timer_init(&session->status_report_timer, status_report_timer, 0.0, 0.0);
         ev_timer_init(&session->firmware_timer, firmware_timer, 0.0, 0.0);
-        ev_timer_init(&session->modem_timer, modem_timer, 0.0, 0.0);
-        ev_io_init(&session->modem_io, modem_io, 0, EV_READ);
-        ev_child_init(&session->modem_child, modem_child, 0, 0);
+        ev_timer_init(&session->modem_timer, edge_ws_modem_timer, 0.0, 0.0);
+        ev_io_init(&session->modem_io, edge_ws_modem_io, 0, EV_READ);
+        ev_child_init(&session->modem_child, edge_ws_modem_child, 0, 0);
         ev_timer_init(&session->network_timer, network_timer, 0.0, 0.0);
         ev_timer_init(&session->reload_timer, reload_timer, 0.0, 0.0);
-        ev_timer_init(&session->terminal_timer, terminal_timer, 0.0, 0.0);
+        ev_timer_init(&session->terminal_timer, edge_ws_terminal_timer, 0.0, 0.0);
     }
     ev_timer_init(&app->acquisition_timer, acquisition_timer, 0.0, 0.0);
     ev_timer_init(&app->status_timer, status_timer, 0.0, 0.0);
@@ -2896,13 +2024,7 @@ bool edge_ws_app_enqueue(edge_ws_app *app, const uint8_t origin_platform_id[16],
         envelope->platform_id.size != 16U ||
         memcmp(envelope->platform_id.bytes, origin_platform_id, 16U) != 0)
         return false;
-    edge_ws_session *session = NULL;
-    for (size_t index = 0; index < app->config->platform_count; ++index) {
-        if (memcmp(app->sessions[index].config->id, origin_platform_id, 16U) == 0) {
-            session = &app->sessions[index];
-            break;
-        }
-    }
+    edge_ws_session *session = session_for_platform(app, origin_platform_id);
     if (session == NULL)
         return false;
     size_t wire_size = 0U;

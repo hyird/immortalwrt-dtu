@@ -128,6 +128,17 @@ function pointLocation(point) {
 		return (point.area || '') + (point.dbNumber ? ' DB' + point.dbNumber : '') +
 			' · ' + Number(point.start || 0) +
 			(Number(point.startBit || 0) ? '.' + Number(point.startBit) : '');
+	if (point.kind === 'industrial')
+		return (point.area ? point.area + ' · ' : '') +
+			(point.identifier || Number(point.address || 0)) +
+			(Number(point.bit || 0) ? '.' + Number(point.bit) : '') +
+			(Number(point.length || 0) > 1 ? ' · 长度 ' + Number(point.length) : '');
+	if (point.kind === 'derived')
+		return (point.derivedKind ? point.derivedKind + ' · ' : '') +
+			(point.expression || '计算点位');
+	if (point.kind === 'sl651')
+		return (point.functionCode ? '功能码 ' + point.functionCode : 'SL651') +
+			(Number(point.length || 0) ? ' · 长度 ' + Number(point.length) : '');
 	return point.kind || '—';
 }
 
@@ -181,7 +192,9 @@ function showPlatformDetails(platform) {
 					? 'Slave ' + Number(device.slaveId || 0) + ' · ' + (device.modbusMode || 'RTU')
 					: device.protocol === 'S7'
 						? 'Rack ' + Number(device.rack || 0) + ' / Slot ' + Number(device.slot || 0)
-						: device.protocol === 'External IO' ? '节点 IO 方案' : '—';
+						: device.protocol === 'SL651'
+							? (device.telemetryStationCode || 'SL651')
+							: device.protocol === 'External IO' ? '节点 IO 方案' : (device.protocol || '—');
 				return [
 					[ E('strong', [ device.name || device.code || '未命名设备' ]),
 						E('br'), E('code', [ device.code || device.id || '—' ]) ],
@@ -204,7 +217,8 @@ function showPlatformDetails(platform) {
 						E('br'), E('code', [ point.elementId || '—' ]) ],
 					pointLocation(point),
 					point.dataType || '—',
-					point.kind === 'external-io' ? (point.unit || '—') :
+					(point.kind === 'external-io' || point.kind === 'derived')
+						? (point.unit || '—') :
 					'× ' + Number(point.scale == null ? 1 : point.scale) +
 						' · ' + Number(point.decimals || 0) + ' 位小数' +
 						(point.unit ? ' · ' + point.unit : ''),
