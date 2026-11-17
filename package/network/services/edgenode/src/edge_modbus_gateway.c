@@ -53,8 +53,10 @@ static unsigned configured_type(const iot_edge_v1_ConfigItem *item) {
         return item->item.external_io.kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI
             ? EDGE_GATEWAY_DOUBLE : EDGE_GATEWAY_BOOL;
     case iot_edge_v1_ConfigItem_derived_point_tag:
-        return edge_derived_validate(&item->item.derived_point)
-            ? (item->item.derived_point.boolean_result ? EDGE_GATEWAY_BOOL : EDGE_GATEWAY_DOUBLE) : 0;
+        if (!edge_derived_validate(&item->item.derived_point)) return 0;
+        type = item->item.derived_point.data_type;
+        if (!*type) return item->item.derived_point.boolean_result ? EDGE_GATEWAY_BOOL : EDGE_GATEWAY_DOUBLE;
+        break;
     default: return 0;
     }
     if (!strcmp(type, "BOOL")) return EDGE_GATEWAY_BOOL;
@@ -703,6 +705,7 @@ bool edge_modbus_gateway_describe(const edge_modbus_gateway *gateway, const uint
         output->quality = point_quality(point, now_ms);
         output->observed_at_ms = (int64_t)point->observed_at_ms;
         snprintf(output->state, sizeof(output->state), "%s", point->active ? "active" : "disabled");
+        output->value[0] = '\0';
         if (output->quality != 1 && output->quality != 3)
             return true;
         (void)format_native_value(point->native_type, point->native_bits,
@@ -814,7 +817,7 @@ static bool gateway_point_metadata(const edge_runtime_config *config,
         const iot_edge_v1_DerivedPointConfig *value = &item->item.derived_point;
         device = value->device_id.bytes;
         gateway_point_definition(point, value->point_id, value->name, value->unit,
-                                 value->boolean_result ? "BOOL" : "FLOAT64");
+                                 value->data_type[0] ? value->data_type : value->boolean_result ? "BOOL" : "FLOAT64");
         gateway_text(point->source_address, sizeof(point->source_address), value->kind);
         break;
     }

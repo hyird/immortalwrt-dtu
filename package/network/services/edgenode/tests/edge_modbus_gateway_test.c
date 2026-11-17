@@ -713,6 +713,57 @@ static void test_derived_lifecycle(void) {
     CHECK(edge_modbus_gateway_describe(gateway, platform, device, "derived-number", &point, 1) &&
           point.address == 0 && point.value_address == 0 && point.quality == 0);
     edge_modbus_gateway_free(gateway);
+    /* Every typed derived output reaches the real register encoder, not display-only formatting. */
+    const struct {
+        const char *type, *text;
+        unsigned words, value_type, scalar_tag;
+        uint64_t bits;
+    } typed[] = {
+        {"INT8", "-128", 1, 6, iot_edge_v1_ScalarValue_signed_value_tag, UINT64_C(0xff80)},
+        {"UINT8", "255", 1, 7, iot_edge_v1_ScalarValue_unsigned_value_tag, UINT64_C(255)},
+        {"INT16", "-2", 1, 6, iot_edge_v1_ScalarValue_signed_value_tag, UINT64_C(0xfffe)},
+        {"UINT16", "65535", 1, 7, iot_edge_v1_ScalarValue_unsigned_value_tag, UINT64_C(0xffff)},
+        {"INT32", "-2147483648", 2, 8, iot_edge_v1_ScalarValue_signed_value_tag, UINT64_C(0x80000000)},
+        {"UINT32", "4294967295", 2, 9, iot_edge_v1_ScalarValue_unsigned_value_tag, UINT64_C(0xffffffff)},
+        {"INT64", "-9223372036854775808", 4, 3, iot_edge_v1_ScalarValue_signed_value_tag, UINT64_C(0x8000000000000000)},
+        {"UINT64", "18446744073709549568", 4, 4, iot_edge_v1_ScalarValue_unsigned_value_tag, UINT64_C(0xfffffffffffff800)},
+        {"FLOAT32", "16777216", 2, 10, iot_edge_v1_ScalarValue_double_value_tag, UINT64_C(0x4b800000)},
+        {"FLOAT64", "12.5", 4, 5, iot_edge_v1_ScalarValue_double_value_tag, UINT64_C(0x4029000000000000)}
+    };
+    for (unsigned i = 0; i < sizeof(typed) / sizeof(typed[0]); ++i) {
+        strcpy(items[3].item.derived_point.data_type, typed[i].type);
+        gateway = edge_modbus_gateway_prepare(path, &source, 1); CHECK(gateway);
+        result = (iot_edge_v1_ModbusGatewayResult)iot_edge_v1_ModbusGatewayResult_init_zero;
+        CHECK(edge_modbus_gateway_points(gateway, platform, &config, true, true, &request, &result, 1));
+        CHECK(!strcmp(result.points[1].source_type, typed[i].type) &&
+              result.points[1].value_type == typed[i].value_type &&
+              result.points[1].value_words == typed[i].words && !result.points[1].writable);
+        sample.valid = true;
+        sample.value.which_value = typed[i].scalar_tag;
+        if (typed[i].scalar_tag == iot_edge_v1_ScalarValue_signed_value_tag)
+            sample.value.value.signed_value = strtoll(typed[i].text, NULL, 10);
+        else if (typed[i].scalar_tag == iot_edge_v1_ScalarValue_unsigned_value_tag)
+            sample.value.value.unsigned_value = strtoull(typed[i].text, NULL, 10);
+        else sample.value.value.double_value = strtod(typed[i].text, NULL);
+        edge_modbus_gateway_update(gateway, platform, &sample, 1);
+        CHECK(edge_modbus_gateway_describe(gateway, platform, device, "derived-number", &point, 1) &&
+              point.quality == 1 && !strcmp(point.value, typed[i].text));
+        CHECK(read_native(gateway, 3, point.value_address, typed[i].words, response) == 9 + typed[i].words * 2);
+        for (unsigned j = 0; j < typed[i].words; ++j)
+            CHECK(word(response + 9 + j * 2) == (uint16_t)(typed[i].bits >> ((typed[i].words - j - 1) * 16)));
+        uint8_t write_request[260], zeros[8] = {0};
+        const size_t write_size = write_adu(write_request, 16, point.value_address, typed[i].words, zeros);
+        check_write_reply(gateway, write_request, write_size, 0);
+        CHECK(edge_modbus_gateway_describe(gateway, platform, device, "derived-number", &point, 1) &&
+              point.quality == 1 && !strcmp(point.value, typed[i].text));
+        sample.valid = false;
+        edge_modbus_gateway_update(gateway, platform, &sample, 2);
+        CHECK(edge_modbus_gateway_describe(gateway, platform, device, "derived-number", &point, 2) &&
+              point.quality == 2 && !point.value[0]);
+        CHECK(read_native(gateway, 3, point.value_address, typed[i].words, response) == 9 + typed[i].words * 2);
+        for (unsigned j = 0; j < typed[i].words * 2; ++j) CHECK(response[9 + j] == 0);
+        edge_modbus_gateway_free(gateway);
+    }
     remove(path);
 }
 

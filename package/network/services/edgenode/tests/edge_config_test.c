@@ -264,6 +264,35 @@ static void test_external_io_with_protocol(bool standalone) {
     require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)),
                  "encoded IO-derived chain was rejected");
     edge_runtime_config_free(&runtime);
+    iot_edge_v1_DerivedPointConfig *typed = &values[4].item.derived_point;
+    strcpy(typed->data_type, "INT8");
+    strcpy(typed->rounding, "truncate");
+    items[4].payload_size = encode_item(&values[4], payloads[4], sizeof(payloads[4]));
+    require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)),
+                 "typed IO-derived chain rejected");
+    require_true(!strcmp(runtime.items[4].item.derived_point.data_type, "INT8") &&
+                 !strcmp(runtime.items[4].item.derived_point.rounding, "truncate"),
+                 "typed fields lost through snapshot");
+    iot_edge_v1_ConfigItem *active = runtime.items;
+    const struct { const char *type, *rounding; bool boolean_result; } invalid[] = {
+        {"DOUBLE", "", false}, {"INT8", "floor", false},
+        {"FLOAT32", "round", false}, {"BOOL", "", false}, {"UINT8", "", true}
+    };
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        strcpy(typed->data_type, invalid[i].type);
+        strcpy(typed->rounding, invalid[i].rounding);
+        typed->boolean_result = invalid[i].boolean_result;
+        items[4].payload_size = encode_item(&values[4], payloads[4], sizeof(payloads[4]));
+        require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)),
+                     "invalid typed output configuration accepted");
+        require_true(runtime.items == active &&
+                     !strcmp(runtime.items[4].item.derived_point.data_type, "INT8") &&
+                     !strcmp(runtime.items[4].item.derived_point.rounding, "truncate"),
+                     "rejected typed configuration damaged active state");
+    }
+    edge_runtime_config_free(&runtime);
+    typed->data_type[0] = typed->rounding[0] = 0;
+    typed->boolean_result = false;
     strcpy(inputs[0].point_id, "missing_io");
     items[4].payload_size = encode_item(&values[4], payloads[4], sizeof(payloads[4]));
     require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)),

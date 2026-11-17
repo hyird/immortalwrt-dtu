@@ -1,5 +1,6 @@
 #include "edge_derived.h"
 #include <ctype.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,7 @@ typedef struct {
     unsigned nodes;
     bool valid;
     bool validation;
+    bool overflow;
 } expression;
 static void space(expression *p) { while (*p->cursor && strchr(" \t\r\n", *p->cursor)) ++p->cursor; }
 static bool take(expression *p, const char *token) {
@@ -97,14 +99,19 @@ static double parse(expression *p, int minimum, unsigned depth, bool evaluate) {
                 if (right == 0) { p->valid = false; return 0; }
                 left = op == 11 ? left / right : fmod(left, right); break;
         }
-        if (!isfinite(left)) p->valid = false;
+        if (!isfinite(left)) { p->valid = false; p->overflow = true; }
     }
 }
-bool edge_expression_evaluate(const char *text, edge_expression_variable variable, void *context, double *result) {
+static bool evaluate_result(const char *text, edge_expression_variable variable, void *context,
+                            double *result, const char **error) {
     if (!text || !*text || strlen(text) > 512 || !variable || !result) return false;
-    expression p = {text, variable, context, 0, true, false};
+    expression p = {text, variable, context, 0, true, false, false};
     *result = parse(&p, 0, 0, true); space(&p);
+    if (p.overflow && error) *error = "overflow";
     return p.valid && !*p.cursor && isfinite(*result);
+}
+bool edge_expression_evaluate(const char *text, edge_expression_variable variable, void *context, double *result) {
+    return evaluate_result(text, variable, context, result, NULL);
 }
 typedef struct { int64_t at; double value; } window_sample;
 typedef struct {
@@ -113,8 +120,61 @@ typedef struct {
     int64_t at;
     bool valid, updated;
 } latest_sample;
+typedef enum {
+    OUTPUT_INVALID, OUTPUT_BOOL, OUTPUT_INT8, OUTPUT_UINT8, OUTPUT_INT16, OUTPUT_UINT16,
+    OUTPUT_INT32, OUTPUT_UINT32, OUTPUT_INT64, OUTPUT_UINT64, OUTPUT_FLOAT32, OUTPUT_FLOAT64
+} output_type;
+
+static output_type configured_output(const iot_edge_v1_DerivedPointConfig *rule) {
+    if (!rule->data_type[0]) return rule->boolean_result ? OUTPUT_BOOL : OUTPUT_FLOAT64;
+    static const char *const names[] = {
+        "", "BOOL", "INT8", "UINT8", "INT16", "UINT16", "INT32", "UINT32", "INT64", "UINT64", "FLOAT32", "FLOAT64"
+    };
+    for (unsigned i = OUTPUT_BOOL; i <= OUTPUT_FLOAT64; ++i)
+        if (!strcmp(rule->data_type, names[i])) return (output_type)i;
+    return OUTPUT_INVALID;
+}
+
+static bool convert_output(output_type type, bool truncate_value, double *number,
+                           iot_edge_v1_ScalarValue *output) {
+    if (!isfinite(*number)) return false;
+    if (type == OUTPUT_BOOL) {
+        *number = *number != 0;
+        output->kind = iot_edge_v1_ValueKind_VALUE_BOOL;
+        output->which_value = iot_edge_v1_ScalarValue_bool_value_tag;
+        output->value.bool_value = *number != 0;
+    } else if (type == OUTPUT_FLOAT32 || type == OUTPUT_FLOAT64) {
+        if (type == OUTPUT_FLOAT32) {
+            /* Binary32 overflows at the midpoint above its largest finite value.
+             * Avoid an out-of-range C cast in the interval that rounds back to FLT_MAX. */
+            const double magnitude = fabs(*number);
+            if (magnitude >= 0x1.ffffffp127) return false;
+            *number = magnitude > FLT_MAX ? copysign((double)FLT_MAX, *number) : (double)(float)*number;
+        }
+        output->kind = iot_edge_v1_ValueKind_VALUE_DOUBLE;
+        output->which_value = iot_edge_v1_ScalarValue_double_value_tag;
+        output->value.double_value = *number;
+    } else {
+        *number = truncate_value ? trunc(*number) : round(*number);
+        const bool signed_type = type == OUTPUT_INT8 || type == OUTPUT_INT16 || type == OUTPUT_INT32 || type == OUTPUT_INT64;
+        const unsigned width = type == OUTPUT_INT8 || type == OUTPUT_UINT8 ? 8 :
+                               type == OUTPUT_INT16 || type == OUTPUT_UINT16 ? 16 :
+                               type == OUTPUT_INT32 || type == OUTPUT_UINT32 ? 32 : 64;
+        /* Exclusive powers of two avoid rounding INT64_MAX/UINT64_MAX up in double. */
+        const double upper = ldexp(1.0, signed_type ? (int)width - 1 : (int)width);
+        if (*number < (signed_type ? -upper : 0) || *number >= upper) return false;
+        output->kind = signed_type ? iot_edge_v1_ValueKind_VALUE_SIGNED : iot_edge_v1_ValueKind_VALUE_UNSIGNED;
+        output->which_value = signed_type ? iot_edge_v1_ScalarValue_signed_value_tag : iot_edge_v1_ScalarValue_unsigned_value_tag;
+        if (signed_type) output->value.signed_value = (int64_t)*number;
+        else output->value.unsigned_value = (uint64_t)*number;
+    }
+    return true;
+}
+
 typedef struct {
     const iot_edge_v1_DerivedPointConfig *config;
+    output_type type;
+    bool truncate_value;
     window_sample *window;
     size_t count;
     char unit[33];
@@ -173,13 +233,17 @@ static bool bound_variable(void *context, const char *name, double *number) {
 }
 static bool valid_expression(const char *source, const iot_edge_v1_DerivedPointConfig *rule) {
     if (!*source || strlen(source) > 512) return false;
-    expression parser = {source, bound_variable, (void *)rule, 0, true, true};
+    expression parser = {source, bound_variable, (void *)rule, 0, true, true, false};
     (void)parse(&parser, 0, 0, false);
     space(&parser);
     return parser.valid && !*parser.cursor;
 }
 bool edge_derived_validate(const iot_edge_v1_DerivedPointConfig *rule) {
     if (!rule || rule->device_id.size != 16 || !*rule->point_id || !*rule->name || !rule->inputs_count || rule->inputs_count > 16 || rule->unit_rules_count > 8 || !rule->max_age_seconds || rule->max_age_seconds > 86400) return false;
+    const output_type type = configured_output(rule);
+    const bool integer = type >= OUTPUT_INT8 && type <= OUTPUT_UINT64;
+    if (type == OUTPUT_INVALID || (type == OUTPUT_BOOL) != rule->boolean_result ||
+        (rule->rounding[0] && (!integer || (strcmp(rule->rounding, "round") && strcmp(rule->rounding, "truncate"))))) return false;
     if (strcmp(rule->kind, "expression") && strcmp(rule->kind, "average") && strcmp(rule->kind, "minimum") && strcmp(rule->kind, "maximum")) return false;
     if (strcmp(rule->kind, "expression") && (!rule->window_seconds || rule->window_seconds > 86400 || rule->boolean_result || !*rule->source_alias)) return false;
     for (pb_size_t i = 0; i < rule->inputs_count; ++i) {
@@ -252,6 +316,8 @@ edge_derived *edge_derived_create(const edge_runtime_config *config, const uint8
         if (!edge_derived_validate(&item->item.derived_point)) { edge_derived_free(state); return NULL; }
         derived_rule *rule = &state->rules[state->count++];
         rule->config = &item->item.derived_point;
+        rule->type = configured_output(rule->config);
+        rule->truncate_value = !strcmp(rule->config->rounding, "truncate");
         rule->output.derived = true; rule->output.hidden = rule->config->hidden;
         text(rule->output.element_id, sizeof(rule->output.element_id), rule->config->point_id);
         text(rule->output.name, sizeof(rule->output.name), rule->config->name);
@@ -319,11 +385,11 @@ bool edge_derived_update(edge_derived *state, const iot_edge_v1_TelemetryValue *
         if (valid) {
             for (pb_size_t j = 0; j < config->unit_rules_count; ++j) {
                 double condition;
-                if (!edge_expression_evaluate(config->unit_rules[j].condition, variable, &context, &condition)) { valid = false; break; }
+                if (!evaluate_result(config->unit_rules[j].condition, variable, &context, &condition, &context.error)) { valid = false; break; }
                 if (condition != 0) { text(rule->output.unit, sizeof(rule->output.unit), config->unit_rules[j].unit); break; }
             }
         }
-        if (valid && !strcmp(config->kind, "expression")) valid = edge_expression_evaluate(config->expression, variable, &context, &value);
+        if (valid && !strcmp(config->kind, "expression")) valid = evaluate_result(config->expression, variable, &context, &value, &context.error);
         else if (valid) {
             if (!rule->count) { valid = false; context.error = "missing"; }
             else if (rule->overflow_until > at) { valid = false; context.error = "capacity_exceeded"; }
@@ -335,21 +401,20 @@ bool edge_derived_update(edge_derived *state, const iot_edge_v1_TelemetryValue *
                     value = (double)mean;
                 } else for (size_t j = 0; j < rule->count; ++j) value = !strcmp(config->kind, "minimum") ? fmin(value, rule->window[j].value) : fmax(value, rule->window[j].value);
                 valid = isfinite(value);
+                if (!valid) context.error = "overflow";
             }
         }
+        if (valid && !convert_output(rule->type, rule->truncate_value, &value, &rule->output.value)) {
+            valid = false;
+            context.error = "overflow";
+        }
         output->valid = valid; output->at = at; output->updated = true;
-        output->value = config->boolean_result ? value != 0 : value;
+        output->value = value;
         text(rule->output.quality, sizeof(rule->output.quality), valid ? "good" : context.error);
         if (!valid && config->unit_rules_count) rule->output.unit[0] = 0;
         text(output->unit, sizeof(output->unit), rule->output.unit);
         rule->output.has_value = valid;
         rule->output.sample_time_ms = at;
-        if (valid) {
-            rule->output.value.kind = config->boolean_result ? iot_edge_v1_ValueKind_VALUE_BOOL : iot_edge_v1_ValueKind_VALUE_DOUBLE;
-            rule->output.value.which_value = config->boolean_result ? iot_edge_v1_ScalarValue_bool_value_tag : iot_edge_v1_ScalarValue_double_value_tag;
-            if (config->boolean_result) rule->output.value.value.bool_value = value != 0;
-            else rule->output.value.value.double_value = value;
-        }
     }
     return any;
 }

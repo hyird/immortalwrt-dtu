@@ -146,7 +146,9 @@ message Empty {}
 message Hello {
   bool supports_modbus_gateway = 42;
   bool supports_modbus_gateway_order = 43;
+  // Logical OpenWrt interface selection and configurable Modbus Unit ID.
   bool supports_modbus_gateway_config = 44;
+  bool supports_derived_output_types = 45;
   // Required to negotiate the mA external IO protocol.
   bool supports_external_io_milliamps = 41;
   bool supports_node_io = 40;
@@ -271,6 +273,10 @@ message CapabilityReport {
   bool supports_serial_debug = 8;
   bool supports_dtu = 9;
   bool supports_derived_points = 10;
+  // Formula function level the firmware evaluates for derived points (1: basic
+  // library, 2: extended library). 0 from older firmware means level 1 when
+  // supports_derived_points is set.
+  uint32 derived_function_level = 13;
 }
 
 message ExternalIoChannel {
@@ -604,6 +610,8 @@ message DerivedPointConfig {
   uint32 window_seconds = 11;
   uint32 max_age_seconds = 12;
   bool hidden = 13;
+  string data_type = 14 [(nanopb).max_length = 8];
+  string rounding = 15 [(nanopb).max_length = 8];
 }
 
 message ExternalIoPointConfig {

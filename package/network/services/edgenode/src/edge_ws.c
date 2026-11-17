@@ -691,6 +691,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_modbus_gateway = true;
     hello->supports_modbus_gateway_order = true;
     hello->supports_modbus_gateway_config = true;
+    hello->supports_derived_output_types = true;
     hello->supports_node_io = hello->supports_external_io;
     hello->network_config_version = 3U;
     hello->supports_logs = true;

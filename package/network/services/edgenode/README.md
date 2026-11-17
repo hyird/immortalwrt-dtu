@@ -18,6 +18,8 @@ sole source location for the OpenWrt node implementation and its node-side tests
 
 0.3.88 起，已启用设备与端点的合法派生点也参与上述连续分配、排序、导出及配置原子替换：数值派生固定为 Double（4 字），`boolean_result` 派生为离散输入位，不挤占数值区。直接复用采集 Worker 内现有表达式/窗口计算结果，经同一隔离平台的 sample 事件更新缓存；普通采集、写后回读、SL651 上报、外部 IO 及派生过期均使用这条链路，不向平台拉值，也不另算网关副本。原始上报模式仍保持原报文，仅在网关启用时本地计算并更新派生缓存，不额外发送派生过期报文。首次采集前、重启及配置替换后寄存器默认为零；计算失败、输入缺失或过期也清零并保持无效质量，不冒充有效零值。派生点始终只读，05/06/0F/10 忽略其写入但正常 ACK，不改变同一网关物理点及 DO 的真实可写行为。停用、删除、恢复及重排使用与物理/IO 点相同的持久身份与紧凑地址生命周期。沿用现有 `DerivedPointConfig` 与 `ModbusGatewayPoint` 字段，无协议字段或能力位变更，0.3.70 其他协议与升级链路不变。
 
+0.3.89 起，Hello `supports_derived_output_types = 45` 声明派生输出类型能力；`DerivedPointConfig` 追加 `data_type = 14`、`rounding = 15`，旧字段编号不变。标准类型为 BOOL、INT8/UINT8、INT16/UINT16、INT32/UINT32、INT64/UINT64、FLOAT32、FLOAT64；省略类型仍按 `boolean_result` 使用 BOOL/FLOAT64，FLOAT64 内部沿用 Double 编码。整数默认 `round`（半值远离零），也可选 `truncate`（向零）；先舍入后校验范围，64 位采用排他上界避免转换溢出。BOOL 与 `boolean_result` 必须一致，未知类型、非法舍入及非整数附带舍入均拒绝配置，保留当前生效快照。表达式与窗口仍按 double 计算，转换后的真实 signed/unsigned/float 值用于上报、链式输入和网关；FLOAT32 真实量化到 binary32，越界为 `overflow` 无效质量，不钳位。网关按实际类型分配 1/2/4 字，INT8/UINT8 分别符号/零扩展到单个 16 位字，不打包；BOOL 独立位区。`sourceType` 保留标准名称，8 位 `valueType` 复用 Int16/UInt16。现有采样事件链、失效清零及只读写 ACK 行为不变。
+
 这是对旧 03/02/04 外部地址布局的明确变更，旧 04 十字类型/质量/时间视图已移除，不再作为迁移寄存器区保留。升级前导出映射，并按升级后节点实际返回的 `valueAddress/valueWords/registerType` 更新 PLC/组态；不要按旧 `address+2`、`address/10` 或统一 64 位推算。内部 `address/words` 的十字数值仅兼容已部署排序协议的身份 token，不是实际从站区间。旧 0.3.70 的其他设备协议保持原样。
 
 01、02、03、04 在完整 `0..65535` 范围内，所有合法的未映射、禁用、删除范围均成功返回零；允许跨已映射区末尾/空区读取，空表也如此。03/04 每次 1–125 字，01/02 每次 1–2000 位；起址加数量大于 65536 返回异常 02，零数量、超量或错误 PDU 长度返回异常 03。不能仅凭零值判断采集质量。
