@@ -79,6 +79,12 @@ define prepare_rootfs
 	$(if $(2),@if [ -d '$(2)' ]; then \
 		$(call file_copy,$(2)/.,$(1)); \
 	fi)
+	# LuCI copies files with their source modes. uhttpd needs public read and CGI execute permissions.
+	@set -e; if [ -f "$(1)/www/cgi-bin/luci" ]; then \
+		chmod 0755 "$(1)/www/cgi-bin/luci"; \
+		chmod 0644 "$(1)/www/index.html"; \
+		find "$(1)/www/luci-static" -type f ! -perm -004 -exec chmod a+r {} +; \
+	fi
 	@mkdir -p $(1)/etc/rc.d
 	@mkdir -p $(1)/var/lock
 	@( \

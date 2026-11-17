@@ -71,6 +71,13 @@ for profile in (('ebyte_ecm30',) if ecm30 else ('tastek_it692', 'tastek_it694'))
                    for directory in ('bin', 'usr/bin', 'usr/sbin')), tool
     assert (root / 'usr/sbin/tcpdump').is_file() or (root / 'usr/bin/tcpdump').is_file()
     assert (root / 'usr/share/ucode/luci').exists() or (root / 'usr/lib/lua/luci').exists()
+    for path, mode in (('www/index.html', 0o644), ('www/cgi-bin/luci', 0o755)):
+        assert (root / path).is_file() and stat.S_IMODE((root / path).stat().st_mode) == mode, path
+    luci_static = root / 'www/luci-static'
+    assert luci_static.is_dir(), 'missing LuCI static directory'
+    for path in luci_static.rglob('*'):
+        if path.is_file() and not path.is_symlink():
+            assert path.stat().st_mode & stat.S_IROTH, f'LuCI static file not readable: {path.relative_to(root)}'
     firewall = (root / 'etc/config/firewall').read_text()
     policies = {}
     for name in ('lan', 'wan'):
