@@ -263,7 +263,7 @@ function signalRows(status) {
 		row('信号质量（CSQ）', status.csq === '99' ? '未知' : withUnit(status.csq, ' / 31')),
 		row('接收信号（RSSI）', withUnit(status.rssi_dbm, ' dBm')),
 		row('信号百分比', withUnit(status.signal_percent, '%')),
-		row('误码率等级（BER）', status.ber === '99' ? '未知' : text(status.ber))
+		row('误码率等级（BER）', status.ber === '99' ? '-' : text(status.ber))
 	].concat(optionalRows(status, [
 		[ 'rsrp_dbm', '参考信号接收功率（RSRP）', ' dBm' ], [ 'rsrq_db', '参考信号接收质量（RSRQ）', ' dB' ],
 		[ 'sinr_db', '信号与干扰加噪声比（SINR）', ' dB' ], [ 'qcsq_rssi', '模块接收信号（QCSQ RSSI）', ' dBm' ],
