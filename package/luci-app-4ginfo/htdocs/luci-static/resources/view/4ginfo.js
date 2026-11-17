@@ -50,6 +50,19 @@ function boolText(value, yes, no) {
 	return value === '1' ? yes : value === '0' ? no : text(value);
 }
 
+function registrationText(status) {
+	var code = status.registration_status;
+	var labels = [ '未注册', '已注册（归属网络）', '正在搜网', '注册被拒绝', '未知', '已注册（漫游）' ];
+
+	if (/^[0-5]$/.test(code))
+		return labels[Number(code)];
+	if (/^\d+$/.test(code))
+		return '未知（状态码 ' + code + '）';
+	if (!code && (status.registered === '1' || status.registered === '0'))
+		return boolText(status.registered, '已注册', '未注册');
+	return '未知';
+}
+
 function withUnit(value, unit) {
 	var display = text(value);
 
@@ -58,7 +71,7 @@ function withUnit(value, unit) {
 
 function row(label, value) {
 	return E('tr', { 'class': 'tr' }, [
-		E('th', { 'class': 'th' }, label),
+		E('th', { 'class': 'th', 'scope': 'row' }, label),
 		E('td', { 'class': 'td' }, value)
 	]);
 }
@@ -168,7 +181,8 @@ function moduleSimRows(status) {
 		row('固件版本', text(status.firmware)),
 		row('模块 IMEI', text(status.imei)),
 		row('SIM 状态', text(status.sim_state_name)),
-		row('SIM ICCID', text(status.iccid))
+		row('SIM ICCID', text(status.iccid)),
+		row('注册状态', registrationText(status))
 	];
 }
 
@@ -281,13 +295,17 @@ return view.extend({
 		return Promise.all([
 			uci.load('edgenode'),
 			uci.load('4ginfo'),
-			probe,
-			L.resolveDefault(fs.read(detailStatusPath), ''),
-			L.resolveDefault(fs.read(legacyStatusPath), '')
+			probe.then(function() {
+				return Promise.all([
+					L.resolveDefault(fs.read(detailStatusPath), ''),
+					L.resolveDefault(fs.read(legacyStatusPath), '')
+				]);
+			})
 		]).then(function(values) {
+			var files = values[2];
 			return {
-				status: mergeStatus(parseStatus(values[3]), parseStatus(values[4])),
-				hasStatus: values[3] !== '' || values[4] !== ''
+				status: mergeStatus(parseStatus(files[0]), parseStatus(files[1])),
+				hasStatus: files[0] !== '' || files[1] !== ''
 			};
 		});
 	},
@@ -295,30 +313,27 @@ return view.extend({
 	refreshStatus: function(container) {
 		var self = this;
 
-	return fs.exec('/usr/sbin/4ginfo-modemctl', [ 'probe' ]).then(function(result) {
+		return fs.exec('/usr/sbin/4ginfo-modemctl', [ 'probe' ]).then(function(result) {
 			notifyCommand(result, '必要 4G 信息已刷新', 'info');
 			return self.load();
 		}).then(function(data) {
-			dom.content(container, self.renderStatus(data));
+			dom.content(container, self.renderStatus(data, container));
 		}).catch(function(error) {
 			notifyCommand(error, error.message || '必要 4G 信息刷新失败', 'error');
 		});
 	},
 
-	renderStatus: function(data) {
+	renderStatus: function(data, container) {
 		var refresh = E('button', {
 			'class': 'cbi-button cbi-button-action',
 			'type': 'button'
 		}, '刷新 4G 信息');
-	var content = [
-		E('div', { 'class': 'cbi-section-descr' },
-			'这里只显示模块、SIM 和信号信息；不支持的厂商扩展不会阻塞上报。')
-		];
+		var content = [];
 		var self = this;
 
 		refresh.addEventListener('click', function() {
 			refresh.disabled = true;
-			self.refreshStatus(data.statusContainer).finally(function() {
+			self.refreshStatus(container).finally(function() {
 				refresh.disabled = false;
 			});
 		});
@@ -328,7 +343,7 @@ return view.extend({
 			content.push(E('div', { 'class': 'alert-message warning' },
 				'暂时无法读取 4G 状态，请检查 4ginfo 服务、AT 端口和权限。'));
 
-		content.push(section('模块与 SIM', moduleSimRows(data.status)));
+		content.push(section('模块、SIM 与网络', moduleSimRows(data.status)));
 		content.push(section('信号', signalRows(data.status)));
 
 		return content;
@@ -340,12 +355,10 @@ return view.extend({
 		var self = this;
 		var connectionMap = addConnectionMap();
 
-		data.statusContainer = statusContainer;
-		dom.content(statusContainer, this.renderStatus(data));
+		dom.content(statusContainer, this.renderStatus(data, statusContainer));
 		poll.add(function() {
 			return self.load().then(function(next) {
-				next.statusContainer = statusContainer;
-				dom.content(statusContainer, self.renderStatus(next));
+				dom.content(statusContainer, self.renderStatus(next, statusContainer));
 			});
 		}, 10);
 
